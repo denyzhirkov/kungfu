@@ -1399,3 +1399,52 @@ pub fn mcp() -> Result<()> {
     rt.block_on(kungfu_mcp::run_stdio_server(root))?;
     Ok(())
 }
+
+pub fn search_rationale(query: &str, budget: Budget, json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let results = service.search_rationale(query, budget)?;
+    let output = serde_json::to_string_pretty(&results)?;
+    service.track_call("search_rationale", output.len());
+
+    if json {
+        println!("{}", output);
+    } else {
+        if results.is_empty() {
+            println!("No rationale found for: {}", query);
+        } else {
+            println!("Rationale ({} results):", results.len());
+            println!();
+            for r in &results {
+                println!("  {:.2}  [{}] {}", r.relevance, r.kind, r.source);
+                println!("        {}", r.text);
+                println!();
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn change_timeline(name: &str, budget: Budget, json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let events = service.change_timeline(name, budget)?;
+    let output = serde_json::to_string_pretty(&events)?;
+    service.track_call("change_timeline", output.len());
+
+    if json {
+        println!("{}", output);
+    } else {
+        if events.is_empty() {
+            println!("No timeline events for: {}", name);
+        } else {
+            println!("Timeline for {} ({} events):", name, events.len());
+            println!();
+            for e in &events {
+                let date = e.date.as_deref().unwrap_or("—");
+                println!("  [{}] {} ({})", e.event_type, e.detail, date);
+            }
+        }
+    }
+    Ok(())
+}

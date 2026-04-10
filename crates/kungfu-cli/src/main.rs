@@ -245,6 +245,26 @@ enum Commands {
         top: usize,
     },
 
+    /// Search design rationale: TODOs, doc sections, ADR decisions
+    #[command(name = "search-rationale")]
+    SearchRationale {
+        /// Search query
+        query: String,
+
+        #[arg(long, default_value = "small")]
+        budget: String,
+    },
+
+    /// Show how a symbol or file evolved: churn, decisions, recent changes
+    #[command(name = "change-timeline")]
+    ChangeTimeline {
+        /// Symbol or file name
+        name: String,
+
+        #[arg(long, default_value = "small")]
+        budget: String,
+    },
+
     /// Show accumulated usage statistics
     Stats,
 
@@ -325,6 +345,12 @@ fn main() {
         Commands::SmartTest => commands::smart_test(json),
         Commands::Review => commands::review(json),
         Commands::Coupling { top } => commands::coupling(top, json),
+        Commands::SearchRationale { query, budget } => {
+            commands::search_rationale(&query, parse_budget(&budget), json)
+        }
+        Commands::ChangeTimeline { name, budget } => {
+            commands::change_timeline(&name, parse_budget(&budget), json)
+        }
         Commands::Stats => commands::stats(json),
         Commands::Watch => commands::watch(),
         Commands::Mcp => commands::mcp(),
