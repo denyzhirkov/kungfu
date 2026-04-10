@@ -891,6 +891,23 @@ impl KungfuService {
             self.fill_snippets(&mut packet, snippet_lines, &keywords);
         }
 
+        // 8. Collect rationale from memory layer
+        let memories = store.load_memories().unwrap_or_default();
+        if !memories.is_empty() {
+            let rationale = kungfu_memory::matcher::match_memories(task, &memories, budget);
+            // Build evidence fragments from matched rationale
+            let evidence: Vec<kungfu_types::context::EvidenceFragment> = rationale
+                .iter()
+                .filter(|r| !r.text.is_empty())
+                .map(|r| kungfu_types::context::EvidenceFragment {
+                    source: r.source.clone(),
+                    excerpt: truncate_text(&r.text, 200),
+                })
+                .collect();
+            packet.rationale = rationale;
+            packet.evidence = evidence;
+        }
+
         Ok(packet)
     }
 
@@ -1529,6 +1546,99 @@ impl KungfuService {
         }))
     }
 
+    pub fn search_rationale(&self, query: &str, budget: Budget) -> Result<Vec<kungfu_types::context::RationaleItem>> {
+        let budget = self.resolve_budget(budget);
+        let memories = self.store().load_memories()?;
+        Ok(kungfu_memory::matcher::match_memories(query, &memories, budget))
+    }
+
+    pub fn change_timeline(&self, target: &str, budget: Budget) -> Result<Vec<kungfu_types::context::HistoryEvent>> {
+        let budget = self.resolve_budget(budget);
+        let mut events = Vec::new();
+
+        // Find the file for this target (symbol name or file path)
+        let search = self.search();
+        let file_path = if let Some(sym) = search.get_symbol(target)? {
+            sym.path.clone()
+        } else {
+            // Try as a file path
+            let files = self.store().load_files()?;
+            match files.iter().find(|f| f.path.contains(target)) {
+                Some(f) => f.path.clone(),
+                None => return Ok(events),
+            }
+        };
+
+        if !kungfu_git::is_git_repo(&self.project.root) {
+            return Ok(events);
+        }
+
+        // Git log
+        let max_entries = match budget {
+            Budget::Tiny => 3,
+            Budget::Small => 5,
+            Budget::Medium => 10,
+            _ => 20,
+        };
+        let log = kungfu_git::file_log(&self.project.root, &file_path, max_entries)
+            .unwrap_or_default();
+
+        if let Some(first) = log.last() {
+            events.push(kungfu_types::context::HistoryEvent {
+                event_type: "introduced".to_string(),
+                target: target.to_string(),
+                detail: format!("First appeared: {} by {}", first.message, first.author),
+                date: Some(first.date.clone()),
+            });
+        }
+
+        // Churn analysis
+        let churn = kungfu_git::file_commit_counts(&self.project.root)
+            .unwrap_or_default();
+        if let Some(count) = churn.iter().find(|(p, _)| p.contains(&file_path)).map(|(_, c)| *c) {
+            let avg = if churn.is_empty() { 1 } else {
+                churn.iter().map(|(_, c)| *c).sum::<usize>() / churn.len()
+            };
+            if count > avg * 2 {
+                events.push(kungfu_types::context::HistoryEvent {
+                    event_type: "high_churn".to_string(),
+                    target: file_path.clone(),
+                    detail: format!("{} commits (project avg: {})", count, avg),
+                    date: None,
+                });
+            }
+        }
+
+        // Recent changes
+        for entry in log.iter().take(3) {
+            events.push(kungfu_types::context::HistoryEvent {
+                event_type: "recent_change".to_string(),
+                target: target.to_string(),
+                detail: format!("{}: {}", entry.author, entry.message),
+                date: Some(entry.date.clone()),
+            });
+        }
+
+        // Decision references from memory
+        let memories = self.store().load_memories().unwrap_or_default();
+        for mem in &memories {
+            if mem.kind == kungfu_types::memory::MemoryKind::Decision {
+                let related = mem.path == file_path
+                    || mem.anchors.iter().any(|a| target.to_lowercase().contains(a));
+                if related {
+                    events.push(kungfu_types::context::HistoryEvent {
+                        event_type: "decision_ref".to_string(),
+                        target: mem.path.clone(),
+                        detail: mem.text.chars().take(200).collect(),
+                        date: None,
+                    });
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
     pub fn diff_context(&self, budget: Budget) -> Result<ContextPacket> {
         let budget = self.resolve_budget(budget);
         if !kungfu_git::is_git_repo(&self.project.root) {
@@ -1543,6 +1653,9 @@ impl KungfuService {
                 intent: None,
                 items: Vec::new(),
                 changed_files: Vec::new(),
+                rationale: Vec::new(),
+                history: Vec::new(),
+                evidence: Vec::new(),
             });
         }
 
@@ -2295,6 +2408,14 @@ fn detect_primary_language(files: &[FileEntry]) -> Option<String> {
         .into_iter()
         .max_by_key(|(_, count)| *count)
         .map(|(lang, _)| lang)
+}
+
+fn truncate_text(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        text.to_string()
+    } else {
+        format!("{}...", &text[..max_len])
+    }
 }
 
 fn is_code_language(lang: &str) -> bool {

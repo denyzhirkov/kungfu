@@ -3,6 +3,7 @@ use kungfu_types::file::FileEntry;
 use kungfu_types::symbol::Symbol;
 use kungfu_types::relation::Relation;
 use kungfu_types::chunk::Chunk;
+use kungfu_types::memory::MemoryEntry;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,6 +16,7 @@ pub struct JsonStore {
     symbols_cache: RefCell<Option<Vec<Symbol>>>,
     relations_cache: RefCell<Option<Vec<Relation>>>,
     fingerprints_cache: RefCell<Option<HashMap<String, String>>>,
+    memories_cache: RefCell<Option<Vec<MemoryEntry>>>,
 }
 
 impl JsonStore {
@@ -25,6 +27,7 @@ impl JsonStore {
             symbols_cache: RefCell::new(None),
             relations_cache: RefCell::new(None),
             fingerprints_cache: RefCell::new(None),
+            memories_cache: RefCell::new(None),
         }
     }
 
@@ -34,6 +37,7 @@ impl JsonStore {
         *self.symbols_cache.borrow_mut() = None;
         *self.relations_cache.borrow_mut() = None;
         *self.fingerprints_cache.borrow_mut() = None;
+        *self.memories_cache.borrow_mut() = None;
     }
 
     pub fn save_files(&self, files: &[FileEntry]) -> Result<()> {
@@ -140,5 +144,28 @@ impl JsonStore {
         let fp: HashMap<String, String> = serde_json::from_str(&content)?;
         *self.fingerprints_cache.borrow_mut() = Some(fp.clone());
         Ok(fp)
+    }
+
+    pub fn save_memories(&self, memories: &[MemoryEntry]) -> Result<()> {
+        let path = self.base_dir.join("memories.json");
+        let json = serde_json::to_string(memories)?;
+        std::fs::write(&path, json)?;
+        debug!("saved {} memories to index", memories.len());
+        *self.memories_cache.borrow_mut() = Some(memories.to_vec());
+        Ok(())
+    }
+
+    pub fn load_memories(&self) -> Result<Vec<MemoryEntry>> {
+        if let Some(cached) = self.memories_cache.borrow().as_ref() {
+            return Ok(cached.clone());
+        }
+        let path = self.base_dir.join("memories.json");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let memories: Vec<MemoryEntry> = serde_json::from_str(&content)?;
+        *self.memories_cache.borrow_mut() = Some(memories.clone());
+        Ok(memories)
     }
 }

@@ -265,6 +265,18 @@ pub struct CouplingParam {
     pub top: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AskContextParam {
+    /// Search query or task description
+    pub query: String,
+    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "auto"
+    pub budget: Option<String>,
+    /// Limit results to files under this directory path prefix (e.g. "src/", "crates/kungfu-core")
+    pub scope: Option<String>,
+    /// Context layers to include: "code" (default), "rationale", "history". Example: ["code", "rationale"]
+    pub include: Option<Vec<String>>,
+}
+
 fn parse_budget(s: Option<&str>) -> Budget {
     s.and_then(|s| s.parse().ok()).unwrap_or(Budget::Auto)
 }
@@ -540,18 +552,39 @@ impl KungfuMcp {
         })
     }
 
-    #[tool(description = "Smart context retrieval: parse task intent, run multi-strategy search (symbols, text, related files, import chains), return ranked context packet")]
+    #[tool(description = "Smart context retrieval: parse task intent, run multi-strategy search (symbols, text, related files, import chains), return ranked context packet. Use 'include' to select layers: code (default), rationale (design decisions, TODOs), history (evolution timeline)")]
     fn ask_context(
         &self,
-        Parameters(params): Parameters<QueryParam>,
+        Parameters(params): Parameters<AskContextParam>,
     ) -> Result<String, String> {
         let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
         let query = params.query.clone();
         let scope = params.scope.clone();
+        let include = params.include.clone();
         self.cached_scoped("ask_context", &query, &budget_str, scope.as_deref(), || {
             let budget = parse_budget(Some(&budget_str));
             let service = self.service()?;
-            let packet = service.ask_context(&query, budget).map_err(|e| e.to_string())?;
+            let mut packet = service.ask_context(&query, budget).map_err(|e| e.to_string())?;
+
+            // Apply layer filtering if include is specified
+            if let Some(ref layers) = include {
+                let want_rationale = layers.iter().any(|l| l == "rationale");
+                let want_history = layers.iter().any(|l| l == "history");
+
+                if !want_rationale {
+                    packet.rationale.clear();
+                    packet.evidence.clear();
+                }
+                if want_history {
+                    // Collect history for top matched items
+                    if let Some(top) = packet.items.first() {
+                        let events = service.change_timeline(&top.name, budget)
+                            .unwrap_or_default();
+                        packet.history = events;
+                    }
+                }
+            }
+
             serde_json::to_string_pretty(&packet).map_err(|e| e.to_string())
         })
     }
@@ -704,6 +737,36 @@ impl KungfuMcp {
         self.cached("symbol_history", &name, "", || {
             let service = self.service()?;
             let result = service.symbol_history(&name).map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        })
+    }
+
+    #[tool(description = "Search design rationale: find relevant TODO/FIXME/NOTE comments, doc sections, and ADR decisions matching a query")]
+    fn search_rationale(
+        &self,
+        Parameters(params): Parameters<QueryParam>,
+    ) -> Result<String, String> {
+        let query = params.query.clone();
+        let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
+        self.cached("search_rationale", &query, &budget_str, || {
+            let budget = parse_budget(Some(&budget_str));
+            let service = self.service()?;
+            let result = service.search_rationale(&query, budget).map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        })
+    }
+
+    #[tool(description = "Change timeline: show how a symbol or file evolved — when introduced, churn rate, linked decisions, recent changes")]
+    fn change_timeline(
+        &self,
+        Parameters(params): Parameters<SymbolNameParam>,
+    ) -> Result<String, String> {
+        let name = params.name.clone();
+        let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
+        self.cached("change_timeline", &name, &budget_str, || {
+            let budget = parse_budget(Some(&budget_str));
+            let service = self.service()?;
+            let result = service.change_timeline(&name, budget).map_err(|e| e.to_string())?;
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         })
     }

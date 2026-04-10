@@ -23,9 +23,219 @@ pub struct RawImport {
     pub line: usize,
 }
 
+/// Classification of a source code comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentKind {
+    Todo,
+    Fixme,
+    Note,
+    Hack,
+    Doc,
+    Regular,
+}
+
+/// A comment extracted from source code.
+#[derive(Debug, Clone)]
+pub struct RawComment {
+    pub text: String,
+    pub line: usize,
+    pub end_line: usize,
+    pub kind: CommentKind,
+    /// ID of the symbol this comment is attached to (directly precedes).
+    pub attached_symbol_id: Option<String>,
+}
+
 pub struct ParseResult {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<RawImport>,
+    pub comments: Vec<RawComment>,
+}
+
+/// Classify a comment's text into a CommentKind.
+fn classify_comment(text: &str) -> CommentKind {
+    let trimmed = text.trim_start_matches('/').trim_start_matches('*').trim();
+    let upper = trimmed.to_uppercase();
+    if upper.starts_with("TODO") {
+        CommentKind::Todo
+    } else if upper.starts_with("FIXME") {
+        CommentKind::Fixme
+    } else if upper.starts_with("NOTE") {
+        CommentKind::Note
+    } else if upper.starts_with("HACK") || upper.starts_with("XXX") {
+        CommentKind::Hack
+    } else {
+        CommentKind::Regular
+    }
+}
+
+/// Check if a tree-sitter node is a doc comment based on language conventions.
+fn is_doc_comment(text: &str, language: Language) -> bool {
+    match language {
+        Language::Rust => text.starts_with("///") || text.starts_with("//!") || text.starts_with("/**"),
+        Language::Java | Language::CSharp | Language::Kotlin | Language::Cpp
+            => text.starts_with("/**"),
+        Language::TypeScript | Language::JavaScript
+            => text.starts_with("/**"),
+        Language::Python => text.starts_with("\"\"\"") || text.starts_with("'''"),
+        _ => false,
+    }
+}
+
+/// Comment node types per language grammar.
+fn comment_node_types(language: Language) -> &'static [&'static str] {
+    match language {
+        Language::Rust => &["line_comment", "block_comment"],
+        Language::TypeScript | Language::JavaScript => &["comment"],
+        Language::Python => &["comment"],
+        Language::Go => &["comment"],
+        Language::Java => &["line_comment", "block_comment"],
+        Language::CSharp => &["comment"],
+        Language::Kotlin => &["line_comment", "multiline_comment"],
+        Language::C | Language::Cpp => &["comment"],
+        _ => &[],
+    }
+}
+
+/// Extract all comments from a tree-sitter AST.
+fn extract_comments(
+    root: tree_sitter::Node,
+    source: &str,
+    language: Language,
+    symbols: &[Symbol],
+) -> Vec<RawComment> {
+    let node_types = comment_node_types(language);
+    if node_types.is_empty() {
+        return Vec::new();
+    }
+
+    let mut comments = Vec::new();
+    let mut cursor = root.walk();
+    let mut stack = vec![root];
+
+    while let Some(node) = stack.pop() {
+        if node_types.contains(&node.kind()) {
+            let text = node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+            if text.trim().is_empty() {
+                continue;
+            }
+
+            let line = node.start_position().row + 1;
+            let end_line = node.end_position().row + 1;
+
+            let kind = if is_doc_comment(&text, language) {
+                CommentKind::Doc
+            } else {
+                classify_comment(&text)
+            };
+
+            // Only keep actionable comments (skip Regular)
+            if kind == CommentKind::Regular {
+                continue;
+            }
+
+            // Find symbol attached to this comment (next sibling or first symbol starting right after)
+            let attached_symbol_id = symbols
+                .iter()
+                .find(|s| s.span.start_line == end_line + 1 || s.span.start_line == end_line)
+                .map(|s| s.id.clone());
+
+            comments.push(RawComment {
+                text: clean_comment_text(&text),
+                line,
+                end_line,
+                kind,
+                attached_symbol_id,
+            });
+        }
+
+        // Push children in reverse order for DFS
+        cursor.reset(node);
+        if cursor.goto_first_child() {
+            let mut children = Vec::new();
+            loop {
+                children.push(cursor.node());
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+            for child in children.into_iter().rev() {
+                stack.push(child);
+            }
+        }
+    }
+
+    comments
+}
+
+/// Strip comment delimiters and normalize whitespace.
+fn clean_comment_text(text: &str) -> String {
+    let text = text.trim();
+    // Handle multi-line block comments
+    if text.starts_with("/**") || text.starts_with("/*") {
+        let inner = text
+            .trim_start_matches("/**")
+            .trim_start_matches("/*")
+            .trim_end_matches("*/")
+            .trim();
+        return inner
+            .lines()
+            .map(|l| l.trim().trim_start_matches('*').trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    // Handle line comments
+    if text.starts_with("///") || text.starts_with("//!") {
+        return text.trim_start_matches('/').trim_start_matches('!').trim().to_string();
+    }
+    if text.starts_with("//") {
+        return text.trim_start_matches('/').trim().to_string();
+    }
+    // Python docstrings
+    if text.starts_with("\"\"\"") || text.starts_with("'''") {
+        return text
+            .trim_start_matches('"')
+            .trim_start_matches('\'')
+            .trim_end_matches('"')
+            .trim_end_matches('\'')
+            .trim()
+            .to_string();
+    }
+    text.to_string()
+}
+
+/// Fill `doc_summary` on symbols from their attached Doc comments.
+fn fill_doc_summaries(symbols: &mut [Symbol], comments: &[RawComment]) {
+    for comment in comments {
+        if comment.kind != CommentKind::Doc {
+            continue;
+        }
+        if let Some(ref sym_id) = comment.attached_symbol_id {
+            if let Some(sym) = symbols.iter_mut().find(|s| s.id == *sym_id) {
+                if sym.doc_summary.is_none() {
+                    sym.doc_summary = Some(first_sentence(&comment.text, 120));
+                }
+            }
+        }
+    }
+}
+
+/// Extract the first sentence from text, truncated to max_len.
+fn first_sentence(text: &str, max_len: usize) -> String {
+    // Take first line or up to first period
+    let first = text.lines().next().unwrap_or(text).trim();
+    let sentence = if let Some(dot) = first.find(". ") {
+        &first[..=dot]
+    } else if first.ends_with('.') {
+        first
+    } else {
+        first
+    };
+    if sentence.len() <= max_len {
+        sentence.to_string()
+    } else {
+        format!("{}...", &sentence[..max_len])
+    }
 }
 
 pub struct Parser {
@@ -79,7 +289,7 @@ impl Parser {
 
         let root = tree.root_node();
 
-        let (symbols, imports) = match language {
+        let (mut symbols, imports) = match language {
             Language::Rust => (
                 rust_parser::extract(root, source, file_id, file_path),
                 rust_parser::extract_imports(root, source),
@@ -119,7 +329,12 @@ impl Parser {
             _ => (Vec::new(), Vec::new()),
         };
 
-        Ok(ParseResult { symbols, imports })
+        let comments = extract_comments(root, source, language, &symbols);
+
+        // Fill doc_summary on symbols from attached Doc comments
+        fill_doc_summaries(&mut symbols, &comments);
+
+        Ok(ParseResult { symbols, imports, comments })
     }
 }
 

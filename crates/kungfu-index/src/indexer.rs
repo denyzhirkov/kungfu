@@ -1,9 +1,10 @@
 use anyhow::Result;
 use chrono::Utc;
 use kungfu_config::KungfuConfig;
-use kungfu_parse::{Parser, RawImport};
+use kungfu_parse::{CommentKind, Parser, RawComment, RawImport};
 use kungfu_storage::JsonStore;
 use kungfu_types::file::{FileEntry, Language};
+use kungfu_types::memory::{MemoryEntry, MemoryKind};
 use kungfu_types::relation::{Relation, RelationKind};
 use kungfu_types::symbol::Symbol;
 use std::collections::HashMap;
@@ -45,13 +46,17 @@ impl<'a> Indexer<'a> {
         let mut fingerprints = HashMap::new();
         let mut all_symbols = Vec::new();
         let mut all_imports: Vec<(String, Vec<RawImport>)> = Vec::new();
+        let mut all_comments: Vec<(String, Vec<RawComment>)> = Vec::new();
 
         for path in &paths {
             match self.index_file(path) {
-                Ok((entry, symbols, imports)) => {
+                Ok((entry, symbols, imports, comments)) => {
                     fingerprints.insert(entry.path.clone(), entry.hash.clone());
                     if !imports.is_empty() {
                         all_imports.push((entry.path.clone(), imports));
+                    }
+                    if !comments.is_empty() {
+                        all_comments.push((entry.path.clone(), comments));
                     }
                     all_symbols.extend(symbols);
                     files.push(entry);
@@ -63,6 +68,9 @@ impl<'a> Indexer<'a> {
         }
 
         let relations = Self::build_relations(&files, &all_imports);
+        let mut memories = Self::build_memories(&all_comments);
+        let doc_memories = self.scan_docs();
+        memories.extend(doc_memories);
 
         let stats = IndexStats {
             total_files: files.len(),
@@ -76,10 +84,11 @@ impl<'a> Indexer<'a> {
         self.store.save_symbols(&all_symbols)?;
         self.store.save_relations(&relations)?;
         self.store.save_fingerprints(&fingerprints)?;
+        self.store.save_memories(&memories)?;
 
         info!(
-            "indexed {} files, {} symbols, {} relations",
-            stats.total_files, stats.symbols_extracted, relations.len()
+            "indexed {} files, {} symbols, {} relations, {} memories",
+            stats.total_files, stats.symbols_extracted, relations.len(), memories.len()
         );
         Ok(stats)
     }
@@ -95,6 +104,7 @@ impl<'a> Indexer<'a> {
         let mut new_files = Vec::new();
         let mut new_symbols = Vec::new();
         let mut all_imports: Vec<(String, Vec<RawImport>)> = Vec::new();
+        let mut all_comments: Vec<(String, Vec<RawComment>)> = Vec::new();
 
         let mut stats = IndexStats {
             total_files: 0,
@@ -148,10 +158,13 @@ impl<'a> Indexer<'a> {
             }
 
             match self.index_file_with_content(path, content) {
-                Ok((entry, symbols, imports)) => {
+                Ok((entry, symbols, imports, comments)) => {
                     new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
                     if !imports.is_empty() {
                         all_imports.push((entry.path.clone(), imports));
+                    }
+                    if !comments.is_empty() {
+                        all_comments.push((entry.path.clone(), comments));
                     }
                     new_symbols.extend(symbols);
                     new_files.push(entry);
@@ -173,11 +186,13 @@ impl<'a> Indexer<'a> {
         stats.symbols_extracted = new_symbols.len();
 
         let relations = Self::build_relations(&new_files, &all_imports);
+        let memories = Self::build_memories(&all_comments);
 
         self.store.save_files(&new_files)?;
         self.store.save_symbols(&new_symbols)?;
         self.store.save_relations(&relations)?;
         self.store.save_fingerprints(&new_fingerprints)?;
+        self.store.save_memories(&memories)?;
 
         info!(
             "incremental index: {} total, {} new, {} changed, {} removed, {} symbols, {} relations",
@@ -227,6 +242,8 @@ impl<'a> Indexer<'a> {
             }
         }
 
+        let mut all_comments: Vec<(String, Vec<RawComment>)> = Vec::new();
+
         // Re-index changed files
         for rel_path in changed_paths {
             let abs_path = self.root.join(rel_path);
@@ -243,11 +260,14 @@ impl<'a> Indexer<'a> {
             }
 
             match self.index_file(&abs_path) {
-                Ok((entry, symbols, imports)) => {
+                Ok((entry, symbols, imports, comments)) => {
                     new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
                     stats.symbols_extracted += symbols.len();
                     if !imports.is_empty() {
                         all_imports.push((entry.path.clone(), imports));
+                    }
+                    if !comments.is_empty() {
+                        all_comments.push((entry.path.clone(), comments));
                     }
                     new_symbols.extend(symbols);
                     new_files.push(entry);
@@ -273,10 +293,19 @@ impl<'a> Indexer<'a> {
         let new_relations = Self::build_relations(&new_files, &all_imports);
         relations.extend(new_relations);
 
+        // Merge memories: keep old for unchanged, add new for changed
+        let old_memories = self.store.load_memories().unwrap_or_default();
+        let mut memories: Vec<MemoryEntry> = old_memories
+            .into_iter()
+            .filter(|m| !changed_set.contains(m.path.as_str()))
+            .collect();
+        memories.extend(Self::build_memories(&all_comments));
+
         self.store.save_files(&new_files)?;
         self.store.save_symbols(&new_symbols)?;
         self.store.save_relations(&relations)?;
         self.store.save_fingerprints(&new_fingerprints)?;
+        self.store.save_memories(&memories)?;
 
         info!(
             "changed-only index: {} changed, {} new, {} removed",
@@ -285,12 +314,12 @@ impl<'a> Indexer<'a> {
         Ok(stats)
     }
 
-    fn index_file(&mut self, path: &Path) -> Result<(FileEntry, Vec<Symbol>, Vec<RawImport>)> {
+    fn index_file(&mut self, path: &Path) -> Result<(FileEntry, Vec<Symbol>, Vec<RawImport>, Vec<RawComment>)> {
         let content = std::fs::read(path)?;
         self.index_file_with_content(path, content)
     }
 
-    fn index_file_with_content(&mut self, path: &Path, content: Vec<u8>) -> Result<(FileEntry, Vec<Symbol>, Vec<RawImport>)> {
+    fn index_file_with_content(&mut self, path: &Path, content: Vec<u8>) -> Result<(FileEntry, Vec<Symbol>, Vec<RawImport>, Vec<RawComment>)> {
         let hash = blake3::hash(&content).to_hex().to_string();
 
         let rel_path = path
@@ -320,28 +349,29 @@ impl<'a> Indexer<'a> {
             tags: Vec::new(),
         };
 
-        let (symbols, imports) = if language.is_code() {
+        let (symbols, imports, comments) = if language.is_code() {
             let content_str = String::from_utf8_lossy(&content);
             match self.parser.parse(&content_str, language, &file_id, &rel_path) {
                 Ok(result) => {
                     debug!(
-                        "extracted {} symbols, {} imports from {}",
+                        "extracted {} symbols, {} imports, {} comments from {}",
                         result.symbols.len(),
                         result.imports.len(),
+                        result.comments.len(),
                         rel_path
                     );
-                    (result.symbols, result.imports)
+                    (result.symbols, result.imports, result.comments)
                 }
                 Err(e) => {
                     debug!("parsing failed for {}: {}", rel_path, e);
-                    (Vec::new(), Vec::new())
+                    (Vec::new(), Vec::new(), Vec::new())
                 }
             }
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
 
-        Ok((entry, symbols, imports))
+        Ok((entry, symbols, imports, comments))
     }
 
     /// Resolve collected imports into Relations.
@@ -439,6 +469,116 @@ impl<'a> Indexer<'a> {
         });
 
         relations
+    }
+
+    /// Scan markdown documentation files and parse them into memories.
+    fn scan_docs(&self) -> Vec<MemoryEntry> {
+        let mut memories = Vec::new();
+        let doc_dirs = ["docs", "doc", "adr", "decisions"];
+
+        // Scan known doc directories
+        for dir_name in &doc_dirs {
+            let dir_path = self.root.join(dir_name);
+            if dir_path.is_dir() {
+                self.scan_md_dir(&dir_path, &mut memories);
+            }
+        }
+
+        // Also scan root-level .md files (README, ARCHITECTURE, etc.)
+        if let Ok(entries) = std::fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if ext.eq_ignore_ascii_case("md") {
+                            self.parse_md_file(&path, &mut memories);
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!("scanned {} doc memories", memories.len());
+        memories
+    }
+
+    fn scan_md_dir(&self, dir: &Path, memories: &mut Vec<MemoryEntry>) {
+        let walker = walkdir::WalkDir::new(dir).max_depth(3);
+        for entry in walker.into_iter().flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if ext.eq_ignore_ascii_case("md") {
+                        self.parse_md_file(path, memories);
+                    }
+                }
+            }
+        }
+    }
+
+    fn parse_md_file(&self, path: &Path, memories: &mut Vec<MemoryEntry>) {
+        let rel_path = path
+            .strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                let doc_mems = kungfu_memory::doc_parser::parse_doc(&rel_path, &content);
+                debug!("parsed {} memories from {}", doc_mems.len(), rel_path);
+                memories.extend(doc_mems);
+            }
+            Err(e) => {
+                debug!("failed to read doc {}: {}", rel_path, e);
+            }
+        }
+    }
+
+    /// Convert extracted comments into MemoryEntry items.
+    fn build_memories(all_comments: &[(String, Vec<RawComment>)]) -> Vec<MemoryEntry> {
+        let mut memories = Vec::new();
+        for (path, comments) in all_comments {
+            for comment in comments {
+                let kind = match comment.kind {
+                    CommentKind::Todo => MemoryKind::Todo,
+                    CommentKind::Fixme => MemoryKind::Fixme,
+                    CommentKind::Note => MemoryKind::Note,
+                    CommentKind::Hack => MemoryKind::Note,
+                    CommentKind::Doc => MemoryKind::Rationale,
+                    CommentKind::Regular => continue,
+                };
+
+                let weight = match comment.kind {
+                    CommentKind::Fixme => 0.9,
+                    CommentKind::Todo => 0.8,
+                    CommentKind::Note => 0.7,
+                    CommentKind::Doc => 0.6,
+                    CommentKind::Hack => 0.7,
+                    CommentKind::Regular => 0.3,
+                };
+
+                let anchors = extract_anchors(&comment.text);
+
+                let id = format!(
+                    "mem:{}:{}",
+                    path.replace('/', ":"),
+                    comment.line
+                );
+
+                memories.push(MemoryEntry {
+                    id,
+                    path: path.clone(),
+                    kind,
+                    text: comment.text.clone(),
+                    anchors,
+                    weight,
+                    symbol_id: comment.attached_symbol_id.clone(),
+                    line_range: Some((comment.line, comment.end_line)),
+                });
+            }
+        }
+        memories
     }
 
     /// Detect test files and create TestFor relations to their source files.
@@ -875,6 +1015,29 @@ fn dirs_share_parent(a: &str, b: &str) -> bool {
         (Some(pa), Some(pb)) => !pa.as_os_str().is_empty() && pa == pb,
         _ => false,
     }
+}
+
+/// Extract keyword anchors from comment text for matching.
+fn extract_anchors(text: &str) -> Vec<String> {
+    static STOP_WORDS: &[&str] = &[
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "shall",
+        "should", "may", "might", "must", "can", "could", "this", "that",
+        "these", "those", "it", "its", "of", "in", "to", "for", "with",
+        "on", "at", "by", "from", "as", "into", "about", "not", "no",
+        "but", "or", "and", "if", "then", "else", "when", "while",
+        "todo", "fixme", "note", "hack", "xxx", "bug",
+    ];
+
+    let mut anchors: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| w.len() >= 3)
+        .map(|w| w.to_lowercase())
+        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+        .collect();
+    anchors.sort();
+    anchors.dedup();
+    anchors
 }
 
 /// Normalize a file path: resolve `.` and `..` components.

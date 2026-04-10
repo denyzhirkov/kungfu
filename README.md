@@ -155,7 +155,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 }
 ```
 
-### 26 MCP tools
+### 28 MCP tools
 
 | Tool | Description |
 |------|-------------|
@@ -171,7 +171,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `find_related_symbols` | Related symbols in same file |
 | `get_minimal_context` | Smallest high-confidence context set |
 | `build_task_context` | Ranked context packet for a task |
-| `ask_context` | Smart retrieval: intent detection + multi-strategy search |
+| `ask_context` | Smart retrieval: intent + multi-strategy search + rationale + evidence |
 | `diff_context` | Context focused on git changes |
 | `explore_symbol` | Composite: find + detail + related + snippet in one call |
 | `explore_file` | Composite: outline + related files + key symbols |
@@ -180,6 +180,8 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `callees` | Call graph: what does this symbol call? |
 | `file_history` | Git log for a file: recent commits |
 | `symbol_history` | Git blame + commits for a symbol |
+| `search_rationale` | Search design decisions, TODOs, doc sections by query |
+| `change_timeline` | How code evolved: introduced, churn, decisions, recent changes |
 | `onboard` | Project summary: architecture, patterns, key symbols, naming |
 | `affected` | Blast radius: transitive callers/dependents of a symbol |
 | `smart_test` | Minimal test set based on git diff |
@@ -205,6 +207,9 @@ Add to `CLAUDE.md` or system prompt of your project:
 - Use `investigate` for complex tasks — combines ask_context + diff awareness.
 - Use `affected` before refactoring to check blast radius.
 - Use `smart_test` to find which tests to run after changes.
+- Use `search_rationale` to find design decisions, TODOs, and doc context for a topic.
+- Use `change_timeline` to understand how a symbol or file evolved over time.
+- Use `ask_context` with `include: ["code", "rationale"]` to get both code and design context.
 - Only read full files when the above tools confirm you need them.
 - Prefer tiny/small budget. Escalate to medium/full only when needed.
 ```
@@ -279,11 +284,25 @@ Read("src/auth/controller.ts") → 400 lines, 1600 tokens
         "score": 0.50,
         "snippet": "export class AuthService {\n  async login(dto: LoginDto) { ... }\n  async validateToken(token: string) { ... }\n  ..."
       }
+    ],
+    "rationale": [
+      {
+        "source": "docs/adr/001-auth-jwt.md",
+        "kind": "decision",
+        "text": "We chose JWT for stateless session management to avoid server-side session storage",
+        "relevance": 0.72
+      }
+    ],
+    "evidence": [
+      {
+        "source": "docs/adr/001-auth-jwt.md",
+        "excerpt": "We chose JWT for stateless session management..."
+      }
     ]
   }
 ```
 
-Agent immediately knows where to look. Then reads only the relevant file.
+Agent immediately knows where to look *and why it was designed that way*. Then reads only the relevant file.
 
 ### Token savings (open-source projects)
 
@@ -306,6 +325,8 @@ Agent immediately knows where to look. Then reads only the relevant file.
 - Extracts imports from AST and resolves them to actual files in the project
 - Builds relations: `imports`, `test_for`, `config_for`, `calls`
 - Extracts function call graph from AST (callers/callees)
+- Extracts structured comments (TODO, FIXME, NOTE, doc comments) and populates `doc_summary` on symbols
+- Parses markdown documentation and ADR files into searchable memory entries
 - Incremental re-indexing via blake3 file fingerprints
 
 ### Search & ranking
@@ -322,6 +343,18 @@ Agent immediately knows where to look. Then reads only the relevant file.
 - Language importance weighting (primary language prioritized)
 - Budget-controlled output with code snippets
 
+### Memory & rationale layer
+
+Kungfu answers not only *"where is this?"* but also *"why is it like this?"*:
+
+- **Comment extraction** — TODO, FIXME, NOTE, and doc comments are extracted from tree-sitter ASTs during indexing
+- **Doc & ADR parsing** — markdown files in `docs/`, `adr/`, `decisions/` are parsed into searchable memory entries; ADR "Decision" sections get higher ranking weight
+- **Rationale in context** — `ask_context` returns a `rationale[]` field with matched design decisions, doc excerpts, and annotated comments alongside code items
+- **Evidence fragments** — verbatim excerpts from source docs/comments are attached as `evidence[]` for agent trust and traceability
+- **Layered context** — use `include: ["code", "rationale", "history"]` to control what layers are returned
+- **Change timeline** — `change_timeline` shows how code evolved: when introduced, churn rate, linked decisions, recent changes
+- **Doc summaries** — `doc_summary` on symbols is auto-populated from preceding doc comments (first sentence, up to 120 chars)
+
 ### Storage
 ```
 .kungfu/
@@ -332,6 +365,7 @@ Agent immediately knows where to look. Then reads only the relevant file.
     symbols.json       # extracted symbols with spans
     relations.json     # import/test/config relations
     fingerprints.json  # blake3 hashes for incremental rebuilds
+    memories.json      # rationale: comments, doc sections, ADR decisions
 ```
 
 ## Configuration

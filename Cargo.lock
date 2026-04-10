@@ -678,6 +678,7 @@ dependencies = [
  "kungfu-config",
  "kungfu-git",
  "kungfu-index",
+ "kungfu-memory",
  "kungfu-project",
  "kungfu-rank",
  "kungfu-search",
@@ -705,6 +706,7 @@ dependencies = [
  "chrono",
  "ignore",
  "kungfu-config",
+ "kungfu-memory",
  "kungfu-parse",
  "kungfu-storage",
  "kungfu-types",
@@ -712,6 +714,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "walkdir",
 ]
 
 [[package]]
@@ -726,6 +729,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "kungfu-memory"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "kungfu-types",
  "tracing",
 ]
 

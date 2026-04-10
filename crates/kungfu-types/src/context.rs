@@ -32,6 +32,15 @@ pub struct ContextPacket {
     /// Files with uncommitted changes (populated by ask_context when git is available)
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub changed_files: Vec<String>,
+    /// Design rationale and decision context matched to the query
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub rationale: Vec<RationaleItem>,
+    /// Timeline events showing how matched code evolved
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub history: Vec<HistoryEvent>,
+    /// Verbatim excerpts from docs, comments, or commits as proof
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub evidence: Vec<EvidenceFragment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,4 +63,27 @@ pub enum ContextItemType {
     Chunk,
     Config,
     Test,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RationaleItem {
+    pub source: String,
+    pub kind: String,
+    pub text: String,
+    pub relevance: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEvent {
+    pub event_type: String,
+    pub target: String,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceFragment {
+    pub source: String,
+    pub excerpt: String,
 }

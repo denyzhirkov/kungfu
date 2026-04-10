@@ -15,4 +15,6 @@ kungfu-types = { workspace = true }
 kungfu-config = { workspace = true }
 kungfu-storage = { workspace = true }
 kungfu-parse = { workspace = true }
+kungfu-memory = { workspace = true }
+walkdir = "2"
 notify = { workspace = true }

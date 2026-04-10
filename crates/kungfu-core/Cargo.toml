@@ -16,3 +16,4 @@ kungfu-storage = { workspace = true }
 kungfu-search = { workspace = true }
 kungfu-rank = { workspace = true }
 kungfu-git = { workspace = true }
+kungfu-memory = { workspace = true }
