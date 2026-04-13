@@ -1,8 +1,12 @@
 use anyhow::Result;
 use kungfu_core::KungfuService;
+use kungfu_memory::project_search::MemoryFilter;
 use kungfu_project::{find_project_root, init_project, KUNGFU_VERSION};
+use kungfu_types::memory::ProjectMemoryKind;
 use kungfu_types::Budget;
 use std::env;
+
+use crate::MemoryCommands;
 
 pub fn init(json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
@@ -645,10 +649,11 @@ pub fn hotspots(top: usize, churn: bool, files: bool, json: bool) -> Result<()> 
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max - 1])
+        let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{}…", truncated)
     }
 }
 
@@ -894,67 +899,6 @@ pub fn search_text(query: &str, budget: Budget, json: bool) -> Result<()> {
                     r.item.path,
                     r.item.language.as_deref().unwrap_or("?")
                 );
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn related(path: &str, budget: Budget, json: bool) -> Result<()> {
-    let cwd = env::current_dir()?;
-    let service = KungfuService::open(&cwd)?;
-    let results = service.find_related(path, budget)?;
-
-    if json {
-        let items: Vec<_> = results
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "path": r.item.path,
-                    "language": r.item.language,
-                    "score": r.score,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&items)?);
-    } else {
-        if results.is_empty() {
-            println!("No related files found for '{}'", path);
-        } else {
-            for r in &results {
-                println!(
-                    "  {:.2}  {} ({})",
-                    r.score,
-                    r.item.path,
-                    r.item.language.as_deref().unwrap_or("?")
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn context(query: &str, budget: Budget, json: bool) -> Result<()> {
-    let cwd = env::current_dir()?;
-    let service = KungfuService::open(&cwd)?;
-    let packet = service.context(query, budget)?;
-    let output = serde_json::to_string_pretty(&packet)?;
-    service.track_call("context", output.len());
-
-    if json {
-        println!("{}", output);
-    } else {
-        println!("Query:  {}", packet.query);
-        println!("Budget: {}", packet.budget);
-        println!("Items:  {}", packet.items.len());
-        println!();
-        for item in &packet.items {
-            println!(
-                "  {:.2}  [{}] {} — {}",
-                item.score, item.path, item.name, item.why
-            );
-            if let Some(ref sig) = item.signature {
-                println!("        sig: {}", sig);
             }
         }
     }
@@ -1400,31 +1344,6 @@ pub fn mcp() -> Result<()> {
     Ok(())
 }
 
-pub fn search_rationale(query: &str, budget: Budget, json: bool) -> Result<()> {
-    let cwd = env::current_dir()?;
-    let service = KungfuService::open(&cwd)?;
-    let results = service.search_rationale(query, budget)?;
-    let output = serde_json::to_string_pretty(&results)?;
-    service.track_call("search_rationale", output.len());
-
-    if json {
-        println!("{}", output);
-    } else {
-        if results.is_empty() {
-            println!("No rationale found for: {}", query);
-        } else {
-            println!("Rationale ({} results):", results.len());
-            println!();
-            for r in &results {
-                println!("  {:.2}  [{}] {}", r.relevance, r.kind, r.source);
-                println!("        {}", r.text);
-                println!();
-            }
-        }
-    }
-    Ok(())
-}
-
 pub fn change_timeline(name: &str, budget: Budget, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let service = KungfuService::open(&cwd)?;
@@ -1443,6 +1362,197 @@ pub fn change_timeline(name: &str, budget: Budget, json: bool) -> Result<()> {
             for e in &events {
                 let date = e.date.as_deref().unwrap_or("—");
                 println!("  [{}] {} ({})", e.event_type, e.detail, date);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+
+    match action {
+        MemoryCommands::Add {
+            content,
+            kind,
+            title,
+            tags,
+            files,
+            symbols,
+            pin,
+        } => {
+            let kind: ProjectMemoryKind = kind
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+            let entry = service.memory_add(
+                kind,
+                &content,
+                title.as_deref(),
+                tags,
+                files,
+                symbols,
+                pin,
+            )?;
+            service.track_call("memory_add", 0);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("Added: {} [{}] {}", entry.id, entry.kind, entry.content);
+                if entry.pinned {
+                    println!("       (pinned)");
+                }
+            }
+        }
+        MemoryCommands::List { kind, tag, pinned } => {
+            let filter = MemoryFilter {
+                kind: kind
+                    .as_deref()
+                    .map(|k| k.parse().map_err(|e: String| anyhow::anyhow!(e)))
+                    .transpose()?,
+                tag,
+                pinned_only: pinned,
+                ..Default::default()
+            };
+            let entries = service.memory_list(&filter)?;
+            service.track_call("memory_list", 0);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else if entries.is_empty() {
+                println!("No memory entries found.");
+            } else {
+                for e in &entries {
+                    let pin_marker = if e.pinned { " [pinned]" } else { "" };
+                    let title = e.title.as_deref().unwrap_or(&e.content);
+                    let title_short = truncate_str(title, 60);
+                    println!("  {} [{}]{} {}", e.id, e.kind, pin_marker, title_short);
+                }
+                println!("\n{} entries", entries.len());
+            }
+        }
+        MemoryCommands::Show { id } => {
+            let entry = service.memory_show(&id)?;
+            service.track_call("memory_show", 0);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("ID:      {}", entry.id);
+                println!("Kind:    {}", entry.kind);
+                println!("Status:  {}", entry.status);
+                if let Some(ref t) = entry.title {
+                    println!("Title:   {}", t);
+                }
+                println!("Pinned:  {}", entry.pinned);
+                println!("Created: {}", entry.created_at);
+                println!("Updated: {}", entry.updated_at);
+                if !entry.tags.is_empty() {
+                    println!("Tags:    {}", entry.tags.join(", "));
+                }
+                if !entry.related_files.is_empty() {
+                    println!("Files:   {}", entry.related_files.join(", "));
+                }
+                if !entry.related_symbols.is_empty() {
+                    println!("Symbols: {}", entry.related_symbols.join(", "));
+                }
+                if let Some(ref s) = entry.supersedes {
+                    println!("Supersedes: {}", s);
+                }
+                println!();
+                println!("{}", entry.content);
+            }
+        }
+        MemoryCommands::Search { query, kind, tag } => {
+            let filter = MemoryFilter {
+                kind: kind
+                    .as_deref()
+                    .map(|k| k.parse().map_err(|e: String| anyhow::anyhow!(e)))
+                    .transpose()?,
+                tag,
+                ..Default::default()
+            };
+            let results = service.memory_search(&query, &filter)?;
+            service.track_call("memory_search", 0);
+            if json {
+                let items: Vec<_> = results
+                    .iter()
+                    .map(|(score, e)| {
+                        serde_json::json!({
+                            "score": score,
+                            "entry": e,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else if results.is_empty() {
+                println!("No results for: {}", query);
+            } else {
+                for (score, e) in &results {
+                    let pin_marker = if e.pinned { " [pinned]" } else { "" };
+                    let title = e.title.as_deref().unwrap_or(&e.content);
+                    println!("  {:.2}  {} [{}]{} {}", score, e.id, e.kind, pin_marker, truncate_str(title, 50));
+                }
+            }
+        }
+        MemoryCommands::Update {
+            id,
+            content,
+            title,
+            tags,
+            pin,
+        } => {
+            let tags_opt = if tags.is_empty() { None } else { Some(tags) };
+            let entry = service.memory_update(
+                &id,
+                content.as_deref(),
+                title.as_deref(),
+                tags_opt,
+                pin,
+            )?;
+            service.track_call("memory_update", 0);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("Updated: {}", entry.id);
+            }
+        }
+        MemoryCommands::Archive { id } => {
+            let entry = service.memory_archive(&id)?;
+            service.track_call("memory_archive", 0);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("Archived: {}", entry.id);
+            }
+        }
+        MemoryCommands::Remove { id, yes } => {
+            if !yes {
+                eprintln!("Use --yes to confirm permanent deletion of {}", id);
+                std::process::exit(1);
+            }
+            service.memory_remove(&id)?;
+            service.track_call("memory_remove", 0);
+            if json {
+                println!("{}", serde_json::json!({"removed": id}));
+            } else {
+                println!("Removed: {}", id);
+            }
+        }
+        MemoryCommands::Pin { id } => {
+            let entry = service.memory_pin(&id)?;
+            service.track_call("memory_pin", 0);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("Pinned: {}", entry.id);
+            }
+        }
+        MemoryCommands::Unpin { id } => {
+            let entry = service.memory_unpin(&id)?;
+            service.track_call("memory_unpin", 0);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("Unpinned: {}", entry.id);
             }
         }
     }

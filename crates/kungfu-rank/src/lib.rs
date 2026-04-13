@@ -78,5 +78,6 @@ pub fn build_context_packet_full(
         rationale: Vec::new(),
         history: Vec::new(),
         evidence: Vec::new(),
+        project_memory: Vec::new(),
     }
 }

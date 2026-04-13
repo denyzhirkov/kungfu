@@ -61,9 +61,6 @@ kungfu ask-context "find where JWT refresh is implemented" --budget small
 kungfu ask-context "impact of changing Budget enum" --budget medium
 kungfu ask-context "fix crash in python parser" --budget tiny
 
-# Simple context (no intent detection)
-kungfu context "incremental indexing" --budget small
-
 # Context from git changes
 kungfu diff-context --budget small
 ```
@@ -73,9 +70,22 @@ kungfu diff-context --budget small
 ```sh
 kungfu find-symbol AuthService          # search symbols by name
 kungfu get-symbol refreshToken          # exact symbol lookup
-kungfu search-text "refresh token"      # text search across files
-kungfu related src/auth/service.ts      # find related files (imports, tests, configs)
+kungfu search "refresh token"           # text search across files
+kungfu search "auth logic" --semantic   # semantic search with query expansion
 ```
+
+### Project memory (v2.0)
+
+```sh
+kungfu memory add "Use zod for all new validation" --kind decision --tag validation --pin
+kungfu memory add "Legacy webhook uses old auth — do not refactor" --kind warning --tag auth
+kungfu memory list                      # show all active entries
+kungfu memory search "validation"       # search memory
+kungfu memory pin mem_0001              # pin for higher context priority
+kungfu memory archive mem_0002          # archive without deleting
+```
+
+Pinned entries and warnings are automatically injected into `ask-context` output, so agents don't restart from zero every session.
 
 ### Structure
 
@@ -155,7 +165,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 }
 ```
 
-### 28 MCP tools
+### MCP tools
 
 | Tool | Description |
 |------|-------------|
@@ -167,11 +177,8 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `search_text` | Text search across indexed files |
 | `find_files` | Find files by path pattern |
 | `semantic_search` | Find symbols by concept with query expansion |
-| `find_related_files` | Related files by imports, tests, configs, proximity |
 | `find_related_symbols` | Related symbols in same file |
-| `get_minimal_context` | Smallest high-confidence context set |
-| `build_task_context` | Ranked context packet for a task |
-| `ask_context` | Smart retrieval: intent + multi-strategy search + rationale + evidence |
+| `ask_context` | Smart retrieval: intent + multi-strategy search + rationale + project memory |
 | `diff_context` | Context focused on git changes |
 | `explore_symbol` | Composite: find + detail + related + snippet in one call |
 | `explore_file` | Composite: outline + related files + key symbols |
@@ -180,8 +187,13 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `callees` | Call graph: what does this symbol call? |
 | `file_history` | Git log for a file: recent commits |
 | `symbol_history` | Git blame + commits for a symbol |
-| `search_rationale` | Search design decisions, TODOs, doc sections by query |
 | `change_timeline` | How code evolved: introduced, churn, decisions, recent changes |
+| `memory_add` | Add a project memory entry (fact/decision/warning/session_summary) |
+| `memory_search` | Search project memory by query |
+| `memory_list` | List project memory entries with filters |
+| `memory_get` | Get a single memory entry by ID |
+| `memory_update` | Update content, title, tags, or pinned state |
+| `memory_archive` | Archive an entry (preserves for history) |
 | `onboard` | Project summary: architecture, patterns, key symbols, naming |
 | `affected` | Blast radius: transitive callers/dependents of a symbol |
 | `smart_test` | Minimal test set based on git diff |
@@ -207,9 +219,10 @@ Add to `CLAUDE.md` or system prompt of your project:
 - Use `investigate` for complex tasks — combines ask_context + diff awareness.
 - Use `affected` before refactoring to check blast radius.
 - Use `smart_test` to find which tests to run after changes.
-- Use `search_rationale` to find design decisions, TODOs, and doc context for a topic.
 - Use `change_timeline` to understand how a symbol or file evolved over time.
 - Use `ask_context` with `include: ["code", "rationale"]` to get both code and design context.
+- Use `memory_search` to find relevant project facts, decisions, and warnings.
+- Use `memory_add` to preserve important project knowledge for future sessions (kinds: fact, decision, warning, session_summary).
 - Only read full files when the above tools confirm you need them.
 - Prefer tiny/small budget. Escalate to medium/full only when needed.
 ```

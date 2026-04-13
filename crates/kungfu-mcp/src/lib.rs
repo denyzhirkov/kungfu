@@ -277,6 +277,64 @@ pub struct AskContextParam {
     pub include: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MemoryAddParam {
+    /// Content of the memory entry
+    pub content: String,
+    /// Kind: "fact", "decision", "warning", "session_summary"
+    pub kind: String,
+    /// Short title (optional)
+    pub title: Option<String>,
+    /// Tags for categorization
+    pub tags: Option<Vec<String>>,
+    /// Related file paths
+    pub files: Option<Vec<String>>,
+    /// Related symbol names
+    pub symbols: Option<Vec<String>>,
+    /// Pin for higher priority in context assembly
+    pub pin: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MemorySearchParam {
+    /// Search query
+    pub query: String,
+    /// Filter by kind: "fact", "decision", "warning", "session_summary"
+    pub kind: Option<String>,
+    /// Filter by tag
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MemoryListParam {
+    /// Filter by kind: "fact", "decision", "warning", "session_summary"
+    pub kind: Option<String>,
+    /// Filter by tag
+    pub tag: Option<String>,
+    /// Show only pinned entries
+    pub pinned: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MemoryIdParam {
+    /// Memory entry ID (e.g. "mem_0001")
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MemoryUpdateParam {
+    /// Memory entry ID
+    pub id: String,
+    /// New content (optional)
+    pub content: Option<String>,
+    /// New title (optional)
+    pub title: Option<String>,
+    /// Replace tags (optional)
+    pub tags: Option<Vec<String>>,
+    /// Set pinned state (optional)
+    pub pin: Option<bool>,
+}
+
 fn parse_budget(s: Option<&str>) -> Budget {
     s.and_then(|s| s.parse().ok()).unwrap_or(Budget::Auto)
 }
@@ -495,63 +553,6 @@ impl KungfuMcp {
         })
     }
 
-    #[tool(description = "Find files related to the given file by import/dependency relations, directory proximity, shared symbols, and test patterns")]
-    fn find_related_files(
-        &self,
-        Parameters(params): Parameters<FilePathBudgetParam>,
-    ) -> Result<String, String> {
-        let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
-        let path = params.path.clone();
-        self.cached("find_related_files", &path, &budget_str, || {
-            let budget = parse_budget(Some(&budget_str));
-            let service = self.service()?;
-            let results = service.find_related(&path, budget).map_err(|e| e.to_string())?;
-            let items: Vec<_> = results
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "path": r.item.path,
-                        "language": r.item.language,
-                        "score": r.score,
-                    })
-                })
-                .collect();
-            serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
-        })
-    }
-
-    #[tool(description = "Given a symbol, path, or query, return the smallest high-confidence context set for an agent")]
-    fn get_minimal_context(
-        &self,
-        Parameters(params): Parameters<QueryParam>,
-    ) -> Result<String, String> {
-        let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
-        let query = params.query.clone();
-        let scope = params.scope.clone();
-        self.cached_scoped("get_minimal_context", &query, &budget_str, scope.as_deref(), || {
-            let budget = parse_budget(Some(&budget_str));
-            let service = self.service()?;
-            let packet = service.context(&query, budget).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&packet).map_err(|e| e.to_string())
-        })
-    }
-
-    #[tool(description = "Given a task description, assemble a ranked context packet with relevant symbols, files, and explanations")]
-    fn build_task_context(
-        &self,
-        Parameters(params): Parameters<QueryParam>,
-    ) -> Result<String, String> {
-        let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
-        let query = params.query.clone();
-        let scope = params.scope.clone();
-        self.cached_scoped("build_task_context", &query, &budget_str, scope.as_deref(), || {
-            let budget = parse_budget(Some(&budget_str));
-            let service = self.service()?;
-            let packet = service.context(&query, budget).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&packet).map_err(|e| e.to_string())
-        })
-    }
-
     #[tool(description = "Smart context retrieval: parse task intent, run multi-strategy search (symbols, text, related files, import chains), return ranked context packet. Use 'include' to select layers: code (default), rationale (design decisions, TODOs), history (evolution timeline)")]
     fn ask_context(
         &self,
@@ -741,21 +742,6 @@ impl KungfuMcp {
         })
     }
 
-    #[tool(description = "Search design rationale: find relevant TODO/FIXME/NOTE comments, doc sections, and ADR decisions matching a query")]
-    fn search_rationale(
-        &self,
-        Parameters(params): Parameters<QueryParam>,
-    ) -> Result<String, String> {
-        let query = params.query.clone();
-        let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
-        self.cached("search_rationale", &query, &budget_str, || {
-            let budget = parse_budget(Some(&budget_str));
-            let service = self.service()?;
-            let result = service.search_rationale(&query, budget).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
-        })
-    }
-
     #[tool(description = "Change timeline: show how a symbol or file evolved — when introduced, churn rate, linked decisions, recent changes")]
     fn change_timeline(
         &self,
@@ -914,6 +900,120 @@ impl KungfuMcp {
                 None => Ok(format!("Symbol '{}' not found", name)),
             }
         })
+    }
+
+    // --- Project memory tools ---
+
+    #[tool(description = "Add a project memory entry. Kinds: fact, decision, warning, session_summary. Use to preserve important project knowledge for future sessions")]
+    fn memory_add(
+        &self,
+        Parameters(params): Parameters<MemoryAddParam>,
+    ) -> Result<String, String> {
+        let kind: kungfu_types::memory::ProjectMemoryKind = params
+            .kind
+            .parse()
+            .map_err(|e: String| e)?;
+        let service = self.service()?;
+        let entry = service
+            .memory_add(
+                kind,
+                &params.content,
+                params.title.as_deref(),
+                params.tags.unwrap_or_default(),
+                params.files.unwrap_or_default(),
+                params.symbols.unwrap_or_default(),
+                params.pin.unwrap_or(false),
+            )
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&entry).map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Search project memory by query. Returns scored results matching facts, decisions, warnings, and session summaries")]
+    fn memory_search(
+        &self,
+        Parameters(params): Parameters<MemorySearchParam>,
+    ) -> Result<String, String> {
+        let filter = kungfu_memory::project_search::MemoryFilter {
+            kind: params
+                .kind
+                .as_deref()
+                .map(|k| k.parse().map_err(|e: String| e))
+                .transpose()?,
+            tag: params.tag,
+            ..Default::default()
+        };
+        let service = self.service()?;
+        let results = service
+            .memory_search(&params.query, &filter)
+            .map_err(|e| e.to_string())?;
+        let items: Vec<_> = results
+            .iter()
+            .map(|(score, e)| {
+                serde_json::json!({
+                    "score": score,
+                    "entry": e,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "List project memory entries with optional filters")]
+    fn memory_list(
+        &self,
+        Parameters(params): Parameters<MemoryListParam>,
+    ) -> Result<String, String> {
+        let filter = kungfu_memory::project_search::MemoryFilter {
+            kind: params
+                .kind
+                .as_deref()
+                .map(|k| k.parse().map_err(|e: String| e))
+                .transpose()?,
+            tag: params.tag,
+            pinned_only: params.pinned.unwrap_or(false),
+            ..Default::default()
+        };
+        let service = self.service()?;
+        let entries = service.memory_list(&filter).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Get a single project memory entry by ID")]
+    fn memory_get(
+        &self,
+        Parameters(params): Parameters<MemoryIdParam>,
+    ) -> Result<String, String> {
+        let service = self.service()?;
+        let entry = service.memory_show(&params.id).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&entry).map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Update a project memory entry: content, title, tags, or pinned state")]
+    fn memory_update(
+        &self,
+        Parameters(params): Parameters<MemoryUpdateParam>,
+    ) -> Result<String, String> {
+        let service = self.service()?;
+        let entry = service
+            .memory_update(
+                &params.id,
+                params.content.as_deref(),
+                params.title.as_deref(),
+                params.tags,
+                params.pin,
+            )
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&entry).map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Archive a project memory entry — removes from normal retrieval but preserves for history")]
+    fn memory_archive(
+        &self,
+        Parameters(params): Parameters<MemoryIdParam>,
+    ) -> Result<String, String> {
+        let service = self.service()?;
+        let entry = service.memory_archive(&params.id).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&entry).map_err(|e| e.to_string())
     }
 }
 

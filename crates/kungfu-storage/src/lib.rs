@@ -3,7 +3,7 @@ use kungfu_types::file::FileEntry;
 use kungfu_types::symbol::Symbol;
 use kungfu_types::relation::Relation;
 use kungfu_types::chunk::Chunk;
-use kungfu_types::memory::MemoryEntry;
+use kungfu_types::memory::{MemoryEntry, ProjectMemoryEntry, MemoryStatus};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
@@ -167,5 +167,81 @@ impl JsonStore {
         let memories: Vec<MemoryEntry> = serde_json::from_str(&content)?;
         *self.memories_cache.borrow_mut() = Some(memories.clone());
         Ok(memories)
+    }
+
+    // --- Project memory (explicit, user/agent managed) ---
+
+    fn project_memory_path(&self) -> std::path::PathBuf {
+        // Store alongside index dir, one level up: .kungfu/project_memory.json
+        self.base_dir
+            .parent()
+            .unwrap_or(&self.base_dir)
+            .join("project_memory.json")
+    }
+
+    pub fn save_project_memories(&self, entries: &[ProjectMemoryEntry]) -> Result<()> {
+        let path = self.project_memory_path();
+        let json = serde_json::to_string_pretty(entries)?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("writing {}", path.display()))?;
+        debug!("saved {} project memory entries", entries.len());
+        Ok(())
+    }
+
+    pub fn load_project_memories(&self) -> Result<Vec<ProjectMemoryEntry>> {
+        let path = self.project_memory_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let entries: Vec<ProjectMemoryEntry> = serde_json::from_str(&content)?;
+        Ok(entries)
+    }
+
+    pub fn next_project_memory_id(&self) -> Result<String> {
+        let entries = self.load_project_memories()?;
+        let max_num = entries
+            .iter()
+            .filter_map(|e| e.id.strip_prefix("mem_").and_then(|n| n.parse::<u32>().ok()))
+            .max()
+            .unwrap_or(0);
+        Ok(format!("mem_{:04}", max_num + 1))
+    }
+
+    pub fn add_project_memory(&self, entry: ProjectMemoryEntry) -> Result<ProjectMemoryEntry> {
+        let mut entries = self.load_project_memories()?;
+        entries.push(entry.clone());
+        self.save_project_memories(&entries)?;
+        Ok(entry)
+    }
+
+    pub fn update_project_memory(&self, id: &str, f: impl FnOnce(&mut ProjectMemoryEntry)) -> Result<ProjectMemoryEntry> {
+        let mut entries = self.load_project_memories()?;
+        let entry = entries
+            .iter_mut()
+            .find(|e| e.id == id)
+            .ok_or_else(|| anyhow::anyhow!("memory entry not found: {}", id))?;
+        f(entry);
+        entry.updated_at = chrono::Utc::now().to_rfc3339();
+        let result = entry.clone();
+        self.save_project_memories(&entries)?;
+        Ok(result)
+    }
+
+    pub fn remove_project_memory(&self, id: &str) -> Result<()> {
+        let mut entries = self.load_project_memories()?;
+        let len_before = entries.len();
+        entries.retain(|e| e.id != id);
+        if entries.len() == len_before {
+            anyhow::bail!("memory entry not found: {}", id);
+        }
+        self.save_project_memories(&entries)?;
+        Ok(())
+    }
+
+    pub fn archive_project_memory(&self, id: &str) -> Result<ProjectMemoryEntry> {
+        self.update_project_memory(id, |e| {
+            e.status = MemoryStatus::Archived;
+        })
     }
 }

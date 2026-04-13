@@ -459,88 +459,6 @@ impl KungfuService {
         self.search().find_related(file_path, budget)
     }
 
-    pub fn context(&self, query: &str, budget: Budget) -> Result<ContextPacket> {
-        let budget = self.resolve_budget(budget);
-        let search = self.search();
-        let query_lower = query.to_lowercase();
-        let words: Vec<&str> = query_lower.split_whitespace().collect();
-
-        // Search symbols
-        let symbol_results = search.find_symbol(query, Budget::Full)?;
-
-        let mut scored_symbols: Vec<(Symbol, f64)> = symbol_results
-            .into_iter()
-            .map(|r| (r.item, r.score))
-            .collect();
-
-        // Also search files and pull in their symbols for broader context
-        let file_results = search.search_text(query, Budget::Full)?;
-        let all_symbols = search.get_all_symbols()?;
-        let seen_ids: std::collections::HashSet<String> =
-            scored_symbols.iter().map(|(s, _)| s.id.clone()).collect();
-
-        for fr in &file_results {
-            let file_syms: Vec<_> = all_symbols
-                .iter()
-                .filter(|s| s.file_id == fr.item.id && !seen_ids.contains(&s.id))
-                .collect();
-            for sym in file_syms {
-                scored_symbols.push((sym.clone(), fr.score * 0.7));
-            }
-        }
-
-        // Query-aware bonuses
-        let wants_tests = kungfu_search::query_wants_tests(&words);
-        let wants_config = kungfu_search::query_wants_config(&words);
-
-        for (sym, score) in &mut scored_symbols {
-            // Test proximity bonus
-            if wants_tests
-                && (sym.path.contains("test")
-                    || sym.path.contains("spec")
-                    || sym.path.contains("tests/"))
-            {
-                *score += 0.15;
-            }
-
-            // Config proximity bonus
-            if wants_config
-                && (sym.path.ends_with(".toml")
-                    || sym.path.ends_with(".json")
-                    || sym.path.ends_with(".yaml")
-                    || sym.path.ends_with(".yml")
-                    || sym.path.contains("config"))
-            {
-                *score += 0.15;
-            }
-        }
-
-        // Changed-file bonus: boost symbols from git-changed files
-        if kungfu_git::is_git_repo(&self.project.root) {
-            if let Ok(changed) = kungfu_git::changed_files(&self.project.root) {
-                if !changed.is_empty() {
-                    for (sym, score) in &mut scored_symbols {
-                        let is_changed = changed
-                            .iter()
-                            .any(|c| sym.path.ends_with(c) || c.ends_with(&sym.path));
-                        if is_changed {
-                            *score += 0.2;
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut packet = build_context_packet(query, scored_symbols, budget);
-
-        let snippet_lines = budget.max_lines();
-        if snippet_lines > 0 {
-            self.fill_snippets(&mut packet, snippet_lines, &[]);
-        }
-
-        Ok(packet)
-    }
-
     /// High-level context retrieval: parse intent, run multi-strategy search,
     /// rank with contextual signals, return compact packet.
     pub fn ask_context(&self, task: &str, budget: Budget) -> Result<ContextPacket> {
@@ -906,6 +824,71 @@ impl KungfuService {
                 .collect();
             packet.rationale = rationale;
             packet.evidence = evidence;
+        }
+
+        // 9. Inject project memory (facts, decisions, warnings)
+        let project_memories = store.load_project_memories().unwrap_or_default();
+        if !project_memories.is_empty() {
+            let max_memory = match budget {
+                Budget::Tiny => 1,
+                Budget::Small => 3,
+                Budget::Medium => 5,
+                _ => 8,
+            };
+            // Collect matched files and symbols from the code packet for cross-ref scoring
+            let matched_files: Vec<String> = packet
+                .items
+                .iter()
+                .map(|it| it.path.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let matched_symbols: Vec<String> = packet
+                .items
+                .iter()
+                .map(|it| it.name.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let ctx = kungfu_memory::project_search::SearchContext {
+                matched_files: &matched_files,
+                matched_symbols: &matched_symbols,
+            };
+            let filter = kungfu_memory::project_search::MemoryFilter::default();
+            let matched = kungfu_memory::project_search::search_project_memory_with_context(
+                task,
+                &project_memories,
+                &filter,
+                &ctx,
+            );
+
+            // Also include pinned entries not already matched
+            let matched_ids: HashSet<String> = matched.iter().map(|(_, e)| e.id.clone()).collect();
+            let pinned: Vec<_> = project_memories
+                .iter()
+                .filter(|e| {
+                    e.pinned
+                        && e.status == kungfu_types::memory::MemoryStatus::Active
+                        && !matched_ids.contains(&e.id)
+                })
+                .map(|e| (0.5, e.clone()))
+                .collect();
+
+            let mut all: Vec<_> = matched.into_iter().chain(pinned).collect();
+            all.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            all.truncate(max_memory);
+
+            packet.project_memory = all
+                .into_iter()
+                .map(|(score, e)| kungfu_types::context::ProjectMemoryItem {
+                    id: e.id,
+                    kind: e.kind.to_string(),
+                    title: e.title,
+                    content: e.content,
+                    pinned: e.pinned,
+                    relevance: score,
+                })
+                .collect();
         }
 
         Ok(packet)
@@ -1656,6 +1639,7 @@ impl KungfuService {
                 rationale: Vec::new(),
                 history: Vec::new(),
                 evidence: Vec::new(),
+                project_memory: Vec::new(),
             });
         }
 
@@ -1677,6 +1661,129 @@ impl KungfuService {
             .collect();
 
         Ok(build_context_packet("diff context", scored, budget))
+    }
+
+    // --- Project memory (explicit, user/agent managed) ---
+
+    pub fn memory_add(
+        &self,
+        kind: kungfu_types::memory::ProjectMemoryKind,
+        content: &str,
+        title: Option<&str>,
+        tags: Vec<String>,
+        related_files: Vec<String>,
+        related_symbols: Vec<String>,
+        pinned: bool,
+    ) -> Result<kungfu_types::memory::ProjectMemoryEntry> {
+        let id = self.store().next_project_memory_id()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let entry = kungfu_types::memory::ProjectMemoryEntry {
+            id,
+            kind,
+            title: title.map(|s| s.to_string()),
+            content: content.to_string(),
+            tags,
+            related_files,
+            related_symbols,
+            pinned,
+            status: kungfu_types::memory::MemoryStatus::Active,
+            supersedes: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.store().add_project_memory(entry)
+    }
+
+    pub fn memory_list(
+        &self,
+        filter: &kungfu_memory::project_search::MemoryFilter,
+    ) -> Result<Vec<kungfu_types::memory::ProjectMemoryEntry>> {
+        let entries = self.store().load_project_memories()?;
+        let status_filter = filter.status.unwrap_or(kungfu_types::memory::MemoryStatus::Active);
+        let filtered: Vec<_> = entries
+            .into_iter()
+            .filter(|e| {
+                if e.status != status_filter {
+                    return false;
+                }
+                if let Some(kind) = filter.kind {
+                    if e.kind != kind {
+                        return false;
+                    }
+                }
+                if let Some(ref tag) = filter.tag {
+                    if !e.tags.iter().any(|t| t == tag) {
+                        return false;
+                    }
+                }
+                if filter.pinned_only && !e.pinned {
+                    return false;
+                }
+                true
+            })
+            .collect();
+        Ok(filtered)
+    }
+
+    pub fn memory_show(&self, id: &str) -> Result<kungfu_types::memory::ProjectMemoryEntry> {
+        let entries = self.store().load_project_memories()?;
+        entries
+            .into_iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| anyhow::anyhow!("memory entry not found: {}", id))
+    }
+
+    pub fn memory_search(
+        &self,
+        query: &str,
+        filter: &kungfu_memory::project_search::MemoryFilter,
+    ) -> Result<Vec<(f64, kungfu_types::memory::ProjectMemoryEntry)>> {
+        let entries = self.store().load_project_memories()?;
+        Ok(kungfu_memory::project_search::search_project_memory(query, &entries, filter))
+    }
+
+    pub fn memory_update(
+        &self,
+        id: &str,
+        content: Option<&str>,
+        title: Option<&str>,
+        tags: Option<Vec<String>>,
+        pinned: Option<bool>,
+    ) -> Result<kungfu_types::memory::ProjectMemoryEntry> {
+        self.store().update_project_memory(id, |e| {
+            if let Some(c) = content {
+                e.content = c.to_string();
+            }
+            if let Some(t) = title {
+                e.title = Some(t.to_string());
+            }
+            if let Some(t) = tags {
+                e.tags = t;
+            }
+            if let Some(p) = pinned {
+                e.pinned = p;
+            }
+        })
+    }
+
+    pub fn memory_archive(&self, id: &str) -> Result<kungfu_types::memory::ProjectMemoryEntry> {
+        self.store().archive_project_memory(id)
+    }
+
+    pub fn memory_remove(&self, id: &str) -> Result<()> {
+        self.store().remove_project_memory(id)
+    }
+
+    pub fn memory_pin(&self, id: &str) -> Result<kungfu_types::memory::ProjectMemoryEntry> {
+        self.store().update_project_memory(id, |e| {
+            e.pinned = true;
+        })
+    }
+
+    pub fn memory_unpin(&self, id: &str) -> Result<kungfu_types::memory::ProjectMemoryEntry> {
+        self.store().update_project_memory(id, |e| {
+            e.pinned = false;
+        })
     }
 
     /// Record a tool/command call for persistent usage stats.

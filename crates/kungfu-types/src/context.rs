@@ -41,6 +41,20 @@ pub struct ContextPacket {
     /// Verbatim excerpts from docs, comments, or commits as proof
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub evidence: Vec<EvidenceFragment>,
+    /// Project memory entries relevant to the query (facts, decisions, warnings)
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub project_memory: Vec<ProjectMemoryItem>,
+}
+
+/// A project memory entry included in a context packet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMemoryItem {
+    pub id: String,
+    pub kind: String,
+    pub title: Option<String>,
+    pub content: String,
+    pub pinned: bool,
+    pub relevance: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

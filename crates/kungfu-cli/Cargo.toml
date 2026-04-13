@@ -17,6 +17,7 @@ kungfu-types = { workspace = true }
 kungfu-config = { workspace = true }
 kungfu-project = { workspace = true }
 kungfu-core = { workspace = true }
+kungfu-memory = { workspace = true }
 kungfu-output = { workspace = true }
 kungfu-index = { workspace = true }
 kungfu-git = { workspace = true }
