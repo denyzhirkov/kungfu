@@ -203,43 +203,17 @@ Add to your agent config (Claude Code, Cursor, etc.):
 
 ## Agent rules
 
-Add to `CLAUDE.md` or system prompt of your project:
-
-### MCP (recommended)
+Add to `CLAUDE.md` or system prompt. Keep it about *policy*, not tool catalogs — the agent already sees tool descriptions from MCP.
 
 ```markdown
-## Context retrieval
-- Before reading files, use `kungfu` MCP tools to understand the codebase.
-- Use `ask_context` with the task description to get a ranked context packet.
-- Use `find_symbol` / `get_symbol` to locate code by name instead of reading whole files.
-- Use `explore_symbol` for a complete picture: definition + related symbols + snippet in one call.
-- Use `file_outline` before reading a file — often the outline is enough.
-- Use `onboard` when first encountering a project for architecture overview.
-- After git changes, use `diff_context` to focus on what changed.
-- Use `investigate` for complex tasks — combines ask_context + diff awareness.
-- Use `affected` before refactoring to check blast radius.
-- Use `smart_test` to find which tests to run after changes.
-- Use `change_timeline` to understand how a symbol or file evolved over time.
-- Use `ask_context` with `include: ["code", "rationale"]` to get both code and design context.
-- Use `memory_search` to find relevant project facts, decisions, and warnings.
-- Use `memory_add` to preserve important project knowledge for future sessions (kinds: fact, decision, warning, session_summary).
-- Only read full files when the above tools confirm you need them.
-- Prefer tiny/small budget. Escalate to medium/full only when needed.
+## kungfu
+- Prefer kungfu MCP tools over reading files directly. Only open a file when kungfu confirms you need it.
+- Default to tiny/small budget. Escalate only when the packet is clearly insufficient.
+- Use `memory_search` before implementing — project may already have a decision or warning about this.
+- Use `memory_add` to preserve facts, decisions, and warnings worth remembering across sessions. Prefer pinning sparingly.
 ```
 
-### CLI (alternative)
-
-```markdown
-## Context retrieval
-- Before reading files, run `kungfu ask-context "<task>" --budget small` via Bash.
-- Use `kungfu find-symbol <name>` to locate code by name instead of reading whole files.
-- Use `kungfu file-outline <path>` before reading a file — often the outline is enough.
-- Use `kungfu onboard` when first encountering a project.
-- After git changes, run `kungfu diff-context` to focus on what changed.
-- Use `kungfu affected <symbol>` before refactoring to check blast radius.
-- Only read full files when kungfu output confirms you need them.
-- Prefer tiny/small budget. Escalate to medium/full only when needed.
-```
+Four lines is enough. The agent will pick `ask_context`, `explore_symbol`, `affected`, etc. on its own from tool descriptions.
 
 ### Recommended workflow
 
