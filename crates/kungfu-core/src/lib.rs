@@ -2518,10 +2518,11 @@ fn detect_primary_language(files: &[FileEntry]) -> Option<String> {
 }
 
 fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
+    if text.chars().count() <= max_len {
         text.to_string()
     } else {
-        format!("{}...", &text[..max_len])
+        let head: String = text.chars().take(max_len).collect();
+        format!("{}...", head)
     }
 }
 

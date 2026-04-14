@@ -36,9 +36,10 @@ pub fn parse_doc(path: &str, content: &str) -> Vec<MemoryEntry> {
 
         let id = format!("mem:{}:{}", path.replace('/', ":"), i);
 
-        // Truncate text to keep memory entries compact
-        let truncated = if text.len() > 500 {
-            format!("{}...", &text[..500])
+        // Truncate text to keep memory entries compact (char-based to handle multibyte)
+        let truncated = if text.chars().count() > 500 {
+            let head: String = text.chars().take(500).collect();
+            format!("{}...", head)
         } else {
             text.to_string()
         };
@@ -187,5 +188,15 @@ mod tests {
         let memories = parse_doc("docs/adr/002.md", content);
         assert!(!memories.is_empty());
         assert_eq!(memories[0].weight, 0.9);
+    }
+
+    #[test]
+    fn truncates_multibyte_content_without_panic() {
+        // Regression: byte-based slicing panicked on Cyrillic content >500 chars
+        let long_cyrillic = "# Секция\n\n".to_string() + &"Это длинный текст на русском языке. ".repeat(30);
+        let memories = parse_doc("docs/notes.md", &long_cyrillic);
+        assert!(!memories.is_empty());
+        // Must not panic and must produce a valid utf-8 string
+        assert!(memories[0].text.chars().count() <= 503); // 500 + "..."
     }
 }
