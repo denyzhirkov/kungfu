@@ -25,9 +25,8 @@ pub fn extract_imports(root: Node, source: &str) -> Vec<RawImport> {
                     for item in spec.children(&mut list_cursor) {
                         if item.kind() == "import_spec" {
                             if let Some(path_node) = item.child_by_field_name("path") {
-                                let path = node_text(path_node, source)
-                                    .trim_matches('"')
-                                    .to_string();
+                                let path =
+                                    node_text(path_node, source).trim_matches('"').to_string();
                                 imports.push(RawImport {
                                     path,
                                     names: Vec::new(),
@@ -65,7 +64,7 @@ pub fn extract(root: Node, source: &str, file_id: &str, file_path: &str) -> Vec<
                         signature: extract_func_sig(&child, source),
                         span,
                         parent_symbol_id: None,
-                        exported: name_str.chars().next().map_or(false, |c| c.is_uppercase()),
+                        exported: name_str.chars().next().is_some_and(|c| c.is_uppercase()),
                         visibility: None,
                         doc_summary: None,
                     });
@@ -86,7 +85,7 @@ pub fn extract(root: Node, source: &str, file_id: &str, file_path: &str) -> Vec<
                         signature: extract_func_sig(&child, source),
                         span,
                         parent_symbol_id: None,
-                        exported: name_str.chars().next().map_or(false, |c| c.is_uppercase()),
+                        exported: name_str.chars().next().is_some_and(|c| c.is_uppercase()),
                         visibility: None,
                         doc_summary: None,
                     });
@@ -113,10 +112,13 @@ pub fn extract(root: Node, source: &str, file_id: &str, file_path: &str) -> Vec<
                                 kind: sk,
                                 language: "go".to_string(),
                                 path: file_path.to_string(),
-                                signature: Some(format!("type {}", node_text(spec, source).lines().next().unwrap_or(""))),
+                                signature: Some(format!(
+                                    "type {}",
+                                    node_text(spec, source).lines().next().unwrap_or("")
+                                )),
                                 span,
                                 parent_symbol_id: None,
-                                exported: name_str.chars().next().map_or(false, |c| c.is_uppercase()),
+                                exported: name_str.chars().next().is_some_and(|c| c.is_uppercase()),
                                 visibility: None,
                                 doc_summary: None,
                             });

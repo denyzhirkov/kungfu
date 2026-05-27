@@ -13,6 +13,8 @@ use tracing::{debug, info, warn};
 
 use crate::scanner;
 
+type ParsedFile = (FileEntry, Vec<Symbol>, Vec<RawImport>, Vec<RawComment>);
+
 pub struct Indexer<'a> {
     root: std::path::PathBuf,
     config: KungfuConfig,
@@ -88,7 +90,10 @@ impl<'a> Indexer<'a> {
 
         info!(
             "indexed {} files, {} symbols, {} relations, {} memories",
-            stats.total_files, stats.symbols_extracted, relations.len(), memories.len()
+            stats.total_files,
+            stats.symbols_extracted,
+            relations.len(),
+            memories.len()
         );
         Ok(stats)
     }
@@ -314,12 +319,12 @@ impl<'a> Indexer<'a> {
         Ok(stats)
     }
 
-    fn index_file(&mut self, path: &Path) -> Result<(FileEntry, Vec<Symbol>, Vec<RawImport>, Vec<RawComment>)> {
+    fn index_file(&mut self, path: &Path) -> Result<ParsedFile> {
         let content = std::fs::read(path)?;
         self.index_file_with_content(path, content)
     }
 
-    fn index_file_with_content(&mut self, path: &Path, content: Vec<u8>) -> Result<(FileEntry, Vec<Symbol>, Vec<RawImport>, Vec<RawComment>)> {
+    fn index_file_with_content(&mut self, path: &Path, content: Vec<u8>) -> Result<ParsedFile> {
         let hash = blake3::hash(&content).to_hex().to_string();
 
         let rel_path = path
@@ -351,7 +356,10 @@ impl<'a> Indexer<'a> {
 
         let (symbols, imports, comments) = if language.is_code() {
             let content_str = String::from_utf8_lossy(&content);
-            match self.parser.parse(&content_str, language, &file_id, &rel_path) {
+            match self
+                .parser
+                .parse(&content_str, language, &file_id, &rel_path)
+            {
                 Ok(result) => {
                     debug!(
                         "extracted {} symbols, {} imports, {} comments from {}",
@@ -419,7 +427,10 @@ impl<'a> Indexer<'a> {
                 while let Some(slash) = parent[dpos..].find('/') {
                     let dir_suffix = &parent[dpos + slash + 1..];
                     if !dir_suffix.is_empty() {
-                        dir_suffix_to_paths.entry(dir_suffix).or_default().push(path_str);
+                        dir_suffix_to_paths
+                            .entry(dir_suffix)
+                            .or_default()
+                            .push(path_str);
                     }
                     dpos += slash + 1;
                 }
@@ -437,7 +448,14 @@ impl<'a> Indexer<'a> {
                 .to_string_lossy();
 
             for imp in imports {
-                let resolved = resolve_import(&imp.path, &source_dir, &path_to_id, &stem_to_paths, &suffix_to_paths, &dir_suffix_to_paths);
+                let resolved = resolve_import(
+                    &imp.path,
+                    &source_dir,
+                    &path_to_id,
+                    &stem_to_paths,
+                    &suffix_to_paths,
+                    &dir_suffix_to_paths,
+                );
                 for target_path in resolved {
                     if let Some(&target_id) = path_to_id.get(target_path) {
                         if target_id != source_id {
@@ -454,18 +472,15 @@ impl<'a> Indexer<'a> {
         }
 
         // Add test/config relations
-        Self::build_test_relations(&files, &mut relations);
-        Self::build_config_relations(&files, &mut relations);
+        Self::build_test_relations(files, &mut relations);
+        Self::build_config_relations(files, &mut relations);
 
         // Deduplicate
         relations.sort_by(|a, b| {
-            (&a.source_id, &a.target_id, &a.kind)
-                .cmp(&(&b.source_id, &b.target_id, &b.kind))
+            (&a.source_id, &a.target_id, &a.kind).cmp(&(&b.source_id, &b.target_id, &b.kind))
         });
         relations.dedup_by(|a, b| {
-            a.source_id == b.source_id
-                && a.target_id == b.target_id
-                && a.kind == b.kind
+            a.source_id == b.source_id && a.target_id == b.target_id && a.kind == b.kind
         });
 
         relations
@@ -560,11 +575,7 @@ impl<'a> Indexer<'a> {
 
                 let anchors = extract_anchors(&comment.text);
 
-                let id = format!(
-                    "mem:{}:{}",
-                    path.replace('/', ":"),
-                    comment.line
-                );
+                let id = format!("mem:{}:{}", path.replace('/', ":"), comment.line);
 
                 memories.push(MemoryEntry {
                     id,
@@ -663,10 +674,8 @@ impl<'a> Indexer<'a> {
     /// Only links to files in the same directory (not recursive) to avoid explosion
     /// on root-level configs like package.json or Cargo.toml.
     fn build_config_relations(files: &[FileEntry], relations: &mut Vec<Relation>) {
-        let config_files: Vec<&FileEntry> = files
-            .iter()
-            .filter(|f| is_config_file(&f.path))
-            .collect();
+        let config_files: Vec<&FileEntry> =
+            files.iter().filter(|f| is_config_file(&f.path)).collect();
 
         if config_files.is_empty() {
             return;
@@ -782,14 +791,19 @@ fn resolve_import<'a>(
                     break;
                 }
             }
-            if prefix.is_empty() { None } else { Some(format!("{}/", prefix)) }
+            if prefix.is_empty() {
+                None
+            } else {
+                Some(format!("{}/", prefix))
+            }
         } else {
             None
         };
 
         // For super::, resolve relative to parent directory
         let super_prefix = if import_path.starts_with("super") {
-            Path::new(source_dir).parent()
+            Path::new(source_dir)
+                .parent()
                 .map(|p| format!("{}/", p.to_string_lossy()))
         } else {
             None
@@ -828,8 +842,11 @@ fn resolve_import<'a>(
                     // Only take results that are close to the source file
                     for &path in paths.iter() {
                         // Prefer same crate (shares a common prefix)
-                        let common = source_dir.chars().zip(path.chars())
-                            .take_while(|(a, b)| a == b).count();
+                        let common = source_dir
+                            .chars()
+                            .zip(path.chars())
+                            .take_while(|(a, b)| a == b)
+                            .count();
                         if common > 5 || paths.len() == 1 {
                             results.push(path);
                         }
@@ -895,7 +912,7 @@ fn resolve_import<'a>(
     // 4. Fallback: try matching the last segment as a file stem
     // Only use stem fallback if the name is specific enough (>= 4 chars, not a common word)
     let last = import_path
-        .rsplit(|c| c == '/' || c == ':' || c == '.')
+        .rsplit(['/', ':', '.'])
         .next()
         .unwrap_or(import_path);
 
@@ -907,8 +924,11 @@ fn resolve_import<'a>(
             } else {
                 // Multiple matches — prefer ones close to source
                 for &path in paths.iter().take(3) {
-                    let common = source_dir.chars().zip(path.chars())
-                        .take_while(|(a, b)| a == b).count();
+                    let common = source_dir
+                        .chars()
+                        .zip(path.chars())
+                        .take_while(|(a, b)| a == b)
+                        .count();
                     if common > 5 {
                         results.push(path);
                     }
@@ -1020,13 +1040,11 @@ fn dirs_share_parent(a: &str, b: &str) -> bool {
 /// Extract keyword anchors from comment text for matching.
 fn extract_anchors(text: &str) -> Vec<String> {
     static STOP_WORDS: &[&str] = &[
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-        "should", "may", "might", "must", "can", "could", "this", "that",
-        "these", "those", "it", "its", "of", "in", "to", "for", "with",
-        "on", "at", "by", "from", "as", "into", "about", "not", "no",
-        "but", "or", "and", "if", "then", "else", "when", "while",
-        "todo", "fixme", "note", "hack", "xxx", "bug",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "shall", "should", "may", "might", "must", "can",
+        "could", "this", "that", "these", "those", "it", "its", "of", "in", "to", "for", "with",
+        "on", "at", "by", "from", "as", "into", "about", "not", "no", "but", "or", "and", "if",
+        "then", "else", "when", "while", "todo", "fixme", "note", "hack", "xxx", "bug",
     ];
 
     let mut anchors: Vec<String> = text

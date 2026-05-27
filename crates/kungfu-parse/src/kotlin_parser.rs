@@ -15,7 +15,10 @@ pub fn extract_imports(root: Node, source: &str) -> Vec<RawImport> {
                 let names = if path.ends_with('*') {
                     Vec::new()
                 } else {
-                    path.rsplit('.').next().map(|n| vec![n.to_string()]).unwrap_or_default()
+                    path.rsplit('.')
+                        .next()
+                        .map(|n| vec![n.to_string()])
+                        .unwrap_or_default()
                 };
                 imports.push(RawImport {
                     path,
@@ -47,13 +50,37 @@ fn collect_symbols(
     for child in node.children(&mut cursor) {
         match child.kind() {
             "class_declaration" => {
-                extract_type(child, source, file_id, file_path, parent_id, SymbolKind::Class, symbols);
+                extract_type(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Class,
+                    symbols,
+                );
             }
             "object_declaration" => {
-                extract_type(child, source, file_id, file_path, parent_id, SymbolKind::Class, symbols);
+                extract_type(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Class,
+                    symbols,
+                );
             }
             "interface_declaration" => {
-                extract_type(child, source, file_id, file_path, parent_id, SymbolKind::Interface, symbols);
+                extract_type(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Interface,
+                    symbols,
+                );
             }
             "function_declaration" => {
                 extract_function(child, source, file_id, file_path, parent_id, symbols);
@@ -200,7 +227,14 @@ fn extract_property(
         kind: SymbolKind::Variable,
         language: "kotlin".to_string(),
         path: file_path.to_string(),
-        signature: Some(node_text(node, source).lines().next().unwrap_or("").trim().to_string()),
+        signature: Some(
+            node_text(node, source)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        ),
         span,
         parent_symbol_id: parent_id.map(|s| s.to_string()),
         exported,
@@ -212,9 +246,12 @@ fn extract_property(
 fn find_identifier(node: &Node, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "identifier" || child.kind() == "type_identifier" || child.kind() == "simple_identifier" {
+        if child.kind() == "identifier"
+            || child.kind() == "type_identifier"
+            || child.kind() == "simple_identifier"
+        {
             let text = node_text(child, source);
-            if !text.is_empty() && text.chars().next().map_or(false, |c| c.is_alphabetic()) {
+            if !text.is_empty() && text.chars().next().is_some_and(|c| c.is_alphabetic()) {
                 return Some(text);
             }
         }

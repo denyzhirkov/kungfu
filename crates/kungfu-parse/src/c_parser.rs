@@ -13,12 +13,21 @@ pub fn extract_imports(root: Node, source: &str) -> Vec<RawImport> {
             for c in child.children(&mut inner) {
                 if c.kind() == "string_literal" || c.kind() == "system_lib_string" {
                     let text = node_text(c, source);
-                    let path = text.trim_matches('"').trim_matches('<').trim_matches('>').to_string();
+                    let path = text
+                        .trim_matches('"')
+                        .trim_matches('<')
+                        .trim_matches('>')
+                        .to_string();
                     if !path.is_empty() {
                         let names = path
                             .rsplit('/')
                             .next()
-                            .map(|n| vec![n.trim_end_matches(".h").trim_end_matches(".hpp").to_string()])
+                            .map(|n| {
+                                vec![n
+                                    .trim_end_matches(".h")
+                                    .trim_end_matches(".hpp")
+                                    .to_string()]
+                            })
                             .unwrap_or_default();
                         imports.push(RawImport {
                             path,
@@ -51,7 +60,9 @@ fn collect_symbols(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
-            "function_definition" | "function_declarator" if node.kind() != "function_definition" => {
+            "function_definition" | "function_declarator"
+                if node.kind() != "function_definition" =>
+            {
                 // Skip declarators inside function_definition (handled by the definition itself)
             }
             "function_definition" => {
@@ -172,13 +183,14 @@ fn extract_struct(
 
     let span = node_span(&node);
     let id = format!("s:{}:{}:{}", file_id, span.start_line, &name);
-    let kind = if node.kind() == "union_specifier" {
-        SymbolKind::Struct
-    } else {
-        SymbolKind::Struct
-    };
+    let kind = SymbolKind::Struct;
 
-    let sig = node_text(node, source).lines().next().unwrap_or("").trim().to_string();
+    let sig = node_text(node, source)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     symbols.push(Symbol {
         id: id.clone(),
@@ -219,7 +231,12 @@ fn extract_enum(
 
     let span = node_span(&node);
     let id = format!("s:{}:{}:{}", file_id, span.start_line, &name);
-    let sig = node_text(node, source).lines().next().unwrap_or("").trim().to_string();
+    let sig = node_text(node, source)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     symbols.push(Symbol {
         id,
@@ -297,7 +314,12 @@ fn extract_macro(
 
     let span = node_span(&node);
     let id = format!("s:{}:{}:{}", file_id, span.start_line, &name);
-    let sig = node_text(node, source).lines().next().unwrap_or("").trim().to_string();
+    let sig = node_text(node, source)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     symbols.push(Symbol {
         id,
@@ -336,7 +358,12 @@ fn find_identifier(node: &Node, source: &str) -> Option<String> {
     for child in node.children(&mut cursor) {
         if child.kind() == "identifier" || child.kind() == "type_identifier" {
             let text = node_text(child, source);
-            if !text.is_empty() && text.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') {
+            if !text.is_empty()
+                && text
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
+            {
                 return Some(text);
             }
         }
@@ -366,7 +393,12 @@ fn extract_sig_before_body(node: &Node, source: &str) -> String {
             return source[start..end].trim().to_string();
         }
     }
-    node_text(*node, source).lines().next().unwrap_or("").trim().to_string()
+    node_text(*node, source)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 fn node_text(node: Node, source: &str) -> String {

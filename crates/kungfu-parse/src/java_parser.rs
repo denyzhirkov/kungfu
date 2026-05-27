@@ -20,7 +20,10 @@ pub fn extract_imports(root: Node, source: &str) -> Vec<RawImport> {
                 let names = if path.ends_with(".*") {
                     Vec::new()
                 } else {
-                    path.rsplit('.').next().map(|n| vec![n.to_string()]).unwrap_or_default()
+                    path.rsplit('.')
+                        .next()
+                        .map(|n| vec![n.to_string()])
+                        .unwrap_or_default()
                 };
                 imports.push(RawImport {
                     path,
@@ -55,19 +58,59 @@ fn extract_node(
 ) {
     match node.kind() {
         "class_declaration" => {
-            extract_type(node, source, file_id, file_path, parent_id, SymbolKind::Class, symbols);
+            extract_type(
+                node,
+                source,
+                file_id,
+                file_path,
+                parent_id,
+                SymbolKind::Class,
+                symbols,
+            );
         }
         "interface_declaration" => {
-            extract_type(node, source, file_id, file_path, parent_id, SymbolKind::Interface, symbols);
+            extract_type(
+                node,
+                source,
+                file_id,
+                file_path,
+                parent_id,
+                SymbolKind::Interface,
+                symbols,
+            );
         }
         "enum_declaration" => {
-            extract_type(node, source, file_id, file_path, parent_id, SymbolKind::Enum, symbols);
+            extract_type(
+                node,
+                source,
+                file_id,
+                file_path,
+                parent_id,
+                SymbolKind::Enum,
+                symbols,
+            );
         }
         "method_declaration" => {
-            extract_method(node, source, file_id, file_path, parent_id, SymbolKind::Method, symbols);
+            extract_method(
+                node,
+                source,
+                file_id,
+                file_path,
+                parent_id,
+                SymbolKind::Method,
+                symbols,
+            );
         }
         "constructor_declaration" => {
-            extract_method(node, source, file_id, file_path, parent_id, SymbolKind::Function, symbols);
+            extract_method(
+                node,
+                source,
+                file_id,
+                file_path,
+                parent_id,
+                SymbolKind::Function,
+                symbols,
+            );
         }
         "field_declaration" => {
             extract_field(node, source, file_id, file_path, parent_id, symbols);

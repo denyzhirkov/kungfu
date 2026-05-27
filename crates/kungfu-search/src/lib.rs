@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use anyhow::Result;
 use kungfu_storage::JsonStore;
 use kungfu_types::file::FileEntry;
@@ -48,7 +50,11 @@ impl<'a> SearchEngine<'a> {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(top_k);
         Ok(results)
     }
@@ -70,7 +76,7 @@ impl<'a> SearchEngine<'a> {
                 s.name.to_lowercase() == *method_name
                     && s.parent_symbol_id
                         .as_ref()
-                        .map_or(false, |pid| pid.to_lowercase().contains(parent_name))
+                        .is_some_and(|pid| pid.to_lowercase().contains(parent_name))
             }) {
                 return Ok(Some(sym.clone()));
             }
@@ -96,9 +102,7 @@ impl<'a> SearchEngine<'a> {
                 score_symbol_match(&sym.name, &query_lower)
             };
             if sym_score > 0.0 {
-                let entry = file_symbol_scores
-                    .entry(sym.file_id.clone())
-                    .or_insert(0.0);
+                let entry = file_symbol_scores.entry(sym.file_id.clone()).or_insert(0.0);
                 if sym_score > *entry {
                     *entry = sym_score;
                 }
@@ -122,7 +126,11 @@ impl<'a> SearchEngine<'a> {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(top_k);
         Ok(results)
     }
@@ -141,16 +149,20 @@ impl<'a> SearchEngine<'a> {
 
     /// Find files related to the given file by import relations, directory proximity,
     /// shared symbols, and naming patterns.
-    pub fn find_related(&self, file_path: &str, budget: Budget) -> Result<Vec<SearchResult<FileEntry>>> {
+    pub fn find_related(
+        &self,
+        file_path: &str,
+        budget: Budget,
+    ) -> Result<Vec<SearchResult<FileEntry>>> {
         let files = self.store.load_files()?;
         let symbols = self.store.load_symbols()?;
         let relations = self.store.load_relations()?;
         let top_k = budget.top_k();
 
         // Normalize: find the file in the index
-        let target = files
-            .iter()
-            .find(|f| f.path == file_path || f.path.ends_with(file_path) || file_path.ends_with(&f.path));
+        let target = files.iter().find(|f| {
+            f.path == file_path || f.path.ends_with(file_path) || file_path.ends_with(&f.path)
+        });
 
         let target = match target {
             Some(t) => t.clone(),
@@ -260,20 +272,19 @@ impl<'a> SearchEngine<'a> {
                 if let Some(f_syms) = file_symbols.get(&f.id) {
                     let shared = target_symbols.intersection(f_syms).count();
                     if shared > 0 {
-                        let sym_score = (shared as f64 / target_symbols.len().max(1) as f64).min(1.0);
+                        let sym_score =
+                            (shared as f64 / target_symbols.len().max(1) as f64).min(1.0);
                         score += sym_score * 0.3;
                     }
                 }
 
                 // 4. Test file pattern
                 if f_stem.contains(&target_stem) || target_stem.contains(&f_stem) {
-                    if f.path.contains("test") || f.path.contains("spec") {
-                        score += 0.3;
-                    } else if target_path.contains("test") || target_path.contains("spec") {
-                        score += 0.3;
-                    } else {
-                        score += 0.1;
-                    }
+                    let is_test_pair = f.path.contains("test")
+                        || f.path.contains("spec")
+                        || target_path.contains("test")
+                        || target_path.contains("spec");
+                    score += if is_test_pair { 0.3 } else { 0.1 };
                 }
 
                 // 5. Same language bonus
@@ -292,7 +303,11 @@ impl<'a> SearchEngine<'a> {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(top_k);
         Ok(results)
     }
@@ -403,17 +418,14 @@ fn score_symbol_multi_word(sym: &Symbol, words: &[&str]) -> f64 {
 
     let mut matched = 0;
     for word in words {
-        let direct = name_lower.contains(word)
-            || sig_lower.contains(word)
-            || path_lower.contains(word);
+        let direct =
+            name_lower.contains(word) || sig_lower.contains(word) || path_lower.contains(word);
         let via_stem = !direct
-            && (simple_stem(word)
-                .map_or(false, |s| {
-                    name_lower.contains(&s) || sig_lower.contains(&s) || path_lower.contains(&s)
-                })
-                || short_root(word).map_or(false, |r| {
-                    name_lower.contains(&r) || sig_lower.contains(&r) || path_lower.contains(&r)
-                }));
+            && (simple_stem(word).is_some_and(|s| {
+                name_lower.contains(&s) || sig_lower.contains(&s) || path_lower.contains(&s)
+            }) || short_root(word).is_some_and(|r| {
+                name_lower.contains(&r) || sig_lower.contains(&r) || path_lower.contains(&r)
+            }));
         if direct || via_stem {
             matched += 1;
         }
@@ -428,8 +440,8 @@ fn score_symbol_multi_word(sym: &Symbol, words: &[&str]) -> f64 {
     // Boost if name directly matches (including via stem)
     let name_matches = words.iter().any(|w| {
         name_lower.contains(w)
-            || simple_stem(w).map_or(false, |s| name_lower.contains(&s))
-            || short_root(w).map_or(false, |r| name_lower.contains(&r))
+            || simple_stem(w).is_some_and(|s| name_lower.contains(&s))
+            || short_root(w).is_some_and(|r| name_lower.contains(&r))
     });
     if name_matches {
         ratio * 0.9
@@ -480,8 +492,7 @@ fn score_path_match(path: &str, query: &str, words: &[&str]) -> f64 {
     let matched = words
         .iter()
         .filter(|w| {
-            path_lower.contains(*w)
-                || simple_stem(w).map_or(false, |stem| path_lower.contains(&stem))
+            path_lower.contains(*w) || simple_stem(w).is_some_and(|stem| path_lower.contains(&stem))
         })
         .count();
     if matched == 0 {
@@ -496,7 +507,10 @@ pub fn simple_stem(word: &str) -> Option<String> {
     if word.len() < 5 {
         return None;
     }
-    for suffix in &["ing", "tion", "sion", "ment", "ness", "ity", "able", "ible", "ous", "ive", "er", "ed", "es", "ly", "al", "ful", "less", "ize", "ise", "ation", "icate", "ication"] {
+    for suffix in &[
+        "ing", "tion", "sion", "ment", "ness", "ity", "able", "ible", "ous", "ive", "er", "ed",
+        "es", "ly", "al", "ful", "less", "ize", "ise", "ation", "icate", "ication",
+    ] {
         if let Some(stem) = word.strip_suffix(suffix) {
             if stem.len() >= 3 {
                 return Some(stem.to_string());
@@ -561,43 +575,110 @@ pub fn expand_query(keywords: &[&str]) -> Vec<String> {
 fn concept_synonyms(word: &str) -> Option<&'static [&'static str]> {
     Some(match word {
         // Authentication & security
-        "auth" | "authenticate" | "authentication" => &["login", "verify", "token", "credential", "session", "password", "jwt", "oauth"],
+        "auth" | "authenticate" | "authentication" => &[
+            "login",
+            "verify",
+            "token",
+            "credential",
+            "session",
+            "password",
+            "jwt",
+            "oauth",
+        ],
         "login" | "signin" => &["auth", "authenticate", "credential", "session"],
-        "permission" | "authorize" | "authorization" => &["role", "access", "guard", "policy", "acl"],
+        "permission" | "authorize" | "authorization" => {
+            &["role", "access", "guard", "policy", "acl"]
+        }
         "security" => &["auth", "encrypt", "token", "sanitize", "csrf", "xss"],
 
         // Database & storage
-        "database" | "db" => &["query", "connection", "pool", "migrate", "schema", "model", "repository", "dao"],
+        "database" | "db" => &[
+            "query",
+            "connection",
+            "pool",
+            "migrate",
+            "schema",
+            "model",
+            "repository",
+            "dao",
+        ],
         "query" => &["select", "filter", "where", "fetch", "find"],
         "migrate" | "migration" => &["schema", "alter", "table", "database"],
         "cache" | "caching" => &["store", "redis", "memcache", "ttl", "invalidate", "expire"],
 
         // HTTP & networking
-        "request" | "req" => &["response", "handler", "route", "middleware", "http", "endpoint"],
+        "request" | "req" => &[
+            "response",
+            "handler",
+            "route",
+            "middleware",
+            "http",
+            "endpoint",
+        ],
         "response" | "res" => &["request", "handler", "status", "header", "body"],
-        "route" | "routing" => &["handler", "endpoint", "path", "middleware", "controller", "dispatch"],
+        "route" | "routing" => &[
+            "handler",
+            "endpoint",
+            "path",
+            "middleware",
+            "controller",
+            "dispatch",
+        ],
         "middleware" => &["handler", "filter", "interceptor", "guard", "pipe", "chain"],
         "api" => &["endpoint", "route", "handler", "rest", "controller"],
-        "http" => &["request", "response", "handler", "client", "server", "fetch"],
+        "http" => &[
+            "request", "response", "handler", "client", "server", "fetch",
+        ],
         "websocket" | "ws" => &["socket", "connect", "message", "channel"],
 
         // Error handling
-        "error" | "err" => &["exception", "panic", "fail", "handle", "catch", "result", "unwrap"],
+        "error" | "err" => &[
+            "exception",
+            "panic",
+            "fail",
+            "handle",
+            "catch",
+            "result",
+            "unwrap",
+        ],
         "exception" => &["error", "throw", "catch", "handle", "try"],
         "panic" => &["error", "crash", "abort", "unwrap", "bail"],
         "retry" => &["backoff", "attempt", "reconnect", "fallback"],
 
         // Async & concurrency
         "async" | "asynchronous" => &["await", "future", "promise", "spawn", "task", "concurrent"],
-        "concurrent" | "concurrency" => &["thread", "mutex", "lock", "sync", "parallel", "atomic", "channel"],
+        "concurrent" | "concurrency" => &[
+            "thread", "mutex", "lock", "sync", "parallel", "atomic", "channel",
+        ],
         "thread" => &["spawn", "pool", "mutex", "lock", "concurrent", "parallel"],
         "channel" => &["sender", "receiver", "mpsc", "broadcast", "message"],
 
         // Serialization & parsing
-        "serialize" | "serialization" => &["deserialize", "json", "serde", "encode", "marshal", "format"],
+        "serialize" | "serialization" => &[
+            "deserialize",
+            "json",
+            "serde",
+            "encode",
+            "marshal",
+            "format",
+        ],
         "parse" | "parsing" => &["lexer", "tokenize", "ast", "grammar", "syntax", "tree"],
-        "json" => &["serialize", "deserialize", "serde", "parse", "encode", "decode"],
-        "validate" | "validation" => &["check", "verify", "sanitize", "constraint", "schema", "rule"],
+        "json" => &[
+            "serialize",
+            "deserialize",
+            "serde",
+            "parse",
+            "encode",
+            "decode",
+        ],
+        "validate" | "validation" => &[
+            "check",
+            "verify",
+            "sanitize",
+            "constraint",
+            "schema",
+            "rule",
+        ],
 
         // Logging & observability
         "log" | "logging" => &["trace", "debug", "info", "warn", "logger", "tracing"],
@@ -609,14 +690,25 @@ fn concept_synonyms(word: &str) -> Option<&'static [&'static str]> {
         "mock" | "mocking" => &["stub", "fake", "spy", "test", "fixture"],
 
         // Config & setup
-        "config" | "configuration" => &["settings", "options", "env", "environment", "setup", "preference"],
+        "config" | "configuration" => &[
+            "settings",
+            "options",
+            "env",
+            "environment",
+            "setup",
+            "preference",
+        ],
         "env" | "environment" => &["config", "variable", "dotenv", "settings"],
 
         // Data structures
         "list" | "array" => &["vec", "slice", "collection", "iterator", "push", "append"],
-        "map" | "hashmap" | "dict" | "dictionary" => &["hash", "lookup", "key", "value", "entry", "table"],
+        "map" | "hashmap" | "dict" | "dictionary" => {
+            &["hash", "lookup", "key", "value", "entry", "table"]
+        }
         "queue" => &["enqueue", "dequeue", "fifo", "buffer", "channel"],
-        "tree" => &["node", "traverse", "walk", "leaf", "branch", "parent", "child"],
+        "tree" => &[
+            "node", "traverse", "walk", "leaf", "branch", "parent", "child",
+        ],
 
         // File & IO
         "file" => &["read", "write", "path", "open", "stream", "io", "fs"],
@@ -678,7 +770,12 @@ mod tests {
             language: "rust".to_string(),
             path: path.to_string(),
             signature: sig.map(String::from),
-            span: Span { start_line: 1, end_line: 10, start_col: 0, end_col: 0 },
+            span: Span {
+                start_line: 1,
+                end_line: 10,
+                start_col: 0,
+                end_col: 0,
+            },
             parent_symbol_id: None,
             exported: true,
             visibility: None,
@@ -713,7 +810,11 @@ mod tests {
         assert_eq!(score, 0.0, "3-char fuzzy should not match");
         // 4+ char fuzzy queries should still work
         let score = score_symbol_match("build_context_packet", "bcpk");
-        assert!(score > 0.2, "4-char fuzzy match should score > 0.2, got {}", score);
+        assert!(
+            score > 0.2,
+            "4-char fuzzy match should score > 0.2, got {}",
+            score
+        );
     }
 
     #[test]
@@ -725,7 +826,11 @@ mod tests {
 
         // But a name containing "rank" should match via stem
         let score2 = score_symbol_match("rank_results", "ranking");
-        assert!(score2 > 0.0, "stem should match rank_results, got {}", score2);
+        assert!(
+            score2 > 0.0,
+            "stem should match rank_results, got {}",
+            score2
+        );
     }
 
     #[test]
@@ -748,7 +853,10 @@ mod tests {
     fn multi_word_partial() {
         let sym = make_symbol("parse_budget", "src/cli.rs", None);
         let score = score_symbol_multi_word(&sym, &["budget", "validation"]);
-        assert!(score > 0.0 && score < 0.95, "partial multi-word should be between 0 and 0.95");
+        assert!(
+            score > 0.0 && score < 0.95,
+            "partial multi-word should be between 0 and 0.95"
+        );
     }
 
     #[test]
@@ -881,6 +989,10 @@ mod tests {
     #[test]
     fn path_exact_filename() {
         let score = score_path_match("src/router.ts", "router", &["router"]);
-        assert!(score >= 0.9, "exact filename match should score high, got {}", score);
+        assert!(
+            score >= 0.9,
+            "exact filename match should score high, got {}",
+            score
+        );
     }
 }

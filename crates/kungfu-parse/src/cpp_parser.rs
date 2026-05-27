@@ -28,10 +28,26 @@ fn collect_symbols(
                 extract_function(child, source, file_id, file_path, parent_id, symbols);
             }
             "class_specifier" => {
-                extract_class(child, source, file_id, file_path, parent_id, SymbolKind::Class, symbols);
+                extract_class(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Class,
+                    symbols,
+                );
             }
             "struct_specifier" => {
-                extract_class(child, source, file_id, file_path, parent_id, SymbolKind::Struct, symbols);
+                extract_class(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Struct,
+                    symbols,
+                );
             }
             "enum_specifier" => {
                 extract_enum(child, source, file_id, file_path, parent_id, symbols);
@@ -75,7 +91,12 @@ fn extract_class(
 
     let span = node_span(&node);
     let id = format!("s:{}:{}:{}", file_id, span.start_line, &name);
-    let sig = node_text(node, source).lines().next().unwrap_or("").trim().to_string();
+    let sig = node_text(node, source)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     symbols.push(Symbol {
         id: id.clone(),
@@ -115,18 +136,37 @@ fn extract_class_members(
     for child in node.children(&mut cursor) {
         match child.kind() {
             "access_specifier" => {
-                let text = node_text(child, source).trim_end_matches(':').trim().to_string();
+                let text = node_text(child, source)
+                    .trim_end_matches(':')
+                    .trim()
+                    .to_string();
                 current_visibility = Some(text);
             }
             "function_definition" => {
-                extract_method(child, source, file_id, file_path, parent_id, &current_visibility, symbols);
+                extract_method(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    &current_visibility,
+                    symbols,
+                );
             }
             "declaration" => {
                 // Could be a method declaration or field
                 let text = node_text(child, source);
                 let has_params = text.contains('(');
                 if has_params {
-                    extract_method_decl(child, source, file_id, file_path, parent_id, &current_visibility, symbols);
+                    extract_method_decl(
+                        child,
+                        source,
+                        file_id,
+                        file_path,
+                        parent_id,
+                        &current_visibility,
+                        symbols,
+                    );
                 }
             }
             "field_declaration" => {
@@ -187,7 +227,13 @@ fn extract_method_decl(
             if let Some(name) = find_name(&child, source) {
                 let span = node_span(&node);
                 let id = format!("s:{}:{}:{}", file_id, span.start_line, &name);
-                let sig = node_text(node, source).lines().next().unwrap_or("").trim().trim_end_matches(';').to_string();
+                let sig = node_text(node, source)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(';')
+                    .to_string();
                 let exported = !matches!(visibility.as_deref(), Some("private"));
 
                 symbols.push(Symbol {
@@ -273,7 +319,14 @@ fn extract_namespace(
         kind: SymbolKind::Module,
         language: "cpp".to_string(),
         path: file_path.to_string(),
-        signature: Some(node_text(node, source).lines().next().unwrap_or("").trim().to_string()),
+        signature: Some(
+            node_text(node, source)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        ),
         span,
         parent_symbol_id: parent_id.map(|s| s.to_string()),
         exported: true,
@@ -312,7 +365,14 @@ fn extract_enum(
         kind: SymbolKind::Enum,
         language: "cpp".to_string(),
         path: file_path.to_string(),
-        signature: Some(node_text(node, source).lines().next().unwrap_or("").trim().to_string()),
+        signature: Some(
+            node_text(node, source)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        ),
         span,
         parent_symbol_id: parent_id.map(|s| s.to_string()),
         exported: true,
@@ -335,7 +395,13 @@ fn extract_declaration(
             if let Some(name) = find_name(&child, source) {
                 let span = node_span(&node);
                 let id = format!("s:{}:{}:{}", file_id, span.start_line, &name);
-                let sig = node_text(node, source).lines().next().unwrap_or("").trim().trim_end_matches(';').to_string();
+                let sig = node_text(node, source)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(';')
+                    .to_string();
                 symbols.push(Symbol {
                     id,
                     file_id: file_id.to_string(),
@@ -378,7 +444,13 @@ fn extract_typedef(
 
     let span = node_span(&node);
     let id = format!("s:{}:{}:{}", file_id, span.start_line, &name);
-    let sig = node_text(node, source).lines().next().unwrap_or("").trim().trim_end_matches(';').to_string();
+    let sig = node_text(node, source)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches(';')
+        .to_string();
 
     symbols.push(Symbol {
         id,
@@ -417,7 +489,14 @@ fn extract_macro(
                     kind: SymbolKind::Constant,
                     language: "cpp".to_string(),
                     path: file_path.to_string(),
-                    signature: Some(node_text(node, source).lines().next().unwrap_or("").trim().to_string()),
+                    signature: Some(
+                        node_text(node, source)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                    ),
                     span,
                     parent_symbol_id: None,
                     exported: true,
@@ -452,11 +531,18 @@ fn find_function_name(node: &Node, source: &str) -> Option<String> {
 fn find_name(node: &Node, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "identifier" || child.kind() == "type_identifier"
-            || child.kind() == "name" || child.kind() == "namespace_identifier"
+        if child.kind() == "identifier"
+            || child.kind() == "type_identifier"
+            || child.kind() == "name"
+            || child.kind() == "namespace_identifier"
         {
             let text = node_text(child, source);
-            if !text.is_empty() && text.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') {
+            if !text.is_empty()
+                && text
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
+            {
                 return Some(text);
             }
         }
@@ -473,7 +559,12 @@ fn extract_sig_before_body(node: &Node, source: &str) -> String {
             return source[start..end].trim().to_string();
         }
     }
-    node_text(*node, source).lines().next().unwrap_or("").trim().to_string()
+    node_text(*node, source)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 fn node_text(node: Node, source: &str) -> String {

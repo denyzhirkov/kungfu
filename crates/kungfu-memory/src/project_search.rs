@@ -83,8 +83,12 @@ pub fn search_project_memory_with_context(
             // If no query words, return all filtered entries with base score
             if query_words.is_empty() {
                 let mut score = if e.pinned { 1.0 } else { 0.5 };
-                if file_overlap { score += 0.3; }
-                if symbol_overlap { score += 0.3; }
+                if file_overlap {
+                    score += 0.3;
+                }
+                if symbol_overlap {
+                    score += 0.3;
+                }
                 return Some((score, e));
             }
 
@@ -136,13 +140,19 @@ pub fn search_project_memory_with_context(
 
             // Query-word matching against related_files/symbols (weaker signal)
             for word in &query_words {
-                if e.related_files.iter().any(|f| f.to_lowercase().contains(word)) {
+                if e.related_files
+                    .iter()
+                    .any(|f| f.to_lowercase().contains(word))
+                {
                     score += 0.1;
                     break;
                 }
             }
             for word in &query_words {
-                if e.related_symbols.iter().any(|s| s.to_lowercase().contains(word)) {
+                if e.related_symbols
+                    .iter()
+                    .any(|s| s.to_lowercase().contains(word))
+                {
                     score += 0.1;
                     break;
                 }
@@ -173,11 +183,23 @@ fn paths_overlap(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn make_entry(id: &str, kind: ProjectMemoryKind, content: &str, tags: &[&str], pinned: bool) -> ProjectMemoryEntry {
+    fn make_entry(
+        id: &str,
+        kind: ProjectMemoryKind,
+        content: &str,
+        tags: &[&str],
+        pinned: bool,
+    ) -> ProjectMemoryEntry {
         ProjectMemoryEntry {
             id: id.to_string(),
             kind,
-            title: Some(content.split_whitespace().take(5).collect::<Vec<_>>().join(" ")),
+            title: Some(
+                content
+                    .split_whitespace()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
             content: content.to_string(),
             tags: tags.iter().map(|s| s.to_string()).collect(),
             related_files: Vec::new(),
@@ -193,8 +215,20 @@ mod tests {
     #[test]
     fn search_by_content() {
         let entries = vec![
-            make_entry("mem_0001", ProjectMemoryKind::Fact, "backend uses sqlite", &[], false),
-            make_entry("mem_0002", ProjectMemoryKind::Fact, "frontend uses react", &[], false),
+            make_entry(
+                "mem_0001",
+                ProjectMemoryKind::Fact,
+                "backend uses sqlite",
+                &[],
+                false,
+            ),
+            make_entry(
+                "mem_0002",
+                ProjectMemoryKind::Fact,
+                "frontend uses react",
+                &[],
+                false,
+            ),
         ];
         let results = search_project_memory("sqlite", &entries, &MemoryFilter::default());
         assert_eq!(results.len(), 1);
@@ -204,8 +238,20 @@ mod tests {
     #[test]
     fn filter_by_kind() {
         let entries = vec![
-            make_entry("mem_0001", ProjectMemoryKind::Fact, "uses sqlite", &[], false),
-            make_entry("mem_0002", ProjectMemoryKind::Warning, "legacy auth", &[], false),
+            make_entry(
+                "mem_0001",
+                ProjectMemoryKind::Fact,
+                "uses sqlite",
+                &[],
+                false,
+            ),
+            make_entry(
+                "mem_0002",
+                ProjectMemoryKind::Warning,
+                "legacy auth",
+                &[],
+                false,
+            ),
         ];
         let filter = MemoryFilter {
             kind: Some(ProjectMemoryKind::Warning),
@@ -219,8 +265,20 @@ mod tests {
     #[test]
     fn pinned_gets_bonus() {
         let entries = vec![
-            make_entry("mem_0001", ProjectMemoryKind::Fact, "uses sqlite database", &[], false),
-            make_entry("mem_0002", ProjectMemoryKind::Fact, "sqlite is the main store", &[], true),
+            make_entry(
+                "mem_0001",
+                ProjectMemoryKind::Fact,
+                "uses sqlite database",
+                &[],
+                false,
+            ),
+            make_entry(
+                "mem_0002",
+                ProjectMemoryKind::Fact,
+                "sqlite is the main store",
+                &[],
+                true,
+            ),
         ];
         let results = search_project_memory("sqlite", &entries, &MemoryFilter::default());
         assert_eq!(results.len(), 2);
@@ -294,8 +352,14 @@ mod tests {
 
     #[test]
     fn paths_overlap_loose_matching() {
-        assert!(paths_overlap("crates/kungfu-core/src/lib.rs", "kungfu-core/src/lib.rs"));
-        assert!(paths_overlap("kungfu-core/src/lib.rs", "crates/kungfu-core/src/lib.rs"));
+        assert!(paths_overlap(
+            "crates/kungfu-core/src/lib.rs",
+            "kungfu-core/src/lib.rs"
+        ));
+        assert!(paths_overlap(
+            "kungfu-core/src/lib.rs",
+            "crates/kungfu-core/src/lib.rs"
+        ));
         assert!(paths_overlap("/abs/foo.rs", "abs/foo.rs"));
         assert!(!paths_overlap("src/foo.rs", "src/bar.rs"));
     }

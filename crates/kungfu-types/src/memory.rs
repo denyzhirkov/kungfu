@@ -81,9 +81,10 @@ impl std::str::FromStr for ProjectMemoryKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
+    #[default]
     Active,
     Archived,
     Superseded,
@@ -97,12 +98,6 @@ impl std::fmt::Display for MemoryStatus {
             MemoryStatus::Superseded => "superseded",
         };
         write!(f, "{}", s)
-    }
-}
-
-impl Default for MemoryStatus {
-    fn default() -> Self {
-        MemoryStatus::Active
     }
 }
 

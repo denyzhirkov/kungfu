@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use anyhow::{bail, Context, Result};
 use kungfu_config::KungfuConfig;
 use kungfu_types::project::ProjectMeta;
@@ -22,17 +24,15 @@ impl Project {
         let kungfu_dir = root.join(KUNGFU_DIR);
 
         if !kungfu_dir.exists() {
-            bail!(
-                "not a kungfu project (no .kungfu directory found). Run 'kungfu init' first."
-            );
+            bail!("not a kungfu project (no .kungfu directory found). Run 'kungfu init' first.");
         }
 
         let config_path = kungfu_dir.join(CONFIG_FILE);
         let config = KungfuConfig::load_merged(Some(&config_path))?;
 
         let meta_path = kungfu_dir.join(PROJECT_FILE);
-        let meta_content = std::fs::read_to_string(&meta_path)
-            .with_context(|| "failed to read project.json")?;
+        let meta_content =
+            std::fs::read_to_string(&meta_path).with_context(|| "failed to read project.json")?;
         let meta: ProjectMeta =
             serde_json::from_str(&meta_content).with_context(|| "failed to parse project.json")?;
 

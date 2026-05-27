@@ -134,13 +134,13 @@ pub fn doctor(json: bool) -> Result<()> {
                                 .map(|v| v.len())
                         })
                         .unwrap_or(0);
+                    checks.push(("index_files", true, format!("{} files indexed", file_count)));
+                } else {
                     checks.push((
                         "index_files",
-                        true,
-                        format!("{} files indexed", file_count),
+                        false,
+                        "not indexed — run 'kungfu index'".into(),
                     ));
-                } else {
-                    checks.push(("index_files", false, "not indexed — run 'kungfu index'".into()));
                 }
 
                 if has_symbols {
@@ -188,7 +188,11 @@ pub fn doctor(json: bool) -> Result<()> {
                         format!("{} relations (imports, tests, configs)", rel_count),
                     ));
                 } else {
-                    checks.push(("index_relations", false, "no relations — reindex with 'kungfu index --full'".into()));
+                    checks.push((
+                        "index_relations",
+                        false,
+                        "no relations — reindex with 'kungfu index --full'".into(),
+                    ));
                 }
 
                 // Symbol coverage: % of code files that have symbols
@@ -206,12 +210,26 @@ pub fn doctor(json: bool) -> Result<()> {
                         .iter()
                         .filter(|f| {
                             let lang = f.get("language").and_then(|l| l.as_str()).unwrap_or("");
-                            if !matches!(lang, "rust" | "typescript" | "javascript" | "python" | "go" | "java" | "csharp" | "kotlin" | "c" | "cpp") {
+                            if !matches!(
+                                lang,
+                                "rust"
+                                    | "typescript"
+                                    | "javascript"
+                                    | "python"
+                                    | "go"
+                                    | "java"
+                                    | "csharp"
+                                    | "kotlin"
+                                    | "c"
+                                    | "cpp"
+                            ) {
                                 return false;
                             }
                             // Exclude tiny files and test fixtures from coverage
                             let size = f.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
-                            if size < 100 { return false; }
+                            if size < 100 {
+                                return false;
+                            }
                             let path = f.get("path").and_then(|p| p.as_str()).unwrap_or("");
                             !path.contains("/fixtures/")
                                 && !path.contains("/resources/")
@@ -225,7 +243,11 @@ pub fn doctor(json: bool) -> Result<()> {
 
                     let files_with_symbols: std::collections::HashSet<String> = sym_data
                         .iter()
-                        .filter_map(|s| s.get("file_id").and_then(|id| id.as_str()).map(String::from))
+                        .filter_map(|s| {
+                            s.get("file_id")
+                                .and_then(|id| id.as_str())
+                                .map(String::from)
+                        })
                         .collect();
 
                     let covered = code_files.intersection(&files_with_symbols).count();
@@ -243,7 +265,15 @@ pub fn doctor(json: bool) -> Result<()> {
                 let dirs = ["cache", "logs", "state"];
                 for dir in &dirs {
                     let d = kungfu_dir.join(dir);
-                    checks.push((dir, d.exists(), if d.exists() { "ok".into() } else { "missing".into() }));
+                    checks.push((
+                        dir,
+                        d.exists(),
+                        if d.exists() {
+                            "ok".into()
+                        } else {
+                            "missing".into()
+                        },
+                    ));
                 }
             }
         }
@@ -399,7 +429,11 @@ pub fn stats(json: bool) -> Result<()> {
         println!("=== Kungfu Usage Stats ===");
         println!();
         println!("  Total calls:        {}", stats.total_calls);
-        println!("  Bytes served:       {} ({:.1} KB)", stats.total_bytes_served, stats.total_bytes_served as f64 / 1024.0);
+        println!(
+            "  Bytes served:       {} ({:.1} KB)",
+            stats.total_bytes_served,
+            stats.total_bytes_served as f64 / 1024.0
+        );
         let tokens = stats.total_bytes_served / 4;
         println!("  Est. tokens served: {}", tokens);
         if let Some(ref first) = stats.first_used {
@@ -436,7 +470,10 @@ pub fn onboard(json: bool) -> Result<()> {
         println!("# {}", info.project_name);
         println!();
         println!("## Overview");
-        println!("  Files:   {}  |  Symbols: {}", info.total_files, info.total_symbols);
+        println!(
+            "  Files:   {}  |  Symbols: {}",
+            info.total_files, info.total_symbols
+        );
         if let Some(ref primary) = info.primary_language {
             println!("  Primary: {}", primary);
         }
@@ -484,7 +521,10 @@ pub fn affected(name: &str, depth: usize, json: bool) -> Result<()> {
         if result.entries.is_empty() {
             println!("  No affected symbols found.");
         } else {
-            println!("{:<4} {:<30} {:<50} {:<10} {}", "#", "Symbol", "Path", "Kind", "Reason");
+            println!(
+                "{:<4} {:<30} {:<50} {:<10} Reason",
+                "#", "Symbol", "Path", "Kind"
+            );
             println!("{}", "-".repeat(110));
             for (i, e) in result.entries.iter().enumerate() {
                 println!(
@@ -528,7 +568,11 @@ pub fn smart_test(json: bool) -> Result<()> {
         if result.tests.is_empty() {
             println!("No relevant tests found.");
         } else {
-            println!("Run these {} tests (of {} total):", result.tests.len(), result.total_tests_in_project);
+            println!(
+                "Run these {} tests (of {} total):",
+                result.tests.len(),
+                result.total_tests_in_project
+            );
             println!();
             for t in &result.tests {
                 println!("  {}::{}", t.test_path, t.test_name);
@@ -590,7 +634,10 @@ pub fn coupling(top: usize, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&entries)?);
     } else {
-        println!("{:<4} {:<55} {:>7} {:>8} {:>10} {:>8}", "#", "File", "Fan-in", "Fan-out", "Co-change", "Risk");
+        println!(
+            "{:<4} {:<55} {:>7} {:>8} {:>10} {:>8}",
+            "#", "File", "Fan-in", "Fan-out", "Co-change", "Risk"
+        );
         println!("{}", "-".repeat(96));
         for (i, e) in entries.iter().enumerate() {
             println!(
@@ -618,7 +665,10 @@ pub fn hotspots(top: usize, churn: bool, files: bool, json: bool) -> Result<()> 
         let label = if files { "File" } else { "Symbol" };
         let size_label = if files { "Bytes" } else { "Lines" };
         if churn {
-            println!("{:<4} {:<40} {:<50} {:>6} {:>6} {:>10}", "#", label, "Path", size_label, "Churn", "Score");
+            println!(
+                "{:<4} {:<40} {:<50} {:>6} {:>6} {:>10}",
+                "#", label, "Path", size_label, "Churn", "Score"
+            );
             println!("{}", "-".repeat(120));
             for (i, e) in entries.iter().enumerate() {
                 println!(
@@ -664,7 +714,17 @@ pub fn watch() -> Result<()> {
     let config = service.config().clone();
     let index_dir = root.join(".kungfu").join("index");
 
-    kungfu_index::watcher::watch_and_index(&root, config, &index_dir)
+    println!("Watching for changes. Press Ctrl+C to stop.");
+    kungfu_index::watcher::watch_and_index(&root, config, &index_dir, |stats| {
+        println!(
+            "Re-indexed: {} files ({} new, {} changed, {} removed), {} symbols",
+            stats.total_files,
+            stats.new_files,
+            stats.changed_files,
+            stats.removed_files,
+            stats.symbols_extracted
+        );
+    })
 }
 
 pub fn repo_outline(budget: Budget, json: bool) -> Result<()> {
@@ -888,18 +948,16 @@ pub fn search_text(query: &str, budget: Budget, json: bool) -> Result<()> {
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
+    } else if results.is_empty() {
+        println!("No results for '{}'", query);
     } else {
-        if results.is_empty() {
-            println!("No results for '{}'", query);
-        } else {
-            for r in &results {
-                println!(
-                    "  {:.2}  {} ({})",
-                    r.score,
-                    r.item.path,
-                    r.item.language.as_deref().unwrap_or("?")
-                );
-            }
+        for r in &results {
+            println!(
+                "  {:.2}  {} ({})",
+                r.score,
+                r.item.path,
+                r.item.language.as_deref().unwrap_or("?")
+            );
         }
     }
     Ok(())
@@ -955,17 +1013,15 @@ pub fn diff_context(budget: Budget, json: bool) -> Result<()> {
 
     if json {
         println!("{}", output);
+    } else if packet.items.is_empty() {
+        println!("No changed files or relevant symbols found.");
     } else {
-        if packet.items.is_empty() {
-            println!("No changed files or relevant symbols found.");
-        } else {
-            println!("Diff context ({} items):", packet.items.len());
-            for item in &packet.items {
-                println!(
-                    "  {:.2}  [{}] {} — {}",
-                    item.score, item.path, item.name, item.why
-                );
-            }
+        println!("Diff context ({} items):", packet.items.len());
+        for item in &packet.items {
+            println!(
+                "  {:.2}  [{}] {} — {}",
+                item.score, item.path, item.name, item.why
+            );
         }
     }
     Ok(())
@@ -979,12 +1035,24 @@ pub fn semantic_search(query: &str, budget: Budget, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        let keywords = result["keywords"].as_array().map(|a| {
-            a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
-        }).unwrap_or_default();
-        let expanded = result["expanded_terms"].as_array().map(|a| {
-            a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
-        }).unwrap_or_default();
+        let keywords = result["keywords"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let expanded = result["expanded_terms"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
 
         println!("Query:    {}", query);
         println!("Keywords: {}", keywords);
@@ -1018,18 +1086,16 @@ pub fn file_history(path: &str, json: bool) -> Result<()> {
     let result = service.file_history(path, 10)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
-    } else {
-        if let Some(commits) = result.get("commits").and_then(|c| c.as_array()) {
-            println!("History of {}:", path);
-            for c in commits {
-                println!(
-                    "  {} {} {} — {}",
-                    c["hash"].as_str().unwrap_or(""),
-                    c["date"].as_str().unwrap_or("").get(..10).unwrap_or(""),
-                    c["author"].as_str().unwrap_or(""),
-                    c["message"].as_str().unwrap_or(""),
-                );
-            }
+    } else if let Some(commits) = result.get("commits").and_then(|c| c.as_array()) {
+        println!("History of {}:", path);
+        for c in commits {
+            println!(
+                "  {} {} {} — {}",
+                c["hash"].as_str().unwrap_or(""),
+                c["date"].as_str().unwrap_or("").get(..10).unwrap_or(""),
+                c["author"].as_str().unwrap_or(""),
+                c["message"].as_str().unwrap_or(""),
+            );
         }
     }
     Ok(())
@@ -1109,7 +1175,10 @@ pub fn callers(name: &str, budget: Budget, json: bool) -> Result<()> {
         println!("Callers of '{}':", name);
         for (sym, _) in &results {
             let sig = sym.signature.as_deref().unwrap_or(&sym.name);
-            println!("  {}:{}  {} {}", sym.path, sym.span.start_line, sym.kind, sig);
+            println!(
+                "  {}:{}  {} {}",
+                sym.path, sym.span.start_line, sym.kind, sig
+            );
         }
     }
     Ok(())
@@ -1141,7 +1210,10 @@ pub fn callees(name: &str, budget: Budget, json: bool) -> Result<()> {
         println!("'{}' calls:", name);
         for (sym, _) in &results {
             let sig = sym.signature.as_deref().unwrap_or(&sym.name);
-            println!("  {}:{}  {} {}", sym.path, sym.span.start_line, sym.kind, sig);
+            println!(
+                "  {}:{}  {} {}",
+                sym.path, sym.span.start_line, sym.kind, sig
+            );
         }
     }
     Ok(())
@@ -1229,11 +1301,27 @@ pub fn explore_file(path: &str, budget: Budget, json: bool) -> Result<()> {
             println!();
             println!("Key symbols:");
             for s in syms {
-                let exported = if s["exported"].as_bool().unwrap_or(false) { " [pub]" } else { "" };
-                if let Some(sig) = s.get("signature").and_then(|v| v.as_str()) {
-                    println!("  L{} {} {}{}", s["line"].as_u64().unwrap_or(0), s["kind"].as_str().unwrap_or(""), sig, exported);
+                let exported = if s["exported"].as_bool().unwrap_or(false) {
+                    " [pub]"
                 } else {
-                    println!("  L{} {} {}{}", s["line"].as_u64().unwrap_or(0), s["kind"].as_str().unwrap_or(""), s["name"].as_str().unwrap_or(""), exported);
+                    ""
+                };
+                if let Some(sig) = s.get("signature").and_then(|v| v.as_str()) {
+                    println!(
+                        "  L{} {} {}{}",
+                        s["line"].as_u64().unwrap_or(0),
+                        s["kind"].as_str().unwrap_or(""),
+                        sig,
+                        exported
+                    );
+                } else {
+                    println!(
+                        "  L{} {} {}{}",
+                        s["line"].as_u64().unwrap_or(0),
+                        s["kind"].as_str().unwrap_or(""),
+                        s["name"].as_str().unwrap_or(""),
+                        exported
+                    );
                 }
             }
         }
@@ -1333,7 +1421,10 @@ pub fn mcp() -> Result<()> {
         if needs_index {
             eprintln!("kungfu: auto-indexing project...");
             match service.index_full() {
-                Ok(stats) => eprintln!("kungfu: indexed {} files ({} symbols)", stats.total_files, stats.symbols_extracted),
+                Ok(stats) => eprintln!(
+                    "kungfu: indexed {} files ({} symbols)",
+                    stats.total_files, stats.symbols_extracted
+                ),
                 Err(e) => eprintln!("kungfu: warning: index failed: {}", e),
             }
         }
@@ -1353,16 +1444,14 @@ pub fn change_timeline(name: &str, budget: Budget, json: bool) -> Result<()> {
 
     if json {
         println!("{}", output);
+    } else if events.is_empty() {
+        println!("No timeline events for: {}", name);
     } else {
-        if events.is_empty() {
-            println!("No timeline events for: {}", name);
-        } else {
-            println!("Timeline for {} ({} events):", name, events.len());
-            println!();
-            for e in &events {
-                let date = e.date.as_deref().unwrap_or("—");
-                println!("  [{}] {} ({})", e.event_type, e.detail, date);
-            }
+        println!("Timeline for {} ({} events):", name, events.len());
+        println!();
+        for e in &events {
+            let date = e.date.as_deref().unwrap_or("—");
+            println!("  [{}] {} ({})", e.event_type, e.detail, date);
         }
     }
     Ok(())
@@ -1382,18 +1471,9 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
             symbols,
             pin,
         } => {
-            let kind: ProjectMemoryKind = kind
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
-            let entry = service.memory_add(
-                kind,
-                &content,
-                title.as_deref(),
-                tags,
-                files,
-                symbols,
-                pin,
-            )?;
+            let kind: ProjectMemoryKind = kind.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            let entry =
+                service.memory_add(kind, &content, title.as_deref(), tags, files, symbols, pin)?;
             service.track_call("memory_add", 0);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
@@ -1489,7 +1569,14 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 for (score, e) in &results {
                     let pin_marker = if e.pinned { " [pinned]" } else { "" };
                     let title = e.title.as_deref().unwrap_or(&e.content);
-                    println!("  {:.2}  {} [{}]{} {}", score, e.id, e.kind, pin_marker, truncate_str(title, 50));
+                    println!(
+                        "  {:.2}  {} [{}]{} {}",
+                        score,
+                        e.id,
+                        e.kind,
+                        pin_marker,
+                        truncate_str(title, 50)
+                    );
                 }
             }
         }
@@ -1501,13 +1588,8 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
             pin,
         } => {
             let tags_opt = if tags.is_empty() { None } else { Some(tags) };
-            let entry = service.memory_update(
-                &id,
-                content.as_deref(),
-                title.as_deref(),
-                tags_opt,
-                pin,
-            )?;
+            let entry =
+                service.memory_update(&id, content.as_deref(), title.as_deref(), tags_opt, pin)?;
             service.track_call("memory_update", 0);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);

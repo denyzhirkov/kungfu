@@ -5,7 +5,11 @@ use kungfu_types::Budget;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "kungfu", version, about = "Context retrieval and distillation engine for coding agents")]
+#[command(
+    name = "kungfu",
+    version,
+    about = "Context retrieval and distillation engine for coding agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -381,17 +385,21 @@ fn main() {
         Commands::Config => commands::config_show(json),
         Commands::Index { full, changed } => commands::index(full, changed, json),
         Commands::Clean => commands::clean(json),
-        Commands::RepoOutline { budget } => {
-            commands::repo_outline(parse_budget(&budget), json)
-        }
+        Commands::RepoOutline { budget } => commands::repo_outline(parse_budget(&budget), json),
         Commands::FileOutline { path } => commands::file_outline(&path, json),
-        Commands::FindSymbol { query, budget, scope } => {
-            commands::find_symbol(&query, parse_budget(&budget), scope.as_deref(), json)
-        }
+        Commands::FindSymbol {
+            query,
+            budget,
+            scope,
+        } => commands::find_symbol(&query, parse_budget(&budget), scope.as_deref(), json),
         Commands::GetSymbol { name, budget } => {
             commands::get_symbol(&name, parse_budget(&budget), json)
         }
-        Commands::Search { query, budget, semantic } => {
+        Commands::Search {
+            query,
+            budget,
+            semantic,
+        } => {
             if semantic {
                 commands::semantic_search(&query, parse_budget(&budget), json)
             } else {
@@ -401,17 +409,11 @@ fn main() {
         Commands::AskContext { task, budget } => {
             commands::ask_context(&task, parse_budget(&budget), json)
         }
-        Commands::DiffContext { budget } => {
-            commands::diff_context(parse_budget(&budget), json)
-        }
+        Commands::DiffContext { budget } => commands::diff_context(parse_budget(&budget), json),
         Commands::FileHistory { path } => commands::file_history(&path, json),
         Commands::SymbolHistory { name } => commands::symbol_history(&name, json),
-        Commands::Callers { name, budget } => {
-            commands::callers(&name, parse_budget(&budget), json)
-        }
-        Commands::Callees { name, budget } => {
-            commands::callees(&name, parse_budget(&budget), json)
-        }
+        Commands::Callers { name, budget } => commands::callers(&name, parse_budget(&budget), json),
+        Commands::Callees { name, budget } => commands::callees(&name, parse_budget(&budget), json),
         Commands::ExploreSymbol { name, budget } => {
             commands::explore_symbol(&name, parse_budget(&budget), json)
         }

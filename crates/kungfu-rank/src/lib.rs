@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use kungfu_types::budget::Budget;
 use kungfu_types::context::{ContextItem, ContextItemType, ContextPacket};
 use kungfu_types::symbol::Symbol;
@@ -43,7 +45,11 @@ pub fn build_context_packet_full(
     let top_k = budget.top_k();
 
     // Sort by score descending
-    symbols.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    symbols.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Deduplicate by (path, name) — keep highest-scored entry
     let mut seen = std::collections::HashSet::new();

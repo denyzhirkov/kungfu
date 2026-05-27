@@ -71,7 +71,10 @@ impl FromStr for Budget {
             "medium" => Ok(Budget::Medium),
             "full" => Ok(Budget::Full),
             "auto" => Ok(Budget::Auto),
-            _ => Err(format!("invalid budget: '{}' (expected tiny, small, medium, full, auto)", s)),
+            _ => Err(format!(
+                "invalid budget: '{}' (expected tiny, small, medium, full, auto)",
+                s
+            )),
         }
     }
 }

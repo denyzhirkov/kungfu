@@ -21,7 +21,11 @@ fn collect_usings(node: &Node, source: &str, imports: &mut Vec<RawImport>) {
                 .to_string();
             // Skip aliases like "using Foo = Bar.Baz;"
             if !path.contains('=') && !path.is_empty() {
-                let names = path.rsplit('.').next().map(|n| vec![n.to_string()]).unwrap_or_default();
+                let names = path
+                    .rsplit('.')
+                    .next()
+                    .map(|n| vec![n.to_string()])
+                    .unwrap_or_default();
                 imports.push(RawImport {
                     path,
                     names,
@@ -30,7 +34,9 @@ fn collect_usings(node: &Node, source: &str, imports: &mut Vec<RawImport>) {
             }
         }
         // Recurse into namespaces to find nested usings
-        if child.kind() == "namespace_declaration" || child.kind() == "file_scoped_namespace_declaration" {
+        if child.kind() == "namespace_declaration"
+            || child.kind() == "file_scoped_namespace_declaration"
+        {
             collect_usings(&child, source, imports);
         }
     }
@@ -54,19 +60,59 @@ fn collect_symbols(
     for child in node.children(&mut cursor) {
         match child.kind() {
             "class_declaration" => {
-                extract_type(child, source, file_id, file_path, parent_id, SymbolKind::Class, symbols);
+                extract_type(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Class,
+                    symbols,
+                );
             }
             "struct_declaration" => {
-                extract_type(child, source, file_id, file_path, parent_id, SymbolKind::Struct, symbols);
+                extract_type(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Struct,
+                    symbols,
+                );
             }
             "interface_declaration" => {
-                extract_type(child, source, file_id, file_path, parent_id, SymbolKind::Interface, symbols);
+                extract_type(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Interface,
+                    symbols,
+                );
             }
             "enum_declaration" => {
-                extract_type(child, source, file_id, file_path, parent_id, SymbolKind::Enum, symbols);
+                extract_type(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Enum,
+                    symbols,
+                );
             }
             "record_declaration" => {
-                extract_type(child, source, file_id, file_path, parent_id, SymbolKind::Class, symbols);
+                extract_type(
+                    child,
+                    source,
+                    file_id,
+                    file_path,
+                    parent_id,
+                    SymbolKind::Class,
+                    symbols,
+                );
             }
             "method_declaration" => {
                 extract_method(child, source, file_id, file_path, parent_id, symbols);
@@ -227,7 +273,14 @@ fn extract_property(
         kind: SymbolKind::Variable,
         language: "csharp".to_string(),
         path: file_path.to_string(),
-        signature: Some(node_text(node, source).lines().next().unwrap_or("").trim().to_string()),
+        signature: Some(
+            node_text(node, source)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        ),
         span,
         parent_symbol_id: parent_id.map(|s| s.to_string()),
         exported,

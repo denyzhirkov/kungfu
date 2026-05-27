@@ -25,9 +25,7 @@ impl UsageStats {
 
     pub fn save(&self, kungfu_dir: &Path) -> std::io::Result<()> {
         let path = kungfu_dir.join("stats.json");
-        let json = serde_json::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, e)
-        })?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(&path, json)
     }
 

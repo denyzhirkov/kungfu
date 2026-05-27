@@ -22,7 +22,7 @@ pub fn scan_files(root: &Path, config: &KungfuConfig) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in builder.build() {
         let entry = entry?;
-        if entry.file_type().map_or(false, |ft| ft.is_file()) {
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
             let path = entry.path().to_path_buf();
             // Filter by enabled language extensions
             if should_index(&path, config) {
@@ -36,13 +36,11 @@ pub fn scan_files(root: &Path, config: &KungfuConfig) -> Result<Vec<PathBuf>> {
 }
 
 fn should_index(path: &Path, config: &KungfuConfig) -> bool {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let lang = kungfu_types::file::Language::from_extension(ext);
     let lang_str = lang.to_string();
 
-    config.languages.enabled.iter().any(|l| l == &lang_str) || lang == kungfu_types::file::Language::Unknown
+    config.languages.enabled.iter().any(|l| l == &lang_str)
+        || lang == kungfu_types::file::Language::Unknown
 }

@@ -1,7 +1,12 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+
+pub type LineRange = (usize, usize);
+pub type FileChangedLines = (String, Vec<LineRange>);
 
 pub fn is_git_repo(root: &Path) -> bool {
     root.join(".git").exists()
@@ -23,7 +28,11 @@ pub fn changed_files(root: &Path) -> Result<Vec<String>> {
             .context("failed to run git diff")?;
 
         let text = String::from_utf8_lossy(&output.stdout);
-        return Ok(text.lines().map(String::from).filter(|s| !s.is_empty()).collect());
+        return Ok(text
+            .lines()
+            .map(String::from)
+            .filter(|s| !s.is_empty())
+            .collect());
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
@@ -181,9 +190,12 @@ pub fn file_commit_counts(root: &Path) -> Result<HashMap<String, usize>> {
 
 /// Find files that frequently change together (co-change analysis).
 /// Returns pairs: for each file, the list of files that co-changed with it and how many times.
-pub fn co_change_pairs(root: &Path, min_count: usize) -> Result<HashMap<String, Vec<(String, usize)>>> {
+pub fn co_change_pairs(
+    root: &Path,
+    min_count: usize,
+) -> Result<HashMap<String, Vec<(String, usize)>>> {
     let output = Command::new("git")
-        .args(["log", "--format=COMMIT", "--name-only", "-n", "500"])
+        .args(["log", "--format=format:COMMIT", "--name-only", "-n", "500"])
         .current_dir(root)
         .output()
         .context("failed to run git log for co-change")?;
@@ -230,7 +242,10 @@ pub fn co_change_pairs(root: &Path, min_count: usize) -> Result<HashMap<String, 
     let mut result: HashMap<String, Vec<(String, usize)>> = HashMap::new();
     for ((a, b), count) in pairs {
         if count >= min_count {
-            result.entry(a.clone()).or_default().push((b.clone(), count));
+            result
+                .entry(a.clone())
+                .or_default()
+                .push((b.clone(), count));
             result.entry(b).or_default().push((a, count));
         }
     }
@@ -259,7 +274,8 @@ pub fn diff_files(root: &Path) -> Result<Vec<String>> {
         .context("failed to run git diff --cached")?;
     let staged_text = String::from_utf8_lossy(&staged.stdout);
 
-    let mut files: Vec<String> = text.lines()
+    let mut files: Vec<String> = text
+        .lines()
         .chain(staged_text.lines())
         .map(String::from)
         .filter(|s| !s.is_empty())
@@ -270,7 +286,7 @@ pub fn diff_files(root: &Path) -> Result<Vec<String>> {
 }
 
 /// Get symbols changed in git diff by parsing diff output for modified line ranges.
-pub fn diff_changed_lines(root: &Path) -> Result<Vec<(String, Vec<(usize, usize)>)>> {
+pub fn diff_changed_lines(root: &Path) -> Result<Vec<FileChangedLines>> {
     let output = Command::new("git")
         .args(["diff", "-U0", "HEAD"])
         .current_dir(root)
@@ -278,18 +294,18 @@ pub fn diff_changed_lines(root: &Path) -> Result<Vec<(String, Vec<(usize, usize)
         .context("failed to run git diff -U0")?;
 
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut result: Vec<(String, Vec<(usize, usize)>)> = Vec::new();
+    let mut result: Vec<FileChangedLines> = Vec::new();
     let mut current_file: Option<String> = None;
-    let mut current_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut current_ranges: Vec<LineRange> = Vec::new();
 
     for line in text.lines() {
-        if line.starts_with("+++ b/") {
+        if let Some(file_path) = line.strip_prefix("+++ b/") {
             if let Some(ref file) = current_file {
                 if !current_ranges.is_empty() {
                     result.push((file.clone(), std::mem::take(&mut current_ranges)));
                 }
             }
-            current_file = Some(line[6..].to_string());
+            current_file = Some(file_path.to_string());
             current_ranges.clear();
         } else if line.starts_with("@@ ") {
             // Parse @@ -old +new,count @@
@@ -297,7 +313,10 @@ pub fn diff_changed_lines(root: &Path) -> Result<Vec<(String, Vec<(usize, usize)
                 let plus_part = plus_part.trim_start_matches('+');
                 let parts: Vec<&str> = plus_part.split(',').collect();
                 if let Ok(start) = parts[0].parse::<usize>() {
-                    let count = parts.get(1).and_then(|c| c.parse::<usize>().ok()).unwrap_or(1);
+                    let count = parts
+                        .get(1)
+                        .and_then(|c| c.parse::<usize>().ok())
+                        .unwrap_or(1);
                     if count > 0 {
                         current_ranges.push((start, start + count.saturating_sub(1)));
                     }
@@ -322,5 +341,9 @@ pub fn staged_files(root: &Path) -> Result<Vec<String>> {
         .context("failed to run git diff --cached")?;
 
     let text = String::from_utf8_lossy(&output.stdout);
-    Ok(text.lines().map(String::from).filter(|s| !s.is_empty()).collect())
+    Ok(text
+        .lines()
+        .map(String::from)
+        .filter(|s| !s.is_empty())
+        .collect())
 }

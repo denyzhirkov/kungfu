@@ -11,14 +11,13 @@ pub fn extract_imports(root: Node, source: &str) -> Vec<RawImport> {
             let line = child.start_position().row + 1;
             let text = &source[child.start_byte()..child.end_byte()];
             // Parse "use path::to::module;" or "use path::to::{A, B};"
-            let trimmed = text
-                .trim_start_matches("use ")
-                .trim_end_matches(';')
-                .trim();
+            let trimmed = text.trim_start_matches("use ").trim_end_matches(';').trim();
 
             if let Some(brace_pos) = trimmed.find('{') {
                 // use path::{A, B}
-                let base = trimmed[..brace_pos].trim_end_matches(':').trim_end_matches(':');
+                let base = trimmed[..brace_pos]
+                    .trim_end_matches(':')
+                    .trim_end_matches(':');
                 let names_str = &trimmed[brace_pos + 1..trimmed.len().saturating_sub(1)];
                 let names: Vec<String> = names_str
                     .split(',')
@@ -122,7 +121,8 @@ fn extract_node(
                                 let method_name = find_name(&inner, source, "function_item");
                                 if let Some(mname) = method_name {
                                     let mspan = node_span(&inner);
-                                    let mid = format!("s:{}:{}:{}", file_id, mspan.start_line, &mname);
+                                    let mid =
+                                        format!("s:{}:{}:{}", file_id, mspan.start_line, &mname);
                                     let msig = extract_signature(&inner, source, "function_item");
                                     let mvis = detect_visibility(&inner, source);
                                     symbols.push(Symbol {
@@ -233,7 +233,9 @@ mod tests {
 
     fn parse_imports(source: &str) -> Vec<RawImport> {
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
         extract_imports(tree.root_node(), source)
     }
@@ -274,7 +276,9 @@ mod tests {
     fn extracts_symbols() {
         let source = "pub fn hello() {}\nstruct Foo {}";
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
         let symbols = extract(tree.root_node(), source, "f:test", "test.rs");
         assert!(symbols.iter().any(|s| s.name == "hello"));

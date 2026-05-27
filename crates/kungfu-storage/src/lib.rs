@@ -1,9 +1,11 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use anyhow::{Context, Result};
-use kungfu_types::file::FileEntry;
-use kungfu_types::symbol::Symbol;
-use kungfu_types::relation::Relation;
 use kungfu_types::chunk::Chunk;
-use kungfu_types::memory::{MemoryEntry, ProjectMemoryEntry, MemoryStatus};
+use kungfu_types::file::FileEntry;
+use kungfu_types::memory::{MemoryEntry, MemoryStatus, ProjectMemoryEntry};
+use kungfu_types::relation::Relation;
+use kungfu_types::symbol::Symbol;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
@@ -182,8 +184,7 @@ impl JsonStore {
     pub fn save_project_memories(&self, entries: &[ProjectMemoryEntry]) -> Result<()> {
         let path = self.project_memory_path();
         let json = serde_json::to_string_pretty(entries)?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("writing {}", path.display()))?;
+        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
         debug!("saved {} project memory entries", entries.len());
         Ok(())
     }
@@ -202,7 +203,10 @@ impl JsonStore {
         let entries = self.load_project_memories()?;
         let max_num = entries
             .iter()
-            .filter_map(|e| e.id.strip_prefix("mem_").and_then(|n| n.parse::<u32>().ok()))
+            .filter_map(|e| {
+                e.id.strip_prefix("mem_")
+                    .and_then(|n| n.parse::<u32>().ok())
+            })
             .max()
             .unwrap_or(0);
         Ok(format!("mem_{:04}", max_num + 1))
@@ -215,7 +219,11 @@ impl JsonStore {
         Ok(entry)
     }
 
-    pub fn update_project_memory(&self, id: &str, f: impl FnOnce(&mut ProjectMemoryEntry)) -> Result<ProjectMemoryEntry> {
+    pub fn update_project_memory(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut ProjectMemoryEntry),
+    ) -> Result<ProjectMemoryEntry> {
         let mut entries = self.load_project_memories()?;
         let entry = entries
             .iter_mut()

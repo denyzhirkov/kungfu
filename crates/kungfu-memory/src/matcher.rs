@@ -29,9 +29,9 @@ pub fn match_memories(query: &str, memories: &[MemoryEntry], budget: Budget) -> 
             let overlap = query_anchors
                 .iter()
                 .filter(|qa| {
-                    m.anchors.iter().any(|a| {
-                        a == *qa || a.contains(qa.as_str()) || qa.contains(a.as_str())
-                    })
+                    m.anchors
+                        .iter()
+                        .any(|a| a == *qa || a.contains(qa.as_str()) || qa.contains(a.as_str()))
                 })
                 .count();
 
@@ -89,8 +89,18 @@ mod tests {
     #[test]
     fn matches_by_anchor_overlap() {
         let memories = vec![
-            make_memory(MemoryKind::Note, "auth uses JWT tokens", &["auth", "jwt", "tokens"], 0.7),
-            make_memory(MemoryKind::Note, "parser handles tree-sitter", &["parser", "tree", "sitter"], 0.7),
+            make_memory(
+                MemoryKind::Note,
+                "auth uses JWT tokens",
+                &["auth", "jwt", "tokens"],
+                0.7,
+            ),
+            make_memory(
+                MemoryKind::Note,
+                "parser handles tree-sitter",
+                &["parser", "tree", "sitter"],
+                0.7,
+            ),
         ];
         let results = match_memories("how does auth work", &memories, Budget::Small);
         assert_eq!(results.len(), 1);
@@ -100,28 +110,44 @@ mod tests {
     #[test]
     fn decision_gets_bonus() {
         let memories = vec![
-            make_memory(MemoryKind::Decision, "chose JWT for auth", &["auth", "jwt"], 0.9),
-            make_memory(MemoryKind::DocSection, "auth module overview", &["auth", "module"], 0.5),
+            make_memory(
+                MemoryKind::Decision,
+                "chose JWT for auth",
+                &["auth", "jwt"],
+                0.9,
+            ),
+            make_memory(
+                MemoryKind::DocSection,
+                "auth module overview",
+                &["auth", "module"],
+                0.5,
+            ),
         ];
         let results = match_memories("auth", &memories, Budget::Full);
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
         assert_eq!(results[0].kind, "decision");
     }
 
     #[test]
     fn tiny_budget_returns_empty() {
-        let memories = vec![
-            make_memory(MemoryKind::Note, "important note", &["important", "note"], 0.7),
-        ];
+        let memories = vec![make_memory(
+            MemoryKind::Note,
+            "important note",
+            &["important", "note"],
+            0.7,
+        )];
         let results = match_memories("important", &memories, Budget::Tiny);
         assert!(results.is_empty());
     }
 
     #[test]
     fn no_overlap_returns_empty() {
-        let memories = vec![
-            make_memory(MemoryKind::Note, "handles parsing", &["parsing", "handles"], 0.7),
-        ];
+        let memories = vec![make_memory(
+            MemoryKind::Note,
+            "handles parsing",
+            &["parsing", "handles"],
+            0.7,
+        )];
         let results = match_memories("authentication", &memories, Budget::Full);
         assert!(results.is_empty());
     }

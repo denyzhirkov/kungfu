@@ -88,13 +88,11 @@ fn split_sections(content: &str) -> Vec<Section> {
             current_header = trimmed.trim_start_matches('#').trim().to_string();
             current_body = String::new();
             start_line = line_num;
-        } else {
-            if !trimmed.is_empty() {
-                if !current_body.is_empty() {
-                    current_body.push(' ');
-                }
-                current_body.push_str(trimmed);
+        } else if !trimmed.is_empty() {
+            if !current_body.is_empty() {
+                current_body.push(' ');
             }
+            current_body.push_str(trimmed);
         }
     }
 
@@ -124,7 +122,10 @@ fn is_adr_file(path: &str, content: &str) -> bool {
     // Heuristic: check if content has ADR-like sections
     let lower_content = content.to_lowercase();
     let adr_markers = ["## status", "## context", "## decision", "## consequences"];
-    let matches = adr_markers.iter().filter(|m| lower_content.contains(*m)).count();
+    let matches = adr_markers
+        .iter()
+        .filter(|m| lower_content.contains(*m))
+        .count();
     matches >= 2
 }
 
@@ -170,7 +171,8 @@ mod tests {
 
     #[test]
     fn skips_short_sections() {
-        let content = "# Title\n\nOk\n\n# Details\n\nThis section has enough content to be indexed properly.";
+        let content =
+            "# Title\n\nOk\n\n# Details\n\nThis section has enough content to be indexed properly.";
         let memories = parse_doc("docs/test.md", content);
         // "Ok" is too short (< 10 chars), should be skipped
         assert_eq!(memories.len(), 1);
@@ -193,7 +195,8 @@ mod tests {
     #[test]
     fn truncates_multibyte_content_without_panic() {
         // Regression: byte-based slicing panicked on Cyrillic content >500 chars
-        let long_cyrillic = "# Секция\n\n".to_string() + &"Это длинный текст на русском языке. ".repeat(30);
+        let long_cyrillic =
+            "# Секция\n\n".to_string() + &"Это длинный текст на русском языке. ".repeat(30);
         let memories = parse_doc("docs/notes.md", &long_cyrillic);
         assert!(!memories.is_empty());
         // Must not panic and must produce a valid utf-8 string
