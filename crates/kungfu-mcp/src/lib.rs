@@ -122,6 +122,16 @@ impl KungfuMcp {
     }
 
     #[tool(
+        description = "Parse a stack trace, panic, or traceback and return a context packet of the involved symbols plus their siblings. Recognises Rust panic + backtrace, JS stack, Python traceback, Go panic"
+    )]
+    fn debug_trace(
+        &self,
+        Parameters(params): Parameters<DebugTraceParam>,
+    ) -> Result<String, String> {
+        tools::context::debug_trace(self, params)
+    }
+
+    #[tool(
         description = "Find all symbols that call the given symbol (callers / 'who calls this?')"
     )]
     fn callers(&self, Parameters(params): Parameters<SymbolBudgetParam>) -> Result<String, String> {
@@ -171,6 +181,23 @@ impl KungfuMcp {
         tools::history::change_timeline(self, params)
     }
 
+    #[tool(
+        description = "Build a context packet focused on a specific git commit: scored symbols overlapping the commit's hunks + commit metadata in history"
+    )]
+    fn commit_context(
+        &self,
+        Parameters(params): Parameters<CommitContextParam>,
+    ) -> Result<String, String> {
+        tools::history::commit_context(self, params)
+    }
+
+    #[tool(
+        description = "Build a context packet covering all commits in a GitHub PR (requires `gh` CLI). Merges hunks across commits, lists each commit in history"
+    )]
+    fn pr_context(&self, Parameters(params): Parameters<PrContextParam>) -> Result<String, String> {
+        tools::history::pr_context(self, params)
+    }
+
     #[tool(description = "Show usage statistics: token savings, cache hit rate, calls served")]
     fn usage_stats(&self) -> Result<String, String> {
         tools::review::usage_stats(self)
@@ -202,6 +229,16 @@ impl KungfuMcp {
     )]
     fn smart_test(&self) -> Result<String, String> {
         tools::review::smart_test(self)
+    }
+
+    #[tool(
+        description = "Reverse of smart_test: given a test function name, return the production code it exercises (callees up to 2 hops via thin test helpers)"
+    )]
+    fn test_subjects(
+        &self,
+        Parameters(params): Parameters<SymbolNameParam>,
+    ) -> Result<String, String> {
+        tools::review::test_subjects(self, params)
     }
 
     #[tool(

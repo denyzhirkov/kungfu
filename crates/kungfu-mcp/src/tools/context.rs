@@ -1,5 +1,6 @@
 use crate::params::{
-    parse_budget, AskContextParam, BudgetParam, FilePathBudgetParam, QueryParam, SymbolBudgetParam,
+    parse_budget, AskContextParam, BudgetParam, DebugTraceParam, FilePathBudgetParam, QueryParam,
+    SymbolBudgetParam,
 };
 use crate::KungfuMcp;
 
@@ -91,4 +92,13 @@ pub(crate) fn investigate(mcp: &KungfuMcp, params: QueryParam) -> Result<String,
             .map_err(|e| e.to_string())?;
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     })
+}
+
+pub(crate) fn debug_trace(mcp: &KungfuMcp, params: DebugTraceParam) -> Result<String, String> {
+    let budget = parse_budget(params.budget.as_deref());
+    let service = mcp.service()?;
+    let result = service
+        .debug_trace(&params.trace, budget)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }

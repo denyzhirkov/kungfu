@@ -13,7 +13,9 @@ use std::path::Path;
 use tracing::info;
 
 mod ask;
+mod debug;
 mod explore;
+mod export;
 mod helpers;
 mod history;
 mod memory;
@@ -21,6 +23,9 @@ mod onboard;
 mod review;
 mod search_ops;
 mod types;
+
+pub use debug::{DebugTraceResult, TraceFrame};
+pub use export::ExportStats;
 
 pub use ask::StrategyWeights;
 pub use types::*;

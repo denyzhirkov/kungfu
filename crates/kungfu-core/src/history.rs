@@ -181,6 +181,123 @@ impl KungfuService {
         Ok(events)
     }
 
+    /// Build a context packet for a specific commit: scored symbols overlapping the commit's
+    /// hunks, plus commit metadata. Used by the `commit-context` CLI/MCP tool.
+    pub fn commit_context(&self, hash: &str, budget: Budget) -> Result<ContextPacket> {
+        self.ensure_fresh_index()?;
+        let budget = self.resolve_budget(budget);
+        if !kungfu_git::is_git_repo(&self.project.root) {
+            anyhow::bail!("not a git repository");
+        }
+
+        let meta = kungfu_git::commit_meta(&self.project.root, hash)?;
+        let changed_lines = kungfu_git::commit_changed_lines(&self.project.root, hash)?;
+
+        let all_symbols = self.search().get_all_symbols()?;
+        let mut seed: Vec<(Symbol, f64)> = Vec::new();
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (file_path, ranges) in &changed_lines {
+            for sym in &all_symbols {
+                if sym.path != *file_path {
+                    continue;
+                }
+                let overlaps = ranges
+                    .iter()
+                    .any(|&(start, end)| sym.span.start_line <= end && sym.span.end_line >= start);
+                if overlaps && seen_ids.insert(sym.id.clone()) {
+                    seed.push((sym.clone(), 0.9));
+                }
+            }
+        }
+
+        let query = format!("commit {}: {} ({})", &meta.hash, meta.message, meta.author);
+        let mut packet = kungfu_rank::build_context_packet(&query, seed, budget);
+        packet.history.push(kungfu_types::context::HistoryEvent {
+            event_type: "commit".to_string(),
+            target: meta.hash.clone(),
+            detail: format!("{}: {}", meta.author, meta.message),
+            date: Some(meta.date.clone()),
+        });
+        packet.changed_files = changed_lines.into_iter().map(|(f, _)| f).collect();
+        Ok(packet)
+    }
+
+    /// Build a context packet covering all commits in a GitHub PR.
+    /// Requires the `gh` CLI in PATH and the repo to have a GitHub remote.
+    pub fn pr_context(&self, pr_num: u32, budget: Budget) -> Result<ContextPacket> {
+        self.ensure_fresh_index()?;
+        let budget = self.resolve_budget(budget);
+
+        // Fetch commit list via gh.
+        let output = std::process::Command::new("gh")
+            .args(["pr", "view", &pr_num.to_string(), "--json", "commits"])
+            .current_dir(&self.project.root)
+            .output()
+            .map_err(|e| anyhow::anyhow!("`gh` CLI not available: {}", e))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "gh pr view failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let v: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let hashes: Vec<String> = v
+            .get("commits")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| c.get("oid").and_then(|o| o.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if hashes.is_empty() {
+            anyhow::bail!("PR #{} has no commits or gh returned no data", pr_num);
+        }
+
+        // Merge per-commit seeds.
+        let all_symbols = self.search().get_all_symbols()?;
+        let mut seed: Vec<(Symbol, f64)> = Vec::new();
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut changed_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut events: Vec<kungfu_types::context::HistoryEvent> = Vec::new();
+
+        for hash in &hashes {
+            let meta = match kungfu_git::commit_meta(&self.project.root, hash) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let cl = kungfu_git::commit_changed_lines(&self.project.root, hash).unwrap_or_default();
+            for (file_path, ranges) in &cl {
+                changed_files.insert(file_path.clone());
+                for sym in &all_symbols {
+                    if sym.path != *file_path {
+                        continue;
+                    }
+                    let overlaps = ranges.iter().any(|&(start, end)| {
+                        sym.span.start_line <= end && sym.span.end_line >= start
+                    });
+                    if overlaps && seen_ids.insert(sym.id.clone()) {
+                        seed.push((sym.clone(), 0.9));
+                    }
+                }
+            }
+            events.push(kungfu_types::context::HistoryEvent {
+                event_type: "commit".to_string(),
+                target: meta.hash.clone(),
+                detail: format!("{}: {}", meta.author, meta.message),
+                date: Some(meta.date.clone()),
+            });
+        }
+
+        let query = format!("PR #{}: {} commits", pr_num, hashes.len());
+        let mut packet = kungfu_rank::build_context_packet(&query, seed, budget);
+        packet.history = events;
+        packet.changed_files = changed_files.into_iter().collect();
+        Ok(packet)
+    }
+
     pub fn diff_context(&self, budget: Budget) -> Result<ContextPacket> {
         let budget = self.resolve_budget(budget);
         if !kungfu_git::is_git_repo(&self.project.root) {
@@ -199,6 +316,7 @@ impl KungfuService {
                 history: Vec::new(),
                 evidence: Vec::new(),
                 project_memory: Vec::new(),
+                memory_conflicts: Vec::new(),
             });
         }
 

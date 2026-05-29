@@ -292,8 +292,78 @@ pub fn diff_changed_lines(root: &Path) -> Result<Vec<FileChangedLines>> {
         .current_dir(root)
         .output()
         .context("failed to run git diff -U0")?;
+    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
+}
 
+/// Files + changed line ranges introduced by a specific commit.
+pub fn commit_changed_lines(root: &Path, hash: &str) -> Result<Vec<FileChangedLines>> {
+    let output = Command::new("git")
+        .args(["show", "-U0", "--format=", hash])
+        .current_dir(root)
+        .output()
+        .context("failed to run git show -U0")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git show failed for {}: {}",
+            hash,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Files touched by a commit (any change).
+pub fn commit_files(root: &Path, hash: &str) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["show", "--name-only", "--format=", hash])
+        .current_dir(root)
+        .output()
+        .context("failed to run git show --name-only")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git show failed for {}: {}",
+            hash,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(String::from)
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+/// Commit metadata (hash, ISO date, author, subject).
+pub fn commit_meta(root: &Path, hash: &str) -> Result<LogEntry> {
+    let output = Command::new("git")
+        .args(["show", "-s", "--format=%H|%ai|%an|%s", hash])
+        .current_dir(root)
+        .output()
+        .context("failed to run git show -s")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git show failed for {}: {}",
+            hash,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
     let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next().unwrap_or("");
+    let parts: Vec<&str> = line.splitn(4, '|').collect();
+    if parts.len() != 4 {
+        anyhow::bail!("unexpected git show format for {}", hash);
+    }
+    Ok(LogEntry {
+        hash: parts[0][..parts[0].len().min(8)].to_string(),
+        date: parts[1].to_string(),
+        author: parts[2].to_string(),
+        message: parts[3].to_string(),
+    })
+}
+
+/// Shared parser for `git diff -U0` / `git show -U0` output: collects per-file
+/// (path, [(start, end)]) ranges from the `+++ b/` headers and `@@` hunks.
+fn parse_unified_diff(text: &str) -> Vec<FileChangedLines> {
     let mut result: Vec<FileChangedLines> = Vec::new();
     let mut current_file: Option<String> = None;
     let mut current_ranges: Vec<LineRange> = Vec::new();
@@ -330,7 +400,7 @@ pub fn diff_changed_lines(root: &Path) -> Result<Vec<FileChangedLines>> {
         }
     }
 
-    Ok(result)
+    result
 }
 
 pub fn staged_files(root: &Path) -> Result<Vec<String>> {

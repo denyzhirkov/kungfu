@@ -180,6 +180,13 @@ enum Commands {
         budget: String,
     },
 
+    /// Parse a stack trace from stdin and return context for the involved code
+    #[command(name = "debug-trace")]
+    DebugTrace {
+        #[arg(long, default_value = "small")]
+        budget: String,
+    },
+
     /// Show largest symbols or files (hotspots), optionally weighted by git churn
     Hotspots {
         /// Number of results
@@ -200,17 +207,29 @@ enum Commands {
 
     /// Blast radius analysis: transitive callers and dependents of a symbol
     Affected {
-        /// Symbol name
+        /// Symbol name (omit when --staged is used)
+        #[arg(default_value = "")]
         name: String,
 
         /// Max depth of transitive analysis
         #[arg(long, default_value = "3")]
         depth: usize,
+
+        /// Analyze blast radius of all staged-diff changes instead of a single symbol
+        #[arg(long)]
+        staged: bool,
     },
 
     /// Find minimal test set to run based on git diff
     #[command(name = "smart-test")]
     SmartTest,
+
+    /// Reverse of smart-test: production code exercised by a given test
+    #[command(name = "test-subjects")]
+    TestSubjects {
+        /// Test function name
+        name: String,
+    },
 
     /// Code review context: risks, missing co-changes, untested code
     Review,
@@ -240,6 +259,33 @@ enum Commands {
 
     /// Show accumulated usage statistics
     Stats,
+
+    /// Export the index (files/symbols/relations/memories) as JSONL to stdout
+    Export {
+        /// Output format. Currently: "jsonl"
+        #[arg(long, default_value = "jsonl")]
+        format: String,
+    },
+
+    /// Build a context packet for a specific git commit
+    #[command(name = "commit-context")]
+    CommitContext {
+        /// Commit hash (full or short)
+        hash: String,
+
+        #[arg(long, default_value = "small")]
+        budget: String,
+    },
+
+    /// Build a context packet covering all commits in a GitHub PR (needs `gh` CLI)
+    #[command(name = "pr-context")]
+    PrContext {
+        /// PR number
+        num: u32,
+
+        #[arg(long, default_value = "small")]
+        budget: String,
+    },
 
     /// Watch filesystem and re-index on changes
     Watch,
@@ -423,10 +469,16 @@ fn main() {
         Commands::Investigate { query, budget } => {
             commands::investigate(&query, parse_budget(&budget), json)
         }
+        Commands::DebugTrace { budget } => commands::debug_trace(parse_budget(&budget), json),
         Commands::Hotspots { top, churn, files } => commands::hotspots(top, churn, files, json),
         Commands::Onboard => commands::onboard(json),
-        Commands::Affected { name, depth } => commands::affected(&name, depth, json),
+        Commands::Affected {
+            name,
+            depth,
+            staged,
+        } => commands::affected(&name, depth, staged, json),
         Commands::SmartTest => commands::smart_test(json),
+        Commands::TestSubjects { name } => commands::test_subjects(&name, json),
         Commands::Review => commands::review(json),
         Commands::Coupling { top } => commands::coupling(top, json),
         Commands::ChangeTimeline { name, budget } => {
@@ -434,6 +486,13 @@ fn main() {
         }
         Commands::Memory { action } => commands::memory(action, json),
         Commands::Stats => commands::stats(json),
+        Commands::Export { format } => commands::export(&format, json),
+        Commands::CommitContext { hash, budget } => {
+            commands::commit_context(&hash, parse_budget(&budget), json)
+        }
+        Commands::PrContext { num, budget } => {
+            commands::pr_context(num, parse_budget(&budget), json)
+        }
         Commands::Watch => commands::watch(),
         Commands::Mcp => commands::mcp(),
     };

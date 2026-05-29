@@ -221,6 +221,164 @@ impl KungfuService {
         })
     }
 
+    /// Reverse of smart_test: given a test symbol name, return the production code it exercises.
+    /// Walks Calls-relations from the test symbol, filters out other tests.
+    pub fn test_subjects(&self, test_name: &str) -> Result<Vec<(Symbol, String)>> {
+        self.ensure_fresh_index()?;
+        let store = self.store();
+        let relations = store.load_relations()?;
+        let all_symbols = self.search().get_all_symbols()?;
+
+        // Find test symbol candidates by exact name. There may be several if duplicated.
+        let test_ids: HashSet<&str> = all_symbols
+            .iter()
+            .filter(|s| s.name == test_name && is_test_symbol(s))
+            .map(|s| s.id.as_str())
+            .collect();
+
+        if test_ids.is_empty() {
+            bail!("test symbol '{}' not found", test_name);
+        }
+
+        // 1-hop callees.
+        let mut direct: HashSet<&str> = HashSet::new();
+        for r in &relations {
+            if r.kind == RelationKind::Calls && test_ids.contains(r.source_id.as_str()) {
+                direct.insert(r.target_id.as_str());
+            }
+        }
+
+        // 2-hop callees via thin test helpers (other test/helper symbols that aren't production).
+        // Keep set of "via" edges so we can label why a 2-hop target was included.
+        let mut transitive: HashMap<&str, &str> = HashMap::new();
+        for r in &relations {
+            if r.kind == RelationKind::Calls && direct.contains(r.source_id.as_str()) {
+                let target = r.target_id.as_str();
+                if !direct.contains(target) && !test_ids.contains(target) {
+                    transitive.entry(target).or_insert(r.source_id.as_str());
+                }
+            }
+        }
+
+        let symbol_map: HashMap<&str, &Symbol> =
+            all_symbols.iter().map(|s| (s.id.as_str(), s)).collect();
+
+        let mut results: Vec<(Symbol, String)> = Vec::new();
+        let mut seen = HashSet::new();
+
+        for id in &direct {
+            if let Some(sym) = symbol_map.get(id) {
+                if is_test_symbol(sym) {
+                    continue;
+                }
+                if seen.insert(*id) {
+                    results.push(((*sym).clone(), format!("called directly by {}", test_name)));
+                }
+            }
+        }
+
+        for (id, via_id) in &transitive {
+            if let Some(sym) = symbol_map.get(id) {
+                if is_test_symbol(sym) {
+                    continue;
+                }
+                let via_name = symbol_map
+                    .get(via_id)
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("helper");
+                if seen.insert(*id) {
+                    results.push(((*sym).clone(), format!("via {}", via_name)));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Blast radius of all staged changes: collect changed symbols from git diff,
+    /// run `affected` on each, merge results.
+    pub fn affected_staged(&self, depth: usize) -> Result<AffectedResult> {
+        self.ensure_fresh_index()?;
+        if !kungfu_git::is_git_repo(&self.project.root) {
+            bail!("not a git repository");
+        }
+
+        let all_symbols = self.store().load_symbols()?;
+        let changed_lines = kungfu_git::diff_changed_lines(&self.project.root)?;
+
+        // Collect unique changed symbol names overlapping diff hunks.
+        let mut changed_names: Vec<String> = Vec::new();
+        let mut seen_names: HashSet<String> = HashSet::new();
+        for (file_path, ranges) in &changed_lines {
+            for sym in &all_symbols {
+                if sym.path != *file_path {
+                    continue;
+                }
+                let overlaps = ranges
+                    .iter()
+                    .any(|&(start, end)| sym.span.start_line <= end && sym.span.end_line >= start);
+                if overlaps && seen_names.insert(sym.name.clone()) {
+                    changed_names.push(sym.name.clone());
+                }
+            }
+        }
+
+        if changed_names.is_empty() {
+            return Ok(AffectedResult {
+                symbol: "<staged diff>".to_string(),
+                entries: Vec::new(),
+                test_files: Vec::new(),
+                risk: "NONE".to_string(),
+            });
+        }
+
+        // Run affected per name, merge.
+        let mut merged_entries: HashMap<(String, String), AffectedEntry> = HashMap::new();
+        let mut merged_tests: HashSet<String> = HashSet::new();
+
+        for name in &changed_names {
+            let r = match self.affected(name, depth) {
+                Ok(r) => r,
+                Err(_) => continue, // symbol may resolve via duplicate name; skip if missing
+            };
+            for e in r.entries {
+                let key = (e.path.clone(), e.name.clone());
+                merged_entries
+                    .entry(key)
+                    .and_modify(|existing| {
+                        if e.depth < existing.depth {
+                            existing.depth = e.depth;
+                            existing.reason = e.reason.clone();
+                        }
+                    })
+                    .or_insert(e);
+            }
+            for t in r.test_files {
+                merged_tests.insert(t);
+            }
+        }
+
+        let mut entries: Vec<AffectedEntry> = merged_entries.into_values().collect();
+        entries.sort_by_key(|e| e.depth);
+        let mut test_files: Vec<String> = merged_tests.into_iter().collect();
+        test_files.sort();
+
+        let risk = if entries.len() > 20 || test_files.len() > 5 {
+            "HIGH"
+        } else if entries.len() > 5 || test_files.len() > 2 {
+            "MEDIUM"
+        } else {
+            "LOW"
+        };
+
+        Ok(AffectedResult {
+            symbol: format!("<staged: {}>", changed_names.join(", ")),
+            entries,
+            test_files,
+            risk: risk.to_string(),
+        })
+    }
+
     /// Find minimal set of tests to run based on git diff.
     pub fn smart_test(&self) -> Result<SmartTestResult> {
         self.ensure_fresh_index()?;

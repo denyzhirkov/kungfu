@@ -62,10 +62,13 @@ pub struct HotspotsParam {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AffectedParam {
-    /// Symbol name to analyze blast radius for
+    /// Symbol name to analyze blast radius for. Omit when `staged=true`.
+    #[serde(default)]
     pub name: String,
     /// Max depth of transitive analysis. Default: 3
     pub depth: Option<usize>,
+    /// Analyze blast radius of all currently staged-diff changes instead of a single symbol.
+    pub staged: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -84,6 +87,30 @@ pub struct AskContextParam {
     pub scope: Option<String>,
     /// Context layers to include: "code" (default), "rationale", "history". Example: ["code", "rationale"]
     pub include: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CommitContextParam {
+    /// Commit hash (full or short).
+    pub hash: String,
+    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "auto"
+    pub budget: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PrContextParam {
+    /// PR number.
+    pub num: u32,
+    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "auto"
+    pub budget: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DebugTraceParam {
+    /// Stack trace, panic, or traceback text. Multi-line OK.
+    pub trace: String,
+    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "auto"
+    pub budget: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

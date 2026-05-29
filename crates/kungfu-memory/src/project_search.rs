@@ -1,4 +1,88 @@
 use kungfu_types::memory::{MemoryStatus, ProjectMemoryEntry, ProjectMemoryKind};
+use std::collections::HashMap;
+
+/// A conflict between two or more active memory entries that look like they cover the same topic
+/// but disagree. Heuristic only — used to surface, not to auto-resolve.
+#[derive(Debug, Clone)]
+pub struct MemoryConflict {
+    /// Common signal that grouped these entries: a shared tag or anchor.
+    pub on: String,
+    /// Entries in the conflict cluster, sorted by `updated_at` descending.
+    pub entries: Vec<ProjectMemoryEntry>,
+}
+
+/// Detect potential conflicts between active memory entries.
+///
+/// Conflict rules:
+/// - Group active entries by shared tag (and by shared related_symbol).
+/// - A group with ≥2 entries is a conflict candidate.
+/// - Drop entries that are linked by `supersedes` (the older one is intentional history).
+/// - Require entries to differ in `content` — same content = redundant copy, not conflict.
+pub fn detect_conflicts(entries: &[ProjectMemoryEntry]) -> Vec<MemoryConflict> {
+    let active: Vec<&ProjectMemoryEntry> = entries
+        .iter()
+        .filter(|e| e.status == MemoryStatus::Active)
+        .collect();
+
+    // Build supersedes chain: any id that is superseded by another active entry.
+    let superseded: std::collections::HashSet<String> =
+        active.iter().filter_map(|e| e.supersedes.clone()).collect();
+
+    // Index entries by shared signals (tags + related_symbols).
+    let mut by_signal: HashMap<String, Vec<&ProjectMemoryEntry>> = HashMap::new();
+    for e in &active {
+        if superseded.contains(&e.id) {
+            continue;
+        }
+        for tag in &e.tags {
+            by_signal.entry(format!("tag:{}", tag)).or_default().push(e);
+        }
+        for sym in &e.related_symbols {
+            by_signal
+                .entry(format!("symbol:{}", sym))
+                .or_default()
+                .push(e);
+        }
+    }
+
+    let mut out: Vec<MemoryConflict> = Vec::new();
+    let mut emitted_clusters: std::collections::HashSet<Vec<String>> =
+        std::collections::HashSet::new();
+
+    for (signal, group) in by_signal {
+        if group.len() < 2 {
+            continue;
+        }
+        // Drop pairs with identical content (redundant, not conflicting).
+        let mut unique: Vec<&ProjectMemoryEntry> = Vec::new();
+        for e in group {
+            if !unique.iter().any(|u| u.content == e.content) {
+                unique.push(e);
+            }
+        }
+        if unique.len() < 2 {
+            continue;
+        }
+
+        // Dedup cluster across signals: same id-set already reported.
+        let mut id_key: Vec<String> = unique.iter().map(|e| e.id.clone()).collect();
+        id_key.sort();
+        if !emitted_clusters.insert(id_key) {
+            continue;
+        }
+
+        let mut sorted = unique;
+        sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        out.push(MemoryConflict {
+            on: signal,
+            entries: sorted.into_iter().cloned().collect(),
+        });
+    }
+
+    // Stable ordering: by signal then by oldest updated_at desc.
+    out.sort_by(|a, b| a.on.cmp(&b.on));
+    out
+}
 
 /// Filters for project memory search.
 #[derive(Debug, Default)]
@@ -348,6 +432,72 @@ mod tests {
         );
         assert_eq!(results.len(), 1);
         assert!(results[0].0 > 0.3); // cross-ref boost
+    }
+
+    fn entry(
+        id: &str,
+        content: &str,
+        tags: &[&str],
+        supersedes: Option<&str>,
+    ) -> ProjectMemoryEntry {
+        ProjectMemoryEntry {
+            id: id.into(),
+            kind: ProjectMemoryKind::Decision,
+            title: None,
+            content: content.into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            related_files: vec![],
+            related_symbols: vec![],
+            pinned: false,
+            status: MemoryStatus::Active,
+            supersedes: supersedes.map(|s| s.to_string()),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn conflict_detected_on_shared_tag_differing_content() {
+        let entries = vec![
+            entry("a", "use sqlite", &["storage"], None),
+            entry("b", "use json", &["storage"], None),
+        ];
+        let conflicts = detect_conflicts(&entries);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].on.contains("storage"));
+        assert_eq!(conflicts[0].entries.len(), 2);
+    }
+
+    #[test]
+    fn supersedes_pair_is_not_conflict() {
+        let entries = vec![
+            entry("old", "use json", &["storage"], None),
+            entry("new", "use sqlite", &["storage"], Some("old")),
+        ];
+        let conflicts = detect_conflicts(&entries);
+        assert!(conflicts.is_empty(), "supersedes pair surfaced as conflict");
+    }
+
+    #[test]
+    fn identical_content_is_not_conflict() {
+        let entries = vec![
+            entry("a", "same text", &["topic"], None),
+            entry("b", "same text", &["topic"], None),
+        ];
+        let conflicts = detect_conflicts(&entries);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn cluster_dedup_across_multiple_signals() {
+        let mut a = entry("a", "use sqlite", &["storage", "perf"], None);
+        let mut b = entry("b", "use json", &["storage", "perf"], None);
+        a.related_symbols.push("Store".into());
+        b.related_symbols.push("Store".into());
+        let entries = vec![a, b];
+        let conflicts = detect_conflicts(&entries);
+        // Same pair appears under tag:storage, tag:perf, symbol:Store — but dedup → 1.
+        assert_eq!(conflicts.len(), 1);
     }
 
     #[test]

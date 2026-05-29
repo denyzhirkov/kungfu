@@ -529,6 +529,17 @@ impl KungfuService {
                     relevance: score,
                 })
                 .collect();
+
+            // Surface contradictions inside the full active memory pool (not just selected entries),
+            // so the agent sees disagreements even if only one side made it into project_memory.
+            let conflicts = kungfu_memory::project_search::detect_conflicts(&project_memories);
+            packet.memory_conflicts = conflicts
+                .into_iter()
+                .map(|c| kungfu_types::context::MemoryConflictItem {
+                    on: c.on,
+                    entry_ids: c.entries.iter().map(|e| e.id.clone()).collect(),
+                })
+                .collect();
         }
 
         Ok(packet)

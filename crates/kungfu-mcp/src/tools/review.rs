@@ -68,10 +68,23 @@ pub(crate) fn onboard(mcp: &KungfuMcp) -> Result<String, String> {
 
 pub(crate) fn affected(mcp: &KungfuMcp, params: AffectedParam) -> Result<String, String> {
     let depth = params.depth.unwrap_or(3);
+    let staged = params.staged.unwrap_or(false);
     let name = params.name.clone();
-    mcp.cached("affected", &name, &depth.to_string(), || {
+    let cache_key = if staged {
+        format!("staged:{}", depth)
+    } else {
+        format!("{}:{}", name, depth)
+    };
+    mcp.cached("affected", &cache_key, "", || {
         let service = mcp.service()?;
-        let result = service.affected(&name, depth).map_err(|e| e.to_string())?;
+        let result = if staged {
+            service.affected_staged(depth).map_err(|e| e.to_string())?
+        } else {
+            if name.is_empty() {
+                return Err("symbol name required (or set staged=true)".to_string());
+            }
+            service.affected(&name, depth).map_err(|e| e.to_string())?
+        };
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     })
 }
@@ -81,6 +94,31 @@ pub(crate) fn smart_test(mcp: &KungfuMcp) -> Result<String, String> {
     let service = mcp.service()?;
     let result = service.smart_test().map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+}
+
+pub(crate) fn test_subjects(
+    mcp: &KungfuMcp,
+    params: crate::params::SymbolNameParam,
+) -> Result<String, String> {
+    let name = params.name.clone();
+    mcp.cached("test_subjects", &name, "", || {
+        let service = mcp.service()?;
+        let results = service.test_subjects(&name).map_err(|e| e.to_string())?;
+        let items: Vec<_> = results
+            .iter()
+            .map(|(sym, reason)| {
+                serde_json::json!({
+                    "name": sym.name,
+                    "kind": sym.kind.to_string(),
+                    "path": sym.path,
+                    "line": sym.span.start_line,
+                    "signature": sym.signature,
+                    "reason": reason,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
+    })
 }
 
 pub(crate) fn review(mcp: &KungfuMcp) -> Result<String, String> {

@@ -44,6 +44,19 @@ pub struct ContextPacket {
     /// Project memory entries relevant to the query (facts, decisions, warnings)
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub project_memory: Vec<ProjectMemoryItem>,
+    /// Pairs / clusters of active memory entries that appear to contradict each other
+    /// on the same topic. Surface, do not auto-resolve.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub memory_conflicts: Vec<MemoryConflictItem>,
+}
+
+/// A surfaced conflict between active memory entries — projected to the packet level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConflictItem {
+    /// What groups them: shared tag or symbol.
+    pub on: String,
+    /// IDs of the entries in the cluster, sorted by updated_at desc.
+    pub entry_ids: Vec<String>,
 }
 
 /// A project memory entry included in a context packet.

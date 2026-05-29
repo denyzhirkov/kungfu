@@ -418,6 +418,60 @@ pub fn clean(json: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn commit_context(hash: &str, budget: Budget, json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let packet = service.commit_context(hash, budget)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&packet)?);
+    } else {
+        println!("Query: {}", packet.query);
+        println!("Items: {}", packet.items.len());
+        for it in &packet.items {
+            println!("  {}::{}  ({:.2})", it.path, it.name, it.score);
+        }
+    }
+    Ok(())
+}
+
+pub fn pr_context(num: u32, budget: Budget, json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let packet = service.pr_context(num, budget)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&packet)?);
+    } else {
+        println!("Query: {}", packet.query);
+        println!("Commits: {}", packet.history.len());
+        println!("Items: {}", packet.items.len());
+        for it in &packet.items {
+            println!("  {}::{}  ({:.2})", it.path, it.name, it.score);
+        }
+    }
+    Ok(())
+}
+
+pub fn export(format: &str, json: bool) -> Result<()> {
+    if format != "jsonl" {
+        anyhow::bail!("unsupported export format: {} (try 'jsonl')", format);
+    }
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let stats = service.export_jsonl(&mut handle)?;
+    if json {
+        // The data itself went to stdout already; the JSON wrapper goes to stderr to avoid mixing.
+        eprintln!("{}", serde_json::to_string_pretty(&stats)?);
+    } else {
+        eprintln!(
+            "exported {} files, {} symbols, {} relations, {} memories",
+            stats.files, stats.symbols, stats.relations, stats.memories
+        );
+    }
+    Ok(())
+}
+
 pub fn stats(json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let service = KungfuService::open(&cwd)?;
@@ -507,10 +561,17 @@ pub fn onboard(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn affected(name: &str, depth: usize, json: bool) -> Result<()> {
+pub fn affected(name: &str, depth: usize, staged: bool, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let service = KungfuService::open(&cwd)?;
-    let result = service.affected(name, depth)?;
+    let result = if staged {
+        service.affected_staged(depth)?
+    } else {
+        if name.is_empty() {
+            anyhow::bail!("symbol name required (or use --staged)");
+        }
+        service.affected(name, depth)?
+    };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1184,6 +1245,37 @@ pub fn callers(name: &str, budget: Budget, json: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn test_subjects(name: &str, json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let results = service.test_subjects(name)?;
+
+    if json {
+        let items: Vec<_> = results
+            .iter()
+            .map(|(sym, reason)| {
+                serde_json::json!({
+                    "name": sym.name,
+                    "kind": sym.kind.to_string(),
+                    "path": sym.path,
+                    "line": sym.span.start_line,
+                    "signature": sym.signature,
+                    "reason": reason,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else if results.is_empty() {
+        println!("No production code found exercised by '{}'", name);
+    } else {
+        println!("'{}' exercises:", name);
+        for (sym, reason) in &results {
+            println!("  {}::{}  ({})", sym.path, sym.name, reason);
+        }
+    }
+    Ok(())
+}
+
 pub fn callees(name: &str, budget: Budget, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let service = KungfuService::open(&cwd)?;
@@ -1338,6 +1430,42 @@ pub fn explore_file(path: &str, budget: Budget, json: bool) -> Result<()> {
                     );
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+pub fn debug_trace(budget: Budget, json: bool) -> Result<()> {
+    use std::io::Read;
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+
+    let mut trace = String::new();
+    std::io::stdin().read_to_string(&mut trace)?;
+    if trace.trim().is_empty() {
+        anyhow::bail!("no trace text on stdin");
+    }
+
+    let result = service.debug_trace(&trace, budget)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Frames: {}", result.frames.len());
+        for (i, f) in result.frames.iter().enumerate() {
+            let sym = f.symbol.as_deref().unwrap_or("?");
+            let resolved = f.resolved_path.as_deref().unwrap_or("<unresolved>");
+            println!(
+                "  {}. {}:{}  [{}] -> {}",
+                i, f.raw_path, f.line, sym, resolved
+            );
+        }
+        println!("\nContext ({} items):", result.packet.items.len());
+        for item in &result.packet.items {
+            println!(
+                "  - {}::{}  ({:.2}) {}",
+                item.path, item.name, item.score, item.why
+            );
         }
     }
     Ok(())
