@@ -36,6 +36,13 @@ pub trait EmbedEngine: Send + Sync {
 
     /// Embed a batch of texts into row-major f32 vectors of length `dim`.
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+
+    /// `true` when this engine can actually produce embeddings. `NoopEngine` returns
+    /// `false` so callers can distinguish "feature not compiled / model missing" from
+    /// "real engine ready" without trying a probe call.
+    fn is_real(&self) -> bool {
+        true
+    }
 }
 
 /// On-disk manifest sitting next to `embeddings.bin`.
@@ -120,6 +127,10 @@ impl EmbedEngine for NoopEngine {
              `cargo build --release --features semantic` once candle integration is enabled \
              (see kungfu-embed/src/lib.rs for the design)."
         )
+    }
+
+    fn is_real(&self) -> bool {
+        false
     }
 }
 

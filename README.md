@@ -136,28 +136,47 @@ kungfu config                           # show current configuration
 kungfu embeddings status                # vector-search readiness (see below)
 ```
 
-## Semantic search (vector)
+## Semantic search
 
-`kungfu search ... --semantic` upgrades from keyword expansion to real embeddings when:
+`semantic_search` (MCP) / `kungfu search --semantic` (CLI) has **two modes** that share the same call site. The right one runs automatically based on what's available — the agent doesn't need to choose.
 
-1. The CLI was built with `--features semantic`:
+### Works out of the box: keyword mode
 
-   ```sh
-   cargo build --release --features semantic
-   ```
+With a default build and no setup, `--semantic` runs **query expansion**: the query is split into keywords, each keyword is widened with a small synonym table (`auth` → `verify`, `token`, `session`, ...), and we search symbol names for the expansion. Fast, zero install, decent for queries that share vocabulary with the codebase.
 
-   This adds candle and tokenizers to the binary (+50–100MB).
+### Works better with the model: vector mode
 
-2. The model is installed and the project is embedded:
+With a real embedding model installed, the same call runs **vector cosine top-K** over 384-dim sentence embeddings. Finds concepts even when the query and the symbol share no words ("graceful degradation when index is missing" → `ensure_fresh_index`).
 
-   ```sh
-   kungfu embeddings install   # downloads ~130MB of BAAI/bge-small-en-v1.5 to ~/.cache/kungfu/models
-   kungfu embeddings build     # computes 384-dim vector per symbol → .kungfu/index/embeddings.bin
-   ```
+Three steps to enable:
 
-3. After that, `kungfu search "query" --semantic` returns cosine top-K from the stored vectors. Without the feature or the manifest, kungfu transparently falls back to the existing keyword expansion — no UX cliff.
+```sh
+cargo build --release --features semantic    # 1. compile with candle + tokenizers (+~80MB binary, ~1min cold)
+kungfu embeddings install                     # 2. download BAAI/bge-small-en-v1.5 (~130MB, one-time)
+kungfu embeddings build                       # 3. compute one 384-dim vector per indexed symbol
+```
 
-`kungfu embeddings status` reports which of these are in place.
+After every `kungfu index` rerun `kungfu embeddings build` to keep vectors in sync — it skips symbols whose text hash hasn't changed.
+
+### Picking the mode
+
+| You see in the output | What ran | What to do |
+|---|---|---|
+| `Engine: vector` (CLI) or `"engine": "vector"` (JSON) | Real embeddings | Use the results |
+| `Engine: keyword` | Query expansion fallback | Use the results; for richer concept matching, finish the vector setup |
+
+`kungfu embeddings status` (CLI) and the `embeddings_status` MCP tool both return the same struct with a one-line `hint` telling you the next step if anything is missing. Agents connected via MCP can call `embeddings_status` once on connect and `embeddings_build` after every `index` to manage the lifecycle themselves.
+
+### Side by side
+
+Query *"rank symbols by relevance"* against this repo (822 symbols):
+
+| Mode | Top hit | Score | Notes |
+|---|---|---|---|
+| keyword | `build_context_packet` | 0.40 | matches "rank" in symbol bodies |
+| vector | `stem_match_ranking_to_rank` | 0.70 | no shared words with the query — concept-level match |
+
+Same call, different signal density. Keyword is honest about what it can do; vector lifts the ceiling for everything you can't predict in advance.
 
 All commands support `--json` for machine output and `--budget tiny|small|medium|full`.
 
@@ -219,7 +238,9 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `get_symbol` | Detailed symbol info by exact name |
 | `search_text` | Text search across indexed files |
 | `find_files` | Find files by path pattern |
-| `semantic_search` | Vector search when embeddings are built, query expansion otherwise |
+| `semantic_search` | Concept-level search; vector cosine top-K when embeddings are built, keyword expansion otherwise. Pick this when you don't know the exact symbol name |
+| `embeddings_status` | Are vectors wired up? Returns model id, dim, feature/install/index state, and a one-line `hint` for the next step |
+| `embeddings_build` | Compute or refresh vectors for all indexed symbols. Idempotent. Call after `index` to keep vector search in sync |
 | `find_related_symbols` | Related symbols in same file |
 | `ask_context` | Smart retrieval: intent + multi-strategy search + rationale + project memory + conflict surfacing |
 | `diff_context` | Context focused on git changes |

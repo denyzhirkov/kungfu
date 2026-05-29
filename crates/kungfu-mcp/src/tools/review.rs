@@ -128,6 +128,18 @@ pub(crate) fn review(mcp: &KungfuMcp) -> Result<String, String> {
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
+pub(crate) fn embeddings_status(mcp: &KungfuMcp) -> Result<String, String> {
+    let service = mcp.service()?;
+    let status = service.embeddings_status().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
+}
+
+pub(crate) fn embeddings_build(mcp: &KungfuMcp) -> Result<String, String> {
+    let service = mcp.service()?;
+    let result = service.embeddings_build().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+}
+
 pub(crate) fn coupling(mcp: &KungfuMcp, params: CouplingParam) -> Result<String, String> {
     let top = params.top.unwrap_or(20);
     mcp.cached("coupling", &top.to_string(), "", || {

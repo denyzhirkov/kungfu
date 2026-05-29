@@ -452,48 +452,42 @@ pub fn pr_context(num: u32, budget: Budget, json: bool) -> Result<()> {
 }
 
 pub fn embeddings(action: EmbeddingsCommands, json: bool) -> Result<()> {
-    use kungfu_project::find_project_root;
     let cwd = env::current_dir()?;
-    let root = find_project_root(&cwd).unwrap_or(cwd);
-    let index_dir = root.join(".kungfu").join("index");
+    let service = KungfuService::open(&cwd)?;
 
     match action {
         EmbeddingsCommands::Status => {
-            let models_dir = kungfu_embed::default_models_dir();
-            let model_id = kungfu_embed::DEFAULT_MODEL_ID;
-            let manifest = kungfu_embed::EmbeddingManifest::load(&index_dir)?.is_some();
-            let has_weights = models_dir.join(model_id.replace('/', "--")).exists();
+            let status = service.embeddings_status()?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "model_id": model_id,
-                        "dim": kungfu_embed::DEFAULT_DIM,
-                        "models_dir": models_dir,
-                        "weights_installed": has_weights,
-                        "index_present": manifest,
-                        "inference_feature_compiled": cfg!(feature = "semantic"),
-                    }))?
-                );
+                println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
-                println!("model:                {}", model_id);
-                println!("dim:                  {}", kungfu_embed::DEFAULT_DIM);
-                println!("weights dir:          {}", models_dir.display());
-                println!("weights installed:    {}", has_weights);
-                println!("project index present: {}", manifest);
+                println!("model:               {}", status.model_id);
+                println!("dim:                 {}", status.dim);
+                println!("inference feature:   {}", status.inference_compiled);
+                println!("weights installed:   {}", status.weights_installed);
                 println!(
-                    "inference feature:    {}",
-                    if cfg!(feature = "semantic") {
-                        "compiled"
-                    } else {
-                        "NOT compiled (build with `cargo build --features semantic`)"
-                    }
+                    "vectors built:       {} / {} symbols",
+                    status.indexed_vectors, status.indexed_symbols
                 );
+                println!("weights dir:         {}", status.models_dir);
+                println!();
+                println!("→ {}", status.hint);
             }
             Ok(())
         }
         EmbeddingsCommands::Install => install_model(json),
-        EmbeddingsCommands::Build => build_embeddings(&index_dir, json),
+        EmbeddingsCommands::Build => {
+            let result = service.embeddings_build()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!(
+                    "embedded {} symbols ({} skipped up-to-date, {} total in store)",
+                    result.embedded, result.skipped_up_to_date, result.total_in_store
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -525,116 +519,6 @@ fn install_model(json: bool) -> Result<()> {
 fn install_model(_json: bool) -> Result<()> {
     anyhow::bail!(
         "embedding model install requires the `semantic` feature; \
-         rebuild with `cargo build --release --features semantic`"
-    )
-}
-
-#[cfg(feature = "semantic")]
-fn build_embeddings(index_dir: &std::path::Path, json: bool) -> Result<()> {
-    use kungfu_embed::{
-        append_vector, open_default_engine, text_digest, EmbeddingManifest, DEFAULT_DIM,
-        DEFAULT_MODEL_ID,
-    };
-    use kungfu_storage::JsonStore;
-
-    let store = JsonStore::new(index_dir);
-    let symbols = store.load_symbols()?;
-    if symbols.is_empty() {
-        anyhow::bail!("no symbols indexed — run `kungfu index` first");
-    }
-
-    let engine = open_default_engine();
-    if engine.model_id() != DEFAULT_MODEL_ID {
-        anyhow::bail!(
-            "no real embedding engine loaded; check `kungfu embeddings status` and reinstall"
-        );
-    }
-
-    let mut manifest = EmbeddingManifest::load(index_dir)?
-        .unwrap_or_else(|| EmbeddingManifest::new(engine.model_id(), DEFAULT_DIM));
-    if manifest.dim != engine.dim() {
-        anyhow::bail!(
-            "existing manifest dim {} != engine dim {}; rebuild from scratch",
-            manifest.dim,
-            engine.dim()
-        );
-    }
-
-    // Build text per symbol: name + signature + doc — what semantic search will index.
-    let texts: Vec<(String, String)> = symbols
-        .iter()
-        .map(|s| {
-            let mut t = s.name.clone();
-            if let Some(ref sig) = s.signature {
-                t.push(' ');
-                t.push_str(sig);
-            }
-            if let Some(ref doc) = s.doc_summary {
-                t.push(' ');
-                t.push_str(doc);
-            }
-            (s.id.clone(), t)
-        })
-        .collect();
-
-    // Skip symbols whose digest already matches.
-    let pending: Vec<(String, String)> = texts
-        .into_iter()
-        .filter(|(id, text)| {
-            manifest
-                .digests
-                .get(id)
-                .map(|d| *d != text_digest(text))
-                .unwrap_or(true)
-        })
-        .collect();
-
-    let total = pending.len();
-    if total == 0 {
-        if !json {
-            println!("all embeddings up to date");
-        }
-        return Ok(());
-    }
-
-    let batch_size = 32;
-    let mut done = 0usize;
-    for chunk in pending.chunks(batch_size) {
-        let batch_texts: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
-        let vectors = engine.embed_batch(&batch_texts)?;
-        for ((id, text), vec) in chunk.iter().zip(vectors.iter()) {
-            append_vector(index_dir, &mut manifest, id, text, vec)?;
-        }
-        done += chunk.len();
-        if !json {
-            eprintln!("  embedded {}/{}", done, total);
-        }
-    }
-    manifest.save(index_dir)?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "status": "built",
-                "embedded": total,
-                "total_indexed": manifest.offsets.len(),
-            }))?
-        );
-    } else {
-        println!(
-            "built {} new embeddings ({} total in store)",
-            total,
-            manifest.offsets.len()
-        );
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "semantic"))]
-fn build_embeddings(_index_dir: &std::path::Path, _json: bool) -> Result<()> {
-    anyhow::bail!(
-        "embedding index build requires the `semantic` feature; \
          rebuild with `cargo build --release --features semantic`"
     )
 }
@@ -1311,8 +1195,12 @@ pub fn semantic_search(query: &str, budget: Budget, json: bool) -> Result<()> {
             })
             .unwrap_or_default();
 
+        let engine = result["engine"].as_str().unwrap_or("keyword");
         println!("Query:    {}", query);
-        println!("Keywords: {}", keywords);
+        println!("Engine:   {}", engine);
+        if !keywords.is_empty() {
+            println!("Keywords: {}", keywords);
+        }
         if !expanded.is_empty() {
             println!("Expanded: {}", expanded);
         }

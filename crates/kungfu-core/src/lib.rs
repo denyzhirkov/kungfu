@@ -14,6 +14,7 @@ use tracing::info;
 
 mod ask;
 mod debug;
+mod embeddings;
 mod explore;
 mod export;
 mod helpers;
@@ -25,6 +26,7 @@ mod search_ops;
 mod types;
 
 pub use debug::{DebugTraceResult, TraceFrame};
+pub use embeddings::{EmbeddingsBuildResult, EmbeddingsStatus};
 pub use export::ExportStats;
 
 pub use ask::StrategyWeights;

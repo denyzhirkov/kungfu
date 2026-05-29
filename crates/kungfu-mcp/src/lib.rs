@@ -54,7 +54,9 @@ impl KungfuMcp {
         tools::project::file_outline(self, params)
     }
 
-    #[tool(description = "Search symbols by exact and fuzzy name match")]
+    #[tool(
+        description = "Search symbols by exact and fuzzy name match. Use this when you know (or can guess) the symbol's name. For conceptual queries without a known name, prefer `semantic_search`."
+    )]
     fn find_symbol(&self, Parameters(params): Parameters<QueryParam>) -> Result<String, String> {
         tools::search::find_symbol(self, params)
     }
@@ -146,7 +148,7 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Semantic search: find symbols by concept, not just name. Expands query with related terms (e.g. 'auth' finds verify_token, login, session)"
+        description = "Find symbols by concept rather than name. When local embeddings are built (`embeddings_status` shows ready), runs vector cosine top-K; otherwise falls back to keyword expansion. Use this when you do NOT know a likely symbol name — for known names, use `find_symbol`."
     )]
     fn semantic_search(
         &self,
@@ -253,6 +255,20 @@ impl KungfuMcp {
     )]
     fn coupling(&self, Parameters(params): Parameters<CouplingParam>) -> Result<String, String> {
         tools::review::coupling(self, params)
+    }
+
+    #[tool(
+        description = "Report whether semantic vector search is ready end-to-end: feature compiled, model installed, vectors built. Includes a one-line `hint` field with the next step if anything is missing. Always safe to call."
+    )]
+    fn embeddings_status(&self) -> Result<String, String> {
+        tools::review::embeddings_status(self)
+    }
+
+    #[tool(
+        description = "Compute or refresh embeddings for all indexed symbols. Idempotent — skips symbols whose name+signature+doc hash already matches the manifest. Call this after `index` to keep vector search in sync. Errors clearly if the binary lacks `--features semantic` or the model is not installed."
+    )]
+    fn embeddings_build(&self) -> Result<String, String> {
+        tools::review::embeddings_build(self)
     }
 
     #[tool(
