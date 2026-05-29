@@ -134,14 +134,21 @@ impl KungfuService {
         let skipped = total_known - pending.len();
 
         let batch_size = 32;
+        // Flush the manifest every N batches so a Ctrl-C or crash mid-build doesn't
+        // discard work — the matching `embeddings.bin` is append-only and the manifest
+        // is the only thing that lets us link rows back to symbols.
+        let flush_every = 16;
         let mut embedded = 0;
-        for chunk in pending.chunks(batch_size) {
+        for (batch_idx, chunk) in pending.chunks(batch_size).enumerate() {
             let batch_texts: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
             let vectors = engine.embed_batch(&batch_texts)?;
             for ((id, text), vec) in chunk.iter().zip(vectors.iter()) {
                 append_vector(&index_dir, &mut manifest, id, text, vec)?;
             }
             embedded += chunk.len();
+            if (batch_idx + 1) % flush_every == 0 {
+                manifest.save(&index_dir)?;
+            }
         }
         manifest.save(&index_dir)?;
 
