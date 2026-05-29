@@ -23,6 +23,7 @@ kungfu-index = { workspace = true }
 kungfu-git = { workspace = true }
 kungfu-mcp = { workspace = true }
 kungfu-embed = { workspace = true }
+kungfu-storage = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true }
 

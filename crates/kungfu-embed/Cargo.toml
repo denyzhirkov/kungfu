@@ -7,8 +7,13 @@ edition.workspace = true
 # Default: ship a no-op engine. Real candle-based inference is gated behind `inference`
 # so the standard kungfu binary stays slim.
 default = []
-inference = []
-# inference = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub"]
+inference = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:ureq",
+]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -17,10 +22,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 blake3 = { workspace = true }
 
-# Real model deps live behind the `inference` feature; see project memory for
-# the design (candle + bge-small-en-v1.5 + ~/.cache/kungfu/models).
-# candle-core = { version = "0.7", optional = true }
-# candle-nn = { version = "0.7", optional = true }
-# candle-transformers = { version = "0.7", optional = true }
-# tokenizers = { version = "0.20", optional = true }
-# hf-hub = { version = "0.3", optional = true }
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
+ureq = { version = "2", optional = true, features = ["tls"] }

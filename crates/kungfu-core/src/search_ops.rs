@@ -93,19 +93,40 @@ impl KungfuService {
     pub fn semantic_search(&self, query: &str, budget: Budget) -> Result<serde_json::Value> {
         let budget = self.resolve_budget(budget);
 
-        // If a local embedding index exists, use vector cosine top-K.
-        // Falls back to query expansion below if missing, invalid, or the configured
-        // engine isn't compiled in (default build ships the noop).
+        // If a local embedding store exists AND a real engine is available, vector cosine
+        // top-K shortcuts the keyword path. The noop engine errors on embed_batch, so
+        // builds without `--features semantic` fall through to query expansion below.
         let index_dir = self.project.index_dir();
-        if let Ok(Some(_manifest)) = kungfu_embed::EmbeddingManifest::load(&index_dir) {
+        if let Ok(Some(store)) = kungfu_embed::EmbeddingStore::load(&index_dir) {
             let engine = kungfu_embed::open_default_engine();
             if let Ok(vecs) = engine.embed_batch(&[query]) {
-                // Real implementation: load embeddings.bin, score by cosine, top-K.
-                // The noop engine returns an error → we fall through to keyword expansion
-                // below. Once the `inference` feature gains a real backend, this branch
-                // returns the vector-top-K result.
-                let _q = &vecs[0];
-                tracing::debug!("kungfu-embed: vector path reached (manifest present)");
+                if let Some(qv) = vecs.first() {
+                    let hits = store.top_k(qv, budget.top_k());
+                    if !hits.is_empty() {
+                        let all = self.search().get_all_symbols()?;
+                        let by_id: std::collections::HashMap<&str, &kungfu_types::symbol::Symbol> =
+                            all.iter().map(|s| (s.id.as_str(), s)).collect();
+                        let items: Vec<serde_json::Value> = hits
+                            .iter()
+                            .filter_map(|(id, score)| by_id.get(id.as_str()).map(|s| (s, score)))
+                            .map(|(s, score)| {
+                                serde_json::json!({
+                                    "name": s.name,
+                                    "kind": s.kind.to_string(),
+                                    "path": s.path,
+                                    "line": s.span.start_line,
+                                    "score": score,
+                                    "match_type": "vector",
+                                })
+                            })
+                            .collect();
+                        return Ok(serde_json::json!({
+                            "query": query,
+                            "engine": "vector",
+                            "results": items,
+                        }));
+                    }
+                }
             }
         }
 
