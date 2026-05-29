@@ -145,6 +145,18 @@ fn extract_node(
                     }
                 }
             }
+
+            // Descend into module bodies so symbols inside `mod foo { ... }` (including
+            // `#[cfg(test)] mod tests { ... }`) get indexed. Without this, every test
+            // function in the project is invisible to find_symbol / smart_test / test_subjects.
+            if kind == "mod_item" {
+                if let Some(body) = node.child_by_field_name("body") {
+                    let mut child_cursor = body.walk();
+                    for inner in body.children(&mut child_cursor) {
+                        extract_node(inner, source, file_id, file_path, Some(&id), symbols);
+                    }
+                }
+            }
         }
     }
 }
