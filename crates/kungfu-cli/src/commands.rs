@@ -1120,6 +1120,14 @@ pub fn ask_context(task: &str, budget: Budget, json: bool) -> Result<()> {
                 println!();
             }
         }
+
+        if !packet.memory_conflicts.is_empty() {
+            println!();
+            println!("Memory conflicts ({}):", packet.memory_conflicts.len());
+            for c in &packet.memory_conflicts {
+                println!("  on {} — {}", c.on, c.entry_ids.join(", "));
+            }
+        }
     }
     Ok(())
 }

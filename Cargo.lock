@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-cli"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-config"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-core"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-embed"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-git"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "tracing",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-index"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-mcp"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "kungfu-core",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-memory"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "kungfu-types",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-output"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "kungfu-types",
  "serde",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-parse"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "kungfu-types",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-project"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-rank"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "kungfu-types",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-search"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "kungfu-storage",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-storage"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-types"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "chrono",
  "serde",
