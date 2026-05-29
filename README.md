@@ -178,6 +178,10 @@ Query *"rank symbols by relevance"* against this repo (822 symbols):
 
 Same call, different signal density. Keyword is honest about what it can do; vector lifts the ceiling for everything you can't predict in advance.
 
+### `ask_context` uses vectors too (when available)
+
+`ask_context` runs a multi-strategy search; when an embedding store + a real engine are present, it adds **Strategy A2** — cosine top-K against the same vector store, capped at 5 hits, only when the query has at least 3 non-stop-word terms and each hit clears a cosine threshold of 0.55. This augments rather than replaces the existing strategies: vector hits land alongside symbol-name and content matches with a moderate base score, so they show up when lexical strategies miss the concept (e.g. *"graceful degradation when index is missing"* → `ensure_fresh_index`) and stay out of the way when lexical already nails it. Tunable via `KUNGFU_W_VECTOR` and `KUNGFU_W_VECTOR_MIN`.
+
 All commands support `--json` for machine output and `--budget tiny|small|medium|full`.
 
 ## ask-context

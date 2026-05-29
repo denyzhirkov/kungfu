@@ -39,6 +39,12 @@ pub struct StrategyWeights {
     pub changed_file_bonus: f64,
     /// Secondary code language penalty multiplier
     pub secondary_lang_penalty: f64,
+    /// Strategy A2: base score for vector (cosine) matches when an embedding store exists.
+    /// Kept lower than direct symbol-name matches so vector results augment rather than displace.
+    pub vector_score: f64,
+    /// Strategy A2: minimum cosine to accept a vector hit. Below this, the model is essentially
+    /// guessing and a string match is more trustworthy.
+    pub vector_min_score: f64,
 }
 
 impl Default for StrategyWeights {
@@ -57,6 +63,8 @@ impl Default for StrategyWeights {
             path_match_bonus: 0.05,
             changed_file_bonus: 0.3,
             secondary_lang_penalty: 0.85,
+            vector_score: 0.55,
+            vector_min_score: 0.55,
         }
     }
 }
@@ -84,6 +92,8 @@ impl StrategyWeights {
         w.path_match_bonus = env_f64("KUNGFU_W_PATH", w.path_match_bonus);
         w.changed_file_bonus = env_f64("KUNGFU_W_CHANGED", w.changed_file_bonus);
         w.secondary_lang_penalty = env_f64("KUNGFU_W_LANG_PENALTY", w.secondary_lang_penalty);
+        w.vector_score = env_f64("KUNGFU_W_VECTOR", w.vector_score);
+        w.vector_min_score = env_f64("KUNGFU_W_VECTOR_MIN", w.vector_min_score);
         w
     }
 }
@@ -134,9 +144,57 @@ impl KungfuService {
             });
         }
 
+        // Load all symbols up front — needed by Strategy A2 (vector) below as well as
+        // later strategies (B sibling expansion, D related-file walk, …).
+        let all_symbols = search.get_all_symbols()?;
+
+        // Strategy A2: vector cosine match — augment with concept-level hits when an embedding
+        // store + a real engine are available. Skipped for very short queries (which look like
+        // direct symbol lookups, where vectors mostly add noise on top of Strategy A).
+        if keywords.len() >= 3 {
+            if let Ok(Some(emb_store)) =
+                kungfu_embed::EmbeddingStore::load(&self.project.index_dir())
+            {
+                let engine = kungfu_embed::open_default_engine();
+                if engine.is_real() {
+                    if let Ok(qv) = engine.embed_batch(&[task]) {
+                        if let Some(q) = qv.first() {
+                            let raw = emb_store.top_k(q, 8);
+                            let symbols_by_id: HashMap<&str, &Symbol> =
+                                all_symbols.iter().map(|s| (s.id.as_str(), s)).collect();
+                            let mut added = 0usize;
+                            for (rank, (id, cos)) in raw.into_iter().enumerate() {
+                                if added >= 5 {
+                                    break;
+                                }
+                                let cos = cos as f64;
+                                if cos < w.vector_min_score {
+                                    continue;
+                                }
+                                if seen_ids.contains(&id) {
+                                    continue;
+                                }
+                                let sym = match symbols_by_id.get(id.as_str()) {
+                                    Some(s) => *s,
+                                    None => continue,
+                                };
+                                let rank_decay = 1.0 - (rank as f64 * 0.08).min(0.4);
+                                seen_ids.insert(id);
+                                scored_symbols.push(ScoredSymbol {
+                                    symbol: sym.clone(),
+                                    score: w.vector_score * rank_decay,
+                                    reason: format!("vector match ({:.2} cosine)", cos),
+                                });
+                                added += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Strategy B: text/file search — only add keyword-relevant symbols
         let file_results = search.search_text(&keyword_query, Budget::Full)?;
-        let all_symbols = search.get_all_symbols()?;
         for fr in &file_results {
             let file_syms: Vec<_> = all_symbols
                 .iter()
