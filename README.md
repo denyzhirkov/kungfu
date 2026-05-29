@@ -71,7 +71,18 @@ kungfu diff-context --budget small
 kungfu find-symbol AuthService          # search symbols by name
 kungfu get-symbol refreshToken          # exact symbol lookup
 kungfu search "refresh token"           # text search across files
-kungfu search "auth logic" --semantic   # semantic search with query expansion
+kungfu search "auth logic" --semantic   # vector search when embeddings are built (see below)
+```
+
+### Debug & history
+
+```sh
+# Parse a stack trace from stdin, get context for the involved code
+cargo run 2>&1 | kungfu debug-trace --budget small
+
+# Build context for a specific commit or PR
+kungfu commit-context a0bab6d --budget small
+kungfu pr-context 42 --budget small      # requires `gh` CLI
 ```
 
 ### Project memory (v2.0)
@@ -85,7 +96,7 @@ kungfu memory pin mem_0001              # pin for higher context priority
 kungfu memory archive mem_0002          # archive without deleting
 ```
 
-Pinned entries and warnings are automatically injected into `ask-context` output, so agents don't restart from zero every session.
+Pinned entries and warnings are automatically injected into `ask-context` output, so agents don't restart from zero every session. When two active entries cover the same topic with different content, `ask-context` surfaces a `memory_conflicts` block instead of silently picking one.
 
 ### Structure
 
@@ -99,10 +110,18 @@ kungfu file-outline src/auth/service.ts # symbols in a file
 ```sh
 kungfu onboard                          # project summary: architecture, patterns, key symbols
 kungfu affected AuthService --depth 3   # blast radius: who depends on this symbol?
+kungfu affected --staged --depth 3      # blast radius of the current staged diff
 kungfu smart-test                       # minimal test set based on git diff
+kungfu test-subjects test_login         # reverse: production code exercised by a test
 kungfu review                           # code review context: risks, missing co-changes
 kungfu coupling --top 10                # module coupling: fan-in, fan-out, co-change
 kungfu hotspots --churn                 # largest/most changed code
+```
+
+### Interop
+
+```sh
+kungfu export --format jsonl > graph.jsonl   # dump files/symbols/relations/memory for external tools
 ```
 
 ### Maintenance
@@ -114,7 +133,31 @@ kungfu doctor                           # validate installation and index
 kungfu watch                            # auto re-index on file changes
 kungfu clean                            # wipe index and cache
 kungfu config                           # show current configuration
+kungfu embeddings status                # vector-search readiness (see below)
 ```
+
+## Semantic search (vector)
+
+`kungfu search ... --semantic` upgrades from keyword expansion to real embeddings when:
+
+1. The CLI was built with `--features semantic`:
+
+   ```sh
+   cargo build --release --features semantic
+   ```
+
+   This adds candle and tokenizers to the binary (+50–100MB).
+
+2. The model is installed and the project is embedded:
+
+   ```sh
+   kungfu embeddings install   # downloads ~130MB of BAAI/bge-small-en-v1.5 to ~/.cache/kungfu/models
+   kungfu embeddings build     # computes 384-dim vector per symbol → .kungfu/index/embeddings.bin
+   ```
+
+3. After that, `kungfu search "query" --semantic` returns cosine top-K from the stored vectors. Without the feature or the manifest, kungfu transparently falls back to the existing keyword expansion — no UX cliff.
+
+`kungfu embeddings status` reports which of these are in place.
 
 All commands support `--json` for machine output and `--budget tiny|small|medium|full`.
 
@@ -176,10 +219,13 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `get_symbol` | Detailed symbol info by exact name |
 | `search_text` | Text search across indexed files |
 | `find_files` | Find files by path pattern |
-| `semantic_search` | Find symbols by concept with query expansion |
+| `semantic_search` | Vector search when embeddings are built, query expansion otherwise |
 | `find_related_symbols` | Related symbols in same file |
-| `ask_context` | Smart retrieval: intent + multi-strategy search + rationale + project memory |
+| `ask_context` | Smart retrieval: intent + multi-strategy search + rationale + project memory + conflict surfacing |
 | `diff_context` | Context focused on git changes |
+| `debug_trace` | Parse a stack trace (Rust panic, JS stack, Python traceback, Go panic) and return involved symbols + siblings |
+| `commit_context` | Build a packet focused on a specific git commit |
+| `pr_context` | Build a packet covering all commits in a GitHub PR (needs `gh`) |
 | `explore_symbol` | Composite: find + detail + related + snippet in one call |
 | `explore_file` | Composite: outline + related files + key symbols |
 | `investigate` | Composite: ask_context + diff awareness |
@@ -195,11 +241,14 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `memory_update` | Update content, title, tags, or pinned state |
 | `memory_archive` | Archive an entry (preserves for history) |
 | `onboard` | Project summary: architecture, patterns, key symbols, naming |
-| `affected` | Blast radius: transitive callers/dependents of a symbol |
+| `affected` | Blast radius: transitive callers/dependents of a symbol (use `staged: true` for current diff) |
 | `smart_test` | Minimal test set based on git diff |
+| `test_subjects` | Reverse of smart_test: production code exercised by a given test |
 | `review` | Code review context: risks, missing co-changes, untested code |
 | `coupling` | Module coupling: fan-in, fan-out, co-change frequency |
 | `usage_stats` | Token savings, cache hit rate, calls served |
+
+While connected, the MCP server pushes `notifications/resources/updated` (URI `kungfu://index`) whenever the project index changes on disk — agents that subscribe can invalidate cached assumptions instead of acting on stale state.
 
 ## Agent rules
 
