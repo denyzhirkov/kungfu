@@ -22,5 +22,11 @@ kungfu-output = { workspace = true }
 kungfu-index = { workspace = true }
 kungfu-git = { workspace = true }
 kungfu-mcp = { workspace = true }
+kungfu-embed = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true }
+
+[features]
+default = []
+# Enables real candle-based embedding inference once kungfu-embed/inference is filled in.
+semantic = ["kungfu-embed/inference"]

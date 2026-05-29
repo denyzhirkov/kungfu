@@ -1,11 +1,11 @@
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tracing::info;
+use tracing::{info, warn};
 
 mod cache;
 mod params;
@@ -325,9 +325,49 @@ impl ServerHandler for KungfuMcp {
 pub async fn run_stdio_server(project_root: PathBuf) -> Result<()> {
     info!("starting kungfu MCP server (stdio)");
 
-    let server = KungfuMcp::new(project_root);
+    let server = KungfuMcp::new(project_root.clone());
     let transport = rmcp::transport::io::stdio();
     let service = server.serve(transport).await?;
+    let peer = service.peer().clone();
+
+    // Bridge filesystem changes to MCP notifications so connected clients can
+    // invalidate any cached assumptions about the index.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+    // Best-effort: locate the project root and config for the watcher.
+    if let Ok(svc) = kungfu_core::KungfuService::open(&project_root) {
+        let config = svc.config().clone();
+        let watcher_root = project_root.clone();
+        let index_dir = project_root.join(".kungfu").join("index");
+        std::thread::spawn(move || {
+            if let Err(e) = kungfu_index::watcher::watch_and_index(
+                &watcher_root,
+                config,
+                &index_dir,
+                move |_stats| {
+                    let _ = tx.send(());
+                },
+            ) {
+                warn!("kungfu watcher exited: {}", e);
+            }
+        });
+
+        tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                if let Err(e) = peer
+                    .notify_resource_updated(ResourceUpdatedNotificationParam::new(
+                        "kungfu://index",
+                    ))
+                    .await
+                {
+                    warn!("notify_resource_updated failed: {}", e);
+                }
+            }
+        });
+    } else {
+        warn!("kungfu MCP: index missing, push-notifications disabled");
+    }
+
     service.waiting().await?;
 
     Ok(())

@@ -257,6 +257,12 @@ enum Commands {
         action: MemoryCommands,
     },
 
+    /// Manage local embeddings for semantic search
+    Embeddings {
+        #[command(subcommand)]
+        action: EmbeddingsCommands,
+    },
+
     /// Show accumulated usage statistics
     Stats,
 
@@ -412,6 +418,18 @@ pub enum MemoryCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum EmbeddingsCommands {
+    /// Show current embedding configuration and status
+    Status,
+
+    /// Download model weights to ~/.cache/kungfu/models (requires `inference` feature)
+    Install,
+
+    /// Compute and store embeddings for all indexed symbols (requires `inference` feature)
+    Build,
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -486,6 +504,7 @@ fn main() {
         }
         Commands::Memory { action } => commands::memory(action, json),
         Commands::Stats => commands::stats(json),
+        Commands::Embeddings { action } => commands::embeddings(action, json),
         Commands::Export { format } => commands::export(&format, json),
         Commands::CommitContext { hash, budget } => {
             commands::commit_context(&hash, parse_budget(&budget), json)

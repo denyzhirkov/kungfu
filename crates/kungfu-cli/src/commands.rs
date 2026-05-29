@@ -6,7 +6,7 @@ use kungfu_types::memory::ProjectMemoryKind;
 use kungfu_types::Budget;
 use std::env;
 
-use crate::MemoryCommands;
+use crate::{EmbeddingsCommands, MemoryCommands};
 
 pub fn init(json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
@@ -449,6 +449,65 @@ pub fn pr_context(num: u32, budget: Budget, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn embeddings(action: EmbeddingsCommands, json: bool) -> Result<()> {
+    use kungfu_project::find_project_root;
+    let cwd = env::current_dir()?;
+    let root = find_project_root(&cwd).unwrap_or(cwd);
+    let index_dir = root.join(".kungfu").join("index");
+
+    match action {
+        EmbeddingsCommands::Status => {
+            let models_dir = kungfu_embed::default_models_dir();
+            let model_id = kungfu_embed::DEFAULT_MODEL_ID;
+            let manifest = kungfu_embed::EmbeddingManifest::load(&index_dir)?.is_some();
+            let has_weights = models_dir.join(model_id.replace('/', "--")).exists();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "model_id": model_id,
+                        "dim": kungfu_embed::DEFAULT_DIM,
+                        "models_dir": models_dir,
+                        "weights_installed": has_weights,
+                        "index_present": manifest,
+                        "inference_feature_compiled": cfg!(feature = "semantic"),
+                    }))?
+                );
+            } else {
+                println!("model:                {}", model_id);
+                println!("dim:                  {}", kungfu_embed::DEFAULT_DIM);
+                println!("weights dir:          {}", models_dir.display());
+                println!("weights installed:    {}", has_weights);
+                println!("project index present: {}", manifest);
+                println!(
+                    "inference feature:    {}",
+                    if cfg!(feature = "semantic") {
+                        "compiled"
+                    } else {
+                        "NOT compiled (build with `cargo build --features semantic`)"
+                    }
+                );
+            }
+            Ok(())
+        }
+        EmbeddingsCommands::Install => {
+            anyhow::bail!(
+                "embedding model install requires the `semantic` feature; rebuild with \
+                 `cargo build --release --features semantic`. \
+                 Design: candle + {} → {}",
+                kungfu_embed::DEFAULT_MODEL_ID,
+                kungfu_embed::default_models_dir().display()
+            )
+        }
+        EmbeddingsCommands::Build => {
+            anyhow::bail!(
+                "embedding index build requires the `semantic` feature; rebuild with \
+                 `cargo build --release --features semantic`."
+            )
+        }
+    }
 }
 
 pub fn export(format: &str, json: bool) -> Result<()> {
