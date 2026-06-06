@@ -267,8 +267,14 @@ impl KungfuMcp {
     #[tool(
         description = "Compute or refresh embeddings for all indexed symbols. Idempotent — skips symbols whose name+signature+doc hash already matches the manifest. Call this after `index` to keep vector search in sync. Errors clearly if the binary lacks `--features semantic` or the model is not installed."
     )]
-    fn embeddings_build(&self) -> Result<String, String> {
-        tools::review::embeddings_build(self)
+    async fn embeddings_build(&self) -> Result<String, String> {
+        // Embedding the whole symbol table is minutes of CPU-bound inference. Run it on the
+        // blocking pool so it can't freeze the stdio event loop (and every other tool call)
+        // for the duration of the build.
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || tools::review::embeddings_build(&this))
+            .await
+            .map_err(|e| format!("embeddings_build task panicked: {e}"))?
     }
 
     #[tool(

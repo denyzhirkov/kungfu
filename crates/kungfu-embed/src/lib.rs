@@ -134,6 +134,22 @@ impl EmbedEngine for NoopEngine {
     }
 }
 
+/// Process-wide cached engine for the latency-sensitive read paths (`ask_context`,
+/// `semantic_search`). The default model is ~130MB on disk and rebuilding the in-memory
+/// `BertModel` is expensive; without this cache every request reloaded it from scratch,
+/// which pegged CPU and stalled the MCP server. The model is immutable
+/// (`EmbedEngine: Send + Sync`), so a single shared instance is safe to share by reference.
+///
+/// The engine is resolved once and cached for the life of the process. If it could not be
+/// built at first use (feature off / weights missing) it stays `NoopEngine` until restart,
+/// so read paths degrade to keyword search. The explicit `embeddings_build` /
+/// `embeddings_status` paths deliberately keep using `open_default_engine` so a freshly
+/// installed model is picked up without a restart.
+pub fn shared_engine() -> &'static dyn EmbedEngine {
+    static ENGINE: std::sync::OnceLock<Box<dyn EmbedEngine>> = std::sync::OnceLock::new();
+    ENGINE.get_or_init(open_default_engine).as_ref()
+}
+
 /// Try to construct the best available engine. With the `inference` feature compiled in
 /// and the model installed at `default_models_dir()`, returns a real `CandleEngine`;
 /// otherwise (or on any load error) falls back to `NoopEngine` so callers can degrade

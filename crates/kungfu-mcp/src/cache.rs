@@ -87,6 +87,15 @@ impl KungfuMcp {
         Ok(svc)
     }
 
+    /// Open the service WITHOUT the freshness check. Used by side paths (usage-stats
+    /// tracking) that must not pay for a fingerprint scan or trigger a reindex — the
+    /// freshness guarantee is already provided by the `service()` call in the compute path.
+    pub(crate) fn service_untracked(
+        &self,
+    ) -> std::result::Result<kungfu_core::KungfuService, String> {
+        kungfu_core::KungfuService::open(&self.project_root).map_err(|e| e.to_string())
+    }
+
     /// Check if index has changed since last cache validation, clear cache if so.
     fn validate_cache(&self) {
         let fp_path = self
@@ -140,7 +149,7 @@ impl KungfuMcp {
                 cache.calls_served += 1;
                 // Persistent stats for cache hits too
                 drop(cache);
-                if let Ok(svc) = self.service() {
+                if let Ok(svc) = self.service_untracked() {
                     svc.track_call(tool, val.len());
                 }
                 return Ok(val);
@@ -161,7 +170,7 @@ impl KungfuMcp {
         }
 
         // Persistent stats
-        if let Ok(svc) = self.service() {
+        if let Ok(svc) = self.service_untracked() {
             svc.track_call(tool, result.len());
         }
 

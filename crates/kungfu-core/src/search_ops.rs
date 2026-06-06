@@ -98,7 +98,7 @@ impl KungfuService {
         // builds without `--features semantic` fall through to query expansion below.
         let index_dir = self.project.index_dir();
         if let Ok(Some(store)) = kungfu_embed::EmbeddingStore::load(&index_dir) {
-            let engine = kungfu_embed::open_default_engine();
+            let engine = kungfu_embed::shared_engine();
             if let Ok(vecs) = engine.embed_batch(&[query]) {
                 if let Some(qv) = vecs.first() {
                     let hits = store.top_k(qv, budget.top_k());

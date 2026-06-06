@@ -155,7 +155,7 @@ impl KungfuService {
             if let Ok(Some(emb_store)) =
                 kungfu_embed::EmbeddingStore::load(&self.project.index_dir())
             {
-                let engine = kungfu_embed::open_default_engine();
+                let engine = kungfu_embed::shared_engine();
                 if engine.is_real() {
                     if let Ok(qv) = engine.embed_batch(&[task]) {
                         if let Some(q) = qv.first() {
