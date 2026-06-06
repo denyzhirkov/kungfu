@@ -15,6 +15,19 @@ use crate::scanner;
 
 type ParsedFile = (FileEntry, Vec<Symbol>, Vec<RawImport>, Vec<RawComment>);
 
+/// Outcome of deciding whether a file's content should be read for indexing.
+enum ReadOutcome {
+    /// Content fits the cap and is text — index it fully.
+    Full(Vec<u8>),
+    /// Oversized or binary — record the file by name only, no content read/parse.
+    Skipped { size: u64, reason: &'static str },
+}
+
+/// Heuristic: a NUL byte in the first 8 KiB means binary content.
+fn is_binary(content: &[u8]) -> bool {
+    content.iter().take(8192).any(|&b| b == 0)
+}
+
 pub struct Indexer<'a> {
     root: std::path::PathBuf,
     config: KungfuConfig,
@@ -133,14 +146,17 @@ impl<'a> Indexer<'a> {
                 .to_string_lossy()
                 .to_string();
 
-            let content = match std::fs::read(path) {
-                Ok(c) => c,
+            let read = match self.read_for_index(path) {
+                Ok(r) => r,
                 Err(e) => {
                     warn!("cannot read {}: {}", path.display(), e);
                     continue;
                 }
             };
-            let hash = blake3::hash(&content).to_hex().to_string();
+            let hash = match &read {
+                ReadOutcome::Full(content) => blake3::hash(content).to_hex().to_string(),
+                ReadOutcome::Skipped { size, .. } => format!("skip:{size}"),
+            };
 
             if let Some(old_hash) = old_fingerprints.get(&rel_path) {
                 if *old_hash == hash {
@@ -162,20 +178,28 @@ impl<'a> Indexer<'a> {
                 stats.new_files += 1;
             }
 
-            match self.index_file_with_content(path, content) {
-                Ok((entry, symbols, imports, comments)) => {
+            match read {
+                ReadOutcome::Full(content) => match self.index_file_with_content(path, content) {
+                    Ok((entry, symbols, imports, comments)) => {
+                        new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
+                        if !imports.is_empty() {
+                            all_imports.push((entry.path.clone(), imports));
+                        }
+                        if !comments.is_empty() {
+                            all_comments.push((entry.path.clone(), comments));
+                        }
+                        new_symbols.extend(symbols);
+                        new_files.push(entry);
+                    }
+                    Err(e) => {
+                        warn!("failed to index {}: {}", path.display(), e);
+                    }
+                },
+                ReadOutcome::Skipped { size, reason } => {
+                    debug!("indexing {} by name only ({})", path.display(), reason);
+                    let entry = self.name_only_entry(path, size);
                     new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
-                    if !imports.is_empty() {
-                        all_imports.push((entry.path.clone(), imports));
-                    }
-                    if !comments.is_empty() {
-                        all_comments.push((entry.path.clone(), comments));
-                    }
-                    new_symbols.extend(symbols);
                     new_files.push(entry);
-                }
-                Err(e) => {
-                    warn!("failed to index {}: {}", path.display(), e);
                 }
             }
         }
@@ -320,8 +344,67 @@ impl<'a> Indexer<'a> {
     }
 
     fn index_file(&mut self, path: &Path) -> Result<ParsedFile> {
+        match self.read_for_index(path)? {
+            ReadOutcome::Full(content) => self.index_file_with_content(path, content),
+            ReadOutcome::Skipped { size, reason } => {
+                debug!("indexing {} by name only ({})", path.display(), reason);
+                Ok((
+                    self.name_only_entry(path, size),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            }
+        }
+    }
+
+    /// Decide whether to read a file's full content. Files over `max_file_bytes`
+    /// are never read (cheap metadata check only); binary files are read up to the
+    /// cap, sniffed, then dropped. Either way they are still recorded by name.
+    fn read_for_index(&self, path: &Path) -> std::io::Result<ReadOutcome> {
+        let size = std::fs::metadata(path)?.len();
+        if size > self.config.index.max_file_bytes {
+            return Ok(ReadOutcome::Skipped {
+                size,
+                reason: "oversized",
+            });
+        }
         let content = std::fs::read(path)?;
-        self.index_file_with_content(path, content)
+        if is_binary(&content) {
+            return Ok(ReadOutcome::Skipped {
+                size: content.len() as u64,
+                reason: "binary",
+            });
+        }
+        Ok(ReadOutcome::Full(content))
+    }
+
+    /// Build a FileEntry for a file whose content we deliberately did not read,
+    /// so it stays discoverable by path/name. Fingerprint is size-based, so the
+    /// file is only re-evaluated when its size changes.
+    fn name_only_entry(&self, path: &Path, size: u64) -> FileEntry {
+        let rel_path = path
+            .strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string();
+        let language = Language::from_extension(&ext);
+        let id = format!("f:{}", &blake3::hash(rel_path.as_bytes()).to_hex()[..12]);
+        FileEntry {
+            id,
+            path: rel_path,
+            extension: if ext.is_empty() { None } else { Some(ext) },
+            language: Some(language.to_string()),
+            size,
+            hash: format!("skip:{size}"),
+            indexed_at: Utc::now(),
+            tags: Vec::new(),
+        }
     }
 
     fn index_file_with_content(&mut self, path: &Path, content: Vec<u8>) -> Result<ParsedFile> {
@@ -1071,4 +1154,74 @@ fn normalize_path(path: &str) -> String {
         }
     }
     parts.join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_binary_detects_nul() {
+        assert!(is_binary(b"abc\0def"));
+        assert!(!is_binary(b"plain text\nwith newlines"));
+        // NUL beyond the 8 KiB sniff window is ignored.
+        let mut late = vec![b'a'; 9000];
+        late.push(0);
+        assert!(!is_binary(&late));
+    }
+
+    fn temp_indexer_root() -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        let unique = format!(
+            "kungfu-idx-test-{}-{:p}",
+            std::process::id(),
+            &dir as *const _
+        );
+        dir.push(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_for_index_skips_oversized_and_binary_but_keeps_name() {
+        let root = temp_indexer_root();
+        let mut config = KungfuConfig::default();
+        config.index.max_file_bytes = 16;
+
+        let big = root.join("big.txt");
+        std::fs::write(&big, vec![b'x'; 64]).unwrap();
+        let bin = root.join("blob.dat");
+        std::fs::write(&bin, b"ok\0binary").unwrap();
+        let small = root.join("small.txt");
+        std::fs::write(&small, b"hello").unwrap();
+
+        let store = JsonStore::new(&root.join(".kungfu").join("index"));
+        let indexer = Indexer::new(&root, config, &store);
+
+        assert!(matches!(
+            indexer.read_for_index(&big).unwrap(),
+            ReadOutcome::Skipped {
+                reason: "oversized",
+                ..
+            }
+        ));
+        assert!(matches!(
+            indexer.read_for_index(&bin).unwrap(),
+            ReadOutcome::Skipped {
+                reason: "binary",
+                ..
+            }
+        ));
+        assert!(matches!(
+            indexer.read_for_index(&small).unwrap(),
+            ReadOutcome::Full(_)
+        ));
+
+        // A skipped file is still recorded by name, with a size-based fingerprint.
+        let entry = indexer.name_only_entry(&big, 64);
+        assert_eq!(entry.path, "big.txt");
+        assert_eq!(entry.hash, "skip:64");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

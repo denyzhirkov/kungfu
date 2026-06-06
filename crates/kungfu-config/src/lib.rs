@@ -139,6 +139,12 @@ pub struct IndexConfig {
 
     #[serde(default = "default_true")]
     pub incremental: bool,
+
+    /// Files larger than this are recorded by name only — their content is not
+    /// read or parsed. Guards against a single huge/generated file blowing up
+    /// memory during (re)indexing.
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: u64,
 }
 
 fn default_store_backend() -> String {
@@ -147,12 +153,16 @@ fn default_store_backend() -> String {
 fn default_true() -> bool {
     true
 }
+fn default_max_file_bytes() -> u64 {
+    2 * 1024 * 1024
+}
 
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             store_backend: default_store_backend(),
             incremental: true,
+            max_file_bytes: default_max_file_bytes(),
         }
     }
 }
