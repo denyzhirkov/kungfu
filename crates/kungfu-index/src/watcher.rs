@@ -19,10 +19,17 @@ pub fn watch_and_index(
 
     let (tx, rx) = mpsc::channel();
 
+    // notify does NOT honour .gitignore — a recursive watch on the project root delivers
+    // events for ignored trees too (target/, node_modules/, .git/, …). A large, churning
+    // build dir would otherwise flood the unbounded channel and trigger a re-index storm
+    // that wedges the server. Drop ignored-path events here in the callback, before they
+    // ever reach the channel.
+    let ignore_names = config.ignore.paths.clone();
+
     let mut watcher =
         notify::recommended_watcher(move |res: Result<Event, notify::Error>| match res {
             Ok(event) => {
-                if is_relevant_event(&event) {
+                if is_relevant_event(&event) && !event_all_ignored(&event, &ignore_names) {
                     let _ = tx.send(event);
                 }
             }
@@ -36,16 +43,7 @@ pub fn watch_and_index(
 
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(event) => {
-                // Skip events in .kungfu directory
-                let dominated_by_kungfu = event
-                    .paths
-                    .iter()
-                    .all(|p| p.to_string_lossy().contains(".kungfu"));
-                if dominated_by_kungfu {
-                    continue;
-                }
-
+            Ok(_) => {
                 let now = Instant::now();
                 if now.duration_since(last_index) < debounce {
                     // Drain remaining events in debounce window
@@ -79,4 +77,22 @@ fn is_relevant_event(event: &Event) -> bool {
         event.kind,
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
     )
+}
+
+/// True when every path in the event lies under an ignored directory, so the event can be
+/// dropped. Mirrors the scanner's ignore set (`config.ignore.paths`: target, node_modules,
+/// .git, .kungfu, …) by matching directory-name components.
+fn event_all_ignored(event: &Event, ignore_names: &[String]) -> bool {
+    !event.paths.is_empty()
+        && event
+            .paths
+            .iter()
+            .all(|p| path_has_ignored_component(p, ignore_names))
+}
+
+fn path_has_ignored_component(path: &Path, ignore_names: &[String]) -> bool {
+    path.components().any(|c| {
+        let name = c.as_os_str().to_string_lossy();
+        ignore_names.iter().any(|n| n.as_str() == name)
+    })
 }
