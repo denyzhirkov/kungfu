@@ -28,6 +28,84 @@ fn is_binary(content: &[u8]) -> bool {
     content.iter().take(8192).any(|&b| b == 0)
 }
 
+/// Known binary/asset extensions that are never worth reading. Matched before the
+/// size cap, so e.g. a 15 MB photo is recorded by name without ever being opened.
+/// This is a fast-path; the size cap and NUL sniff remain the catch-all.
+fn is_binary_extension(path: &Path) -> bool {
+    const BINARY_EXTS: &[&str] = &[
+        // images
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "webp",
+        "bmp",
+        "ico",
+        "tiff",
+        "tif",
+        "heic",
+        "avif",
+        // video / audio
+        "mp4",
+        "mov",
+        "avi",
+        "mkv",
+        "webm",
+        "mp3",
+        "wav",
+        "flac",
+        "ogg",
+        "m4a",
+        "aac",
+        // archives / compressed
+        "zip",
+        "tar",
+        "gz",
+        "tgz",
+        "bz2",
+        "xz",
+        "zst",
+        "7z",
+        "rar",
+        // documents / fonts
+        "pdf",
+        "woff",
+        "woff2",
+        "ttf",
+        "otf",
+        "eot",
+        // executables / binary blobs
+        "bin",
+        "dat",
+        "wasm",
+        "exe",
+        "dll",
+        "so",
+        "dylib",
+        "o",
+        "a",
+        "class",
+        "jar",
+        // databases
+        "sqlite",
+        "db",
+        "mdb",
+        // ml / numeric blobs
+        "onnx",
+        "pt",
+        "pth",
+        "safetensors",
+        "gguf",
+        "npy",
+        "npz",
+        "parquet",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| BINARY_EXTS.contains(&e.as_str()))
+}
+
 pub struct Indexer<'a> {
     root: std::path::PathBuf,
     config: KungfuConfig,
@@ -358,11 +436,18 @@ impl<'a> Indexer<'a> {
         }
     }
 
-    /// Decide whether to read a file's full content. Files over `max_file_bytes`
-    /// are never read (cheap metadata check only); binary files are read up to the
-    /// cap, sniffed, then dropped. Either way they are still recorded by name.
+    /// Decide whether to read a file's full content. Known binary/asset extensions
+    /// and files over `max_file_bytes` are never read (cheap checks only); remaining
+    /// files are read up to the cap and NUL-sniffed, dropping binary content. Either
+    /// way they are still recorded by name.
     fn read_for_index(&self, path: &Path) -> std::io::Result<ReadOutcome> {
         let size = std::fs::metadata(path)?.len();
+        if is_binary_extension(path) {
+            return Ok(ReadOutcome::Skipped {
+                size,
+                reason: "binary-ext",
+            });
+        }
         if size > self.config.index.max_file_bytes {
             return Ok(ReadOutcome::Skipped {
                 size,
@@ -1183,15 +1268,29 @@ mod tests {
     }
 
     #[test]
-    fn read_for_index_skips_oversized_and_binary_but_keeps_name() {
+    fn is_binary_extension_matches_assets_case_insensitively() {
+        assert!(is_binary_extension(Path::new("a/b/photo.png")));
+        assert!(is_binary_extension(Path::new("PHOTO.JPG")));
+        assert!(is_binary_extension(Path::new("model.safetensors")));
+        assert!(is_binary_extension(Path::new("data.sqlite")));
+        assert!(!is_binary_extension(Path::new("src/main.rs")));
+        assert!(!is_binary_extension(Path::new("README.md")));
+        assert!(!is_binary_extension(Path::new("noext")));
+    }
+
+    #[test]
+    fn read_for_index_skips_oversized_binary_and_assets_but_keeps_name() {
         let root = temp_indexer_root();
         let mut config = KungfuConfig::default();
         config.index.max_file_bytes = 16;
 
         let big = root.join("big.txt");
         std::fs::write(&big, vec![b'x'; 64]).unwrap();
-        let bin = root.join("blob.dat");
+        let bin = root.join("blob.txt"); // NUL content, under cap → caught by sniff
         std::fs::write(&bin, b"ok\0binary").unwrap();
+        // A binary-extension asset is skipped regardless of size — even tiny text bytes.
+        let photo = root.join("photo.png");
+        std::fs::write(&photo, b"not really png").unwrap();
         let small = root.join("small.txt");
         std::fs::write(&small, b"hello").unwrap();
 
@@ -1209,6 +1308,13 @@ mod tests {
             indexer.read_for_index(&bin).unwrap(),
             ReadOutcome::Skipped {
                 reason: "binary",
+                ..
+            }
+        ));
+        assert!(matches!(
+            indexer.read_for_index(&photo).unwrap(),
+            ReadOutcome::Skipped {
+                reason: "binary-ext",
                 ..
             }
         ));
