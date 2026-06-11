@@ -12,6 +12,8 @@ pub mod typescript_parser;
 
 use anyhow::{bail, Result};
 use kungfu_types::file::Language;
+
+mod calls;
 use kungfu_types::symbol::Symbol;
 
 /// Raw import extracted from source code.
@@ -63,8 +65,7 @@ pub struct ParseResult {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<RawImport>,
     pub comments: Vec<RawComment>,
-    /// Call sites within this file. Currently populated for Rust only; empty for other
-    /// languages until per-language call extractors land.
+    /// Call sites within this file, for all supported code languages.
     pub calls: Vec<RawCall>,
 }
 
@@ -361,9 +362,18 @@ impl Parser {
         // Fill doc_summary on symbols from attached Doc comments
         fill_doc_summaries(&mut symbols, &comments);
 
-        // Call extraction is Rust-only for now; other languages get an empty list.
         let calls = match language {
             Language::Rust => rust_parser::extract_calls(root, source),
+            Language::TypeScript | Language::JavaScript => {
+                typescript_parser::extract_calls(root, source)
+            }
+            Language::Python => python_parser::extract_calls(root, source),
+            Language::Go => go_parser::extract_calls(root, source),
+            Language::Java => java_parser::extract_calls(root, source),
+            Language::CSharp => csharp_parser::extract_calls(root, source),
+            Language::Kotlin => kotlin_parser::extract_calls(root, source),
+            Language::C => c_parser::extract_calls(root, source),
+            Language::Cpp => cpp_parser::extract_calls(root, source),
             _ => Vec::new(),
         };
 
@@ -1155,5 +1165,127 @@ class App
             "got: {:?}",
             result.imports.iter().map(|i| &i.path).collect::<Vec<_>>()
         );
+    }
+
+    /// Shared assertion: parse `source`, expect callee names with given is_method flags.
+    fn assert_calls(source: &str, language: Language, ext: &str, expected: &[(&str, bool)]) {
+        let mut parser = Parser::new();
+        let result = parser
+            .parse(source, language, "f:test", &format!("test.{ext}"))
+            .unwrap();
+        for (name, is_method) in expected {
+            assert!(
+                result
+                    .calls
+                    .iter()
+                    .any(|c| c.callee == *name && c.is_method == *is_method),
+                "expected call {name} (is_method={is_method}) in {language:?}, got: {:?}",
+                result
+                    .calls
+                    .iter()
+                    .map(|c| (c.callee.as_str(), c.is_method))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_calls() {
+        assert_calls(
+            "function run() {\n  helper();\n  obj.method();\n}\nconst arrow = () => { helper(); };\n",
+            Language::TypeScript,
+            "ts",
+            &[("helper", false), ("method", true)],
+        );
+    }
+
+    #[test]
+    fn javascript_calls() {
+        assert_calls(
+            "function run() {\n  helper();\n  thing.doIt();\n}\n",
+            Language::JavaScript,
+            "js",
+            &[("helper", false), ("doIt", true)],
+        );
+    }
+
+    #[test]
+    fn python_calls() {
+        assert_calls(
+            "def run():\n    helper()\n    obj.method()\n",
+            Language::Python,
+            "py",
+            &[("helper", false), ("method", true)],
+        );
+    }
+
+    #[test]
+    fn go_calls() {
+        assert_calls(
+            "package main\nfunc run() {\n\thelper()\n\tpkg.Func()\n}\nfunc helper() {}\n",
+            Language::Go,
+            "go",
+            &[("helper", false), ("Func", true)],
+        );
+    }
+
+    #[test]
+    fn java_calls() {
+        assert_calls(
+            "class A {\n  void run() {\n    helper();\n    obj.method();\n  }\n}\n",
+            Language::Java,
+            "java",
+            &[("helper", false), ("method", true)],
+        );
+    }
+
+    #[test]
+    fn csharp_calls() {
+        assert_calls(
+            "class A {\n  void Run() {\n    Helper();\n    obj.Method();\n  }\n}\n",
+            Language::CSharp,
+            "cs",
+            &[("Helper", false), ("Method", true)],
+        );
+    }
+
+    #[test]
+    fn kotlin_calls() {
+        assert_calls(
+            "fun run() {\n    helper()\n    obj.method()\n}\n",
+            Language::Kotlin,
+            "kt",
+            &[("helper", false), ("method", true)],
+        );
+    }
+
+    #[test]
+    fn c_calls() {
+        assert_calls(
+            "void run(void) {\n    helper();\n    s->op();\n}\n",
+            Language::C,
+            "c",
+            &[("helper", false), ("op", true)],
+        );
+    }
+
+    #[test]
+    fn cpp_calls() {
+        assert_calls(
+            "void run() {\n    helper();\n    obj.method();\n    ns::scoped();\n}\n",
+            Language::Cpp,
+            "cpp",
+            &[("helper", false), ("method", true), ("scoped", false)],
+        );
+    }
+
+    #[test]
+    fn calls_outside_functions_are_skipped_across_languages() {
+        // Top-level calls have no caller symbol to attribute to.
+        let mut parser = Parser::new();
+        let result = parser
+            .parse("top_level()\n", Language::Python, "f:test", "test.py")
+            .unwrap();
+        assert!(result.calls.is_empty(), "got: {:?}", result.calls);
     }
 }

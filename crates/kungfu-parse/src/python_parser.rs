@@ -164,3 +164,24 @@ fn node_span(node: &Node) -> Span {
         end_col: node.end_position().column,
     }
 }
+
+pub fn extract_calls(root: Node, source: &str) -> Vec<crate::RawCall> {
+    static SYNTAX: crate::calls::CallSyntax = crate::calls::CallSyntax {
+        caller_kinds: &["function_definition"],
+        call_kinds: &["call"],
+        callee: callee_name,
+    };
+    crate::calls::extract_calls(root, source, &SYNTAX)
+}
+
+fn callee_name(node: Node, source: &str) -> Option<(String, bool)> {
+    let func = node.child_by_field_name("function")?;
+    match func.kind() {
+        "identifier" => Some((crate::calls::node_text(func, source), false)),
+        // obj.method() / module.func() — receiver unknown, mark as method
+        "attribute" => func
+            .child_by_field_name("attribute")
+            .map(|a| (crate::calls::node_text(a, source), true)),
+        _ => None,
+    }
+}

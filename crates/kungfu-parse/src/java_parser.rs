@@ -289,3 +289,19 @@ fn node_span(node: &Node) -> Span {
         end_col: node.end_position().column,
     }
 }
+
+pub fn extract_calls(root: Node, source: &str) -> Vec<crate::RawCall> {
+    static SYNTAX: crate::calls::CallSyntax = crate::calls::CallSyntax {
+        caller_kinds: &["method_declaration", "constructor_declaration"],
+        call_kinds: &["method_invocation"],
+        callee: callee_name,
+    };
+    crate::calls::extract_calls(root, source, &SYNTAX)
+}
+
+fn callee_name(node: Node, source: &str) -> Option<(String, bool)> {
+    let name = node.child_by_field_name("name")?;
+    // foo() is a same-class (or static-imported) call; obj.foo() has a receiver
+    let is_method = node.child_by_field_name("object").is_some();
+    Some((crate::calls::node_text(name, source), is_method))
+}

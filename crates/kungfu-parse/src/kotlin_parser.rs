@@ -304,3 +304,30 @@ fn node_span(node: &Node) -> Span {
         end_col: node.end_position().column,
     }
 }
+
+pub fn extract_calls(root: Node, source: &str) -> Vec<crate::RawCall> {
+    static SYNTAX: crate::calls::CallSyntax = crate::calls::CallSyntax {
+        caller_kinds: &["function_declaration"],
+        call_kinds: &["call_expression"],
+        callee: callee_name,
+    };
+    crate::calls::extract_calls(root, source, &SYNTAX)
+}
+
+fn callee_name(node: Node, source: &str) -> Option<(String, bool)> {
+    // kotlin grammar: call_expression = <callee expression> <call_suffix>.
+    // The callee is the first named child: a bare simple_identifier for free
+    // calls, a navigation_expression (a.b.c) for method calls.
+    let callee = node.named_child(0)?;
+    match callee.kind() {
+        "simple_identifier" | "identifier" => {
+            Some((crate::calls::node_text(callee, source), false))
+        }
+        "navigation_expression" => {
+            let name = crate::calls::last_descendant_of_kind(callee, "simple_identifier")
+                .or_else(|| crate::calls::last_descendant_of_kind(callee, "identifier"))?;
+            Some((crate::calls::node_text(name, source), true))
+        }
+        _ => None,
+    }
+}

@@ -579,3 +579,42 @@ fn node_span(node: &Node) -> Span {
         end_col: node.end_position().column,
     }
 }
+
+pub fn extract_calls(root: Node, source: &str) -> Vec<crate::RawCall> {
+    static SYNTAX: crate::calls::CallSyntax = crate::calls::CallSyntax {
+        caller_kinds: &["function_definition"],
+        call_kinds: &["call_expression"],
+        callee: callee_name,
+    };
+    crate::calls::extract_calls(root, source, &SYNTAX)
+}
+
+fn callee_name(node: Node, source: &str) -> Option<(String, bool)> {
+    let func = node.child_by_field_name("function")?;
+    resolve_cpp_callee(func, source)
+}
+
+fn resolve_cpp_callee(func: Node, source: &str) -> Option<(String, bool)> {
+    match func.kind() {
+        "identifier" => Some((crate::calls::node_text(func, source), false)),
+        // obj.method() / ptr->method() — receiver type unknown at parse time
+        "field_expression" => func
+            .child_by_field_name("field")
+            .map(|f| (crate::calls::node_text(f, source), true)),
+        // ns::foo() / Class::static_call() — unwrap to the last segment
+        "qualified_identifier" => {
+            let name = func.child_by_field_name("name")?;
+            if name.kind() == "qualified_identifier" {
+                resolve_cpp_callee(name, source)
+            } else {
+                Some((crate::calls::node_text(name, source), false))
+            }
+        }
+        // foo<T>() — unwrap the template wrapper
+        "template_function" => {
+            let name = func.child_by_field_name("name")?;
+            Some((crate::calls::node_text(name, source), false))
+        }
+        _ => None,
+    }
+}

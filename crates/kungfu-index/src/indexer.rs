@@ -1160,6 +1160,115 @@ fn is_ubiquitous_callable(name: &str) -> bool {
             | "split"
             | "join"
             | "replace"
+            // JS/TS std prototypes & console
+            | "forEach"
+            | "then"
+            | "reduce"
+            | "slice"
+            | "splice"
+            | "concat"
+            | "indexOf"
+            | "includes"
+            | "keys"
+            | "values"
+            | "entries"
+            | "stringify"
+            | "log"
+            | "error"
+            | "warn"
+            | "info"
+            | "bind"
+            | "apply"
+            | "toString"
+            | "require"
+            | "assign"
+            | "freeze"
+            | "shift"
+            | "unshift"
+            // Python builtins & common methods
+            | "append"
+            | "items"
+            | "format"
+            | "strip"
+            | "lower"
+            | "upper"
+            | "startswith"
+            | "endswith"
+            | "read"
+            | "write"
+            | "open"
+            | "close"
+            | "update"
+            | "copy"
+            | "isinstance"
+            | "print"
+            | "range"
+            | "sorted"
+            | "enumerate"
+            | "zip"
+            | "super"
+            | "getattr"
+            | "setattr"
+            | "hasattr"
+            | "str"
+            | "int"
+            | "list"
+            | "dict"
+            | "tuple"
+            // Go std method/constructor names (capitalized)
+            | "Error"
+            | "String"
+            | "Printf"
+            | "Println"
+            | "Sprintf"
+            | "Errorf"
+            | "Fprintf"
+            | "Fatal"
+            | "Fatalf"
+            | "Close"
+            | "Read"
+            | "Write"
+            | "New"
+            // Java/Kotlin std
+            | "println"
+            | "valueOf"
+            | "equals"
+            | "hashCode"
+            | "size"
+            | "add"
+            | "put"
+            | "of"
+            | "stream"
+            | "getClass"
+            | "let"
+            | "also"
+            | "run"
+            | "with"
+            | "listOf"
+            | "mapOf"
+            | "setOf"
+            | "toList"
+            | "toSet"
+            | "first"
+            // C/C++ libc classics
+            | "printf"
+            | "fprintf"
+            | "sprintf"
+            | "snprintf"
+            | "malloc"
+            | "calloc"
+            | "realloc"
+            | "free"
+            | "memcpy"
+            | "memset"
+            | "memmove"
+            | "strcmp"
+            | "strncmp"
+            | "strcpy"
+            | "strlen"
+            | "assert"
+            | "exit"
+            | "abort"
     )
 }
 
@@ -1807,6 +1916,44 @@ mod tests {
         assert_eq!(
             calls_after, calls_before,
             "untouched file's call graph must survive a targeted reindex"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn full_index_builds_ts_call_relations() {
+        let root = temp_indexer_root();
+        std::fs::write(
+            root.join("app.ts"),
+            "function helper() {}\nfunction run() { helper(); }\n",
+        )
+        .unwrap();
+        let index_dir = root.join(".kungfu").join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let store = JsonStore::new(&index_dir);
+        let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+        indexer.index_full().unwrap();
+
+        let symbols = store.load_symbols().unwrap();
+        let relations = store.load_relations().unwrap();
+        let id = |name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.id.clone())
+        };
+        let run = id("run").expect("run symbol");
+        let helper = id("helper").expect("helper symbol");
+        assert!(
+            relations.iter().any(|r| r.kind == RelationKind::Calls
+                && r.source_id == run
+                && r.target_id == helper),
+            "TS call graph must link run→helper, got {:?}",
+            relations
+                .iter()
+                .filter(|r| r.kind == RelationKind::Calls)
+                .collect::<Vec<_>>()
         );
 
         std::fs::remove_dir_all(&root).ok();
