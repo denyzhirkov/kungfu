@@ -13,6 +13,9 @@ pub(crate) fn reindex(mcp: &KungfuMcp, params: ReindexParam) -> Result<String, S
     if let Ok(mut cache) = mcp.cache.lock() {
         cache.clear();
     }
+    // Vectors follow the index, in the background — semantic_search on the
+    // edited symbols catches up within moments without blocking this call.
+    crate::cache::spawn_embeddings_sync(mcp.project_root.clone());
     serde_json::to_string_pretty(&serde_json::json!({
         "status": "reindexed",
         "paths": params.paths,

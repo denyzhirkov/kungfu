@@ -138,13 +138,48 @@ pub(crate) fn review(mcp: &KungfuMcp) -> Result<String, String> {
 pub(crate) fn embeddings_status(mcp: &KungfuMcp) -> Result<String, String> {
     let service = mcp.service()?;
     let status = service.embeddings_status().map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
+    let mut value = serde_json::to_value(&status).map_err(|e| e.to_string())?;
+    value["job_running"] = serde_json::json!(
+        crate::cache::EMBED_JOB_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
 }
 
+/// Build runs in the background: inference (and a possible ~130MB weight download)
+/// must never block the MCP request path. Poll `embeddings_status` for progress.
 pub(crate) fn embeddings_build(mcp: &KungfuMcp) -> Result<String, String> {
-    let service = mcp.service()?;
-    let result = service.embeddings_build().map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    use std::sync::atomic::Ordering;
+    if crate::cache::EMBED_JOB_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "status": "already_running",
+            "hint": "an embeddings job is in progress — poll embeddings_status",
+        }))
+        .map_err(|e| e.to_string());
+    }
+    let root = mcp.project_root.clone();
+    std::thread::spawn(move || {
+        let result = kungfu_core::KungfuService::open(&root)
+            .map_err(|e| e.to_string())
+            .and_then(|svc| svc.embeddings_build().map_err(|e| e.to_string()));
+        match result {
+            Ok(r) => tracing::info!(
+                "embeddings build done: {} embedded, {} total, {} up-to-date",
+                r.embedded,
+                r.total_in_store,
+                r.skipped_up_to_date
+            ),
+            Err(e) => tracing::warn!("embeddings build failed: {}", e),
+        }
+        crate::cache::EMBED_JOB_RUNNING.store(false, Ordering::SeqCst);
+    });
+    serde_json::to_string_pretty(&serde_json::json!({
+        "status": "started",
+        "hint": "building in the background (downloads weights on first run) — poll embeddings_status until indexed_vectors catches up",
+    }))
+    .map_err(|e| e.to_string())
 }
 
 pub(crate) fn coupling(mcp: &KungfuMcp, params: CouplingParam) -> Result<String, String> {

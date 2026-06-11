@@ -149,24 +149,26 @@ With a default build and no setup, `--semantic` runs **query expansion**: the qu
 
 With a real embedding model installed, the same call runs **vector cosine top-K** over 384-dim sentence embeddings. Finds concepts even when the query and the symbol share no words ("graceful degradation when index is missing" → `ensure_fresh_index`).
 
-Three steps to enable:
+Inference ships compiled-in by default. One command to enable:
 
 ```sh
-cargo build --release --features semantic    # 1. compile with candle + tokenizers (+~80MB binary, ~1min cold)
-kungfu embeddings install                     # 2. download BAAI/bge-small-en-v1.5 (~130MB, one-time)
-kungfu embeddings build                       # 3. compute one 384-dim vector per indexed symbol
+kungfu embeddings build    # downloads BAAI/bge-small-en-v1.5 (~130MB, one-time), then embeds every symbol
 ```
 
-After every `kungfu index` rerun `kungfu embeddings build` to keep vectors in sync — it skips symbols whose text hash hasn't changed.
+From then on vectors maintain themselves: the MCP server re-embeds changed symbols
+in the background after every reindex (including the `reindex` tool and the lazy
+staleness check) and prunes vectors for deleted symbols. No manual re-runs.
+Slim builds (`cargo build --no-default-features`) skip candle entirely and always
+use keyword expansion.
 
 ### Picking the mode
 
 | You see in the output | What ran | What to do |
 |---|---|---|
-| `Engine: vector` (CLI) or `"engine": "vector"` (JSON) | Real embeddings | Use the results |
-| `Engine: keyword` | Query expansion fallback | Use the results; for richer concept matching, finish the vector setup |
+| `"mode": "vector"` (+ `coverage`) | Real embeddings | Use the results |
+| `"mode": "keyword_fallback"` | Query expansion fallback | Use the results; run `kungfu embeddings build` once for concept matching |
 
-`kungfu embeddings status` (CLI) and the `embeddings_status` MCP tool both return the same struct with a one-line `hint` telling you the next step if anything is missing. Agents connected via MCP can call `embeddings_status` once on connect and `embeddings_build` after every `index` to manage the lifecycle themselves.
+`kungfu embeddings status` (CLI) and the `embeddings_status` MCP tool both return the same struct with a one-line `hint` telling you the next step if anything is missing (plus `job_running` while a background build/sync is in flight). The MCP `embeddings_build` tool runs in the background — poll `embeddings_status` until `indexed_vectors` catches up.
 
 ### Side by side
 
@@ -246,7 +248,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `find_files` | Find files by path pattern |
 | `semantic_search` | Concept-level search; vector cosine top-K when embeddings are built, keyword expansion otherwise. Pick this when you don't know the exact symbol name |
 | `embeddings_status` | Are vectors wired up? Returns model id, dim, feature/install/index state, and a one-line `hint` for the next step |
-| `embeddings_build` | Compute or refresh vectors for all indexed symbols. Idempotent. Call after `index` to keep vector search in sync |
+| `embeddings_build` | Build vectors in the background (downloads weights on first run). Idempotent; after the first build, vectors auto-sync on every reindex |
 | `find_related_symbols` | Related symbols in same file |
 | `ask_context` | Smart retrieval: intent + multi-strategy search + rationale + project memory + conflict surfacing |
 | `diff_context` | Context focused on git changes |

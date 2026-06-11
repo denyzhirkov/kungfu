@@ -111,14 +111,34 @@ impl KungfuService {
             let engine = kungfu_embed::shared_engine();
             if let Ok(vecs) = engine.embed_batch(&[query]) {
                 if let Some(qv) = vecs.first() {
-                    let hits = store.top_k(qv, budget.top_k());
+                    // Over-fetch so the test demotion below can't empty the page.
+                    let hits = store.top_k(qv, budget.top_k() * 2);
                     if !hits.is_empty() {
                         let all = self.search().get_all_symbols()?;
                         let by_id: std::collections::HashMap<&str, &kungfu_types::symbol::Symbol> =
                             all.iter().map(|s| (s.id.as_str(), s)).collect();
-                        let items: Vec<serde_json::Value> = hits
+                        // Tests often describe the implementation in their names, so
+                        // cosine loves them. Milder demotion than the keyword path —
+                        // a strong semantic hit on a test can still surface.
+                        let test_ids = crate::helpers::test_symbol_ids(&all);
+                        let mut scored: Vec<(&kungfu_types::symbol::Symbol, f64)> = hits
                             .iter()
-                            .filter_map(|(id, score)| by_id.get(id.as_str()).map(|s| (s, score)))
+                            .filter_map(|(id, score)| {
+                                by_id.get(id.as_str()).map(|s| {
+                                    let mut score = *score as f64;
+                                    if test_ids.contains(id) {
+                                        score *= 0.7;
+                                    }
+                                    (*s, score)
+                                })
+                            })
+                            .collect();
+                        scored.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        scored.truncate(budget.top_k());
+                        let items: Vec<serde_json::Value> = scored
+                            .iter()
                             .map(|(s, score)| {
                                 serde_json::json!({
                                     "name": s.name,
@@ -130,11 +150,20 @@ impl KungfuService {
                                 })
                             })
                             .collect();
-                        return Ok(serde_json::json!({
+                        let embedded = store.len();
+                        let total = all.len();
+                        let mut out = serde_json::json!({
                             "query": query,
                             "mode": "vector",
+                            "coverage": { "embedded": embedded, "indexed_symbols": total },
                             "results": items,
-                        }));
+                        });
+                        if embedded < total {
+                            out["note"] = serde_json::json!(format!(
+                                "vectors cover {embedded}/{total} symbols — a sync may be catching up; unembedded symbols are reachable via find_symbol/search_text"
+                            ));
+                        }
+                        return Ok(out);
                     }
                 }
             }

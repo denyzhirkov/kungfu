@@ -27,6 +27,7 @@ toml = { workspace = true }
 tokio = { workspace = true }
 
 [features]
-default = []
-# Enables real candle-based embedding inference once kungfu-embed/inference is filled in.
+# Vector search ships by default — it is the differentiating feature. Opt out with
+# `cargo build --no-default-features` for a slim binary (keyword fallback only).
+default = ["semantic"]
 semantic = ["kungfu-embed/inference"]

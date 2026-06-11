@@ -5,9 +5,10 @@
 //! - Engine: candle (pure Rust, no native deps).
 //! - Model: BAAI/bge-small-en-v1.5 (384-dim, English-only, ~130MB).
 //! - Storage: `~/.cache/kungfu/models/<model_id>/` (XDG-style, shared across projects).
-//! - Default behaviour: opt-in. The CLI must be built with `--features semantic` for the
-//!   `inference` flag to flow into this crate; otherwise `open_default_engine` returns the
-//!   `NoopEngine` and `semantic_search` falls back to query expansion.
+//! - Default behaviour: the CLI ships with the `semantic` feature on, so inference is
+//!   compiled in. Weights download on the first `embeddings build`. Slim builds
+//!   (`--no-default-features`) get the `NoopEngine` and `semantic_search` falls back
+//!   to query expansion.
 //!
 //! Vector store on disk:
 //! - `embeddings.bin` — raw little-endian f32, row-major, `n_vectors * dim` floats.
@@ -192,6 +193,13 @@ pub fn install_model(models_dir: &Path, model_id: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// Stub for builds without the `inference` feature, so callers (kungfu-core) can
+/// invoke install unconditionally and get a clear error instead of a cfg maze.
+#[cfg(not(feature = "inference"))]
+pub fn install_model(_models_dir: &Path, _model_id: &str) -> Result<PathBuf> {
+    anyhow::bail!("kungfu was built without the `inference` feature; model install is unavailable")
+}
+
 #[cfg(feature = "inference")]
 fn download(url: &str, dest: &Path) -> Result<()> {
     use std::io::{Read, Write};
@@ -335,6 +343,70 @@ impl EmbeddingStore {
     }
 }
 
+/// Drop manifest entries whose symbol ids are gone from the index, then compact
+/// `embeddings.bin` when enough rows are orphaned. The data file is append-only —
+/// without this, every re-embedded or deleted symbol leaks its old row forever.
+///
+/// Returns (pruned_ids, compacted). Compaction rewrites the file keeping only the
+/// rows the manifest still references and reassigns offsets; it triggers when more
+/// than a quarter of the file is dead weight (or any rows are dead and the file is
+/// small enough that a rewrite is cheap anyway).
+pub fn prune_and_compact(
+    index_dir: &Path,
+    manifest: &mut EmbeddingManifest,
+    live_ids: &std::collections::HashSet<String>,
+) -> Result<(usize, bool)> {
+    let stale: Vec<String> = manifest
+        .offsets
+        .keys()
+        .filter(|id| !live_ids.contains(*id))
+        .cloned()
+        .collect();
+    for id in &stale {
+        manifest.offsets.remove(id);
+        manifest.digests.remove(id);
+    }
+
+    let data_path = EmbeddingManifest::data_path(index_dir);
+    let file_rows = std::fs::metadata(&data_path)
+        .map(|m| m.len() / (manifest.dim as u64 * 4))
+        .unwrap_or(0) as usize;
+    let live_rows = manifest.offsets.len();
+    let dead_rows = file_rows.saturating_sub(live_rows);
+    let should_compact = dead_rows > 0 && (dead_rows * 4 > file_rows || file_rows < 4096);
+    if !should_compact {
+        if !stale.is_empty() {
+            manifest.save(index_dir)?;
+        }
+        return Ok((stale.len(), false));
+    }
+
+    let store = match EmbeddingStore::load(index_dir)? {
+        Some(s) => s,
+        None => return Ok((stale.len(), false)),
+    };
+    let mut new_data: Vec<u8> = Vec::with_capacity(live_rows * manifest.dim * 4);
+    let mut new_offsets = std::collections::BTreeMap::new();
+    let mut next_row: u64 = 0;
+    for (id, old_row) in &manifest.offsets {
+        let Some(vec) = store.vector(*old_row) else {
+            continue;
+        };
+        for v in vec {
+            new_data.extend_from_slice(&v.to_le_bytes());
+        }
+        new_offsets.insert(id.clone(), next_row);
+        next_row += 1;
+    }
+    // Atomic swap: tmp + rename, matching the storage crate's convention.
+    let tmp = data_path.with_extension("bin.tmp");
+    std::fs::write(&tmp, &new_data)?;
+    std::fs::rename(&tmp, &data_path)?;
+    manifest.offsets = new_offsets;
+    manifest.save(index_dir)?;
+    Ok((stale.len(), true))
+}
+
 /// Append a vector to `embeddings.bin` and update the manifest. Used by the build path.
 pub fn append_vector(
     index_dir: &Path,
@@ -413,6 +485,35 @@ mod tests {
         l2_normalize(&mut v);
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn prune_and_compact_drops_stale_rows_and_keeps_vectors_correct() {
+        let tmp = std::env::temp_dir().join(format!("kungfu_embed_prune_{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut m = EmbeddingManifest::new("test-model", 2);
+        append_vector(&tmp, &mut m, "a", "ta", &[1.0, 0.0]).unwrap();
+        append_vector(&tmp, &mut m, "b", "tb", &[0.0, 1.0]).unwrap();
+        append_vector(&tmp, &mut m, "c", "tc", &[0.6, 0.8]).unwrap();
+        m.save(&tmp).unwrap();
+
+        let live: std::collections::HashSet<String> =
+            ["a", "c"].iter().map(|s| s.to_string()).collect();
+        let (pruned, compacted) = prune_and_compact(&tmp, &mut m, &live).unwrap();
+        assert_eq!(pruned, 1, "b is gone from the index");
+        assert!(compacted, "small file with dead rows must compact");
+
+        let store = EmbeddingStore::load(&tmp).unwrap().unwrap();
+        assert_eq!(store.len(), 2, "only live rows remain");
+        // Offsets were reassigned — vectors must still match their ids.
+        let top = store.top_k(&[1.0, 0.0], 1);
+        assert_eq!(top[0].0, "a");
+        let top = store.top_k(&[0.6, 0.8], 1);
+        assert_eq!(top[0].0, "c");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

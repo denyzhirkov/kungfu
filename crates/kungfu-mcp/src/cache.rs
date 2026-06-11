@@ -127,6 +127,38 @@ fn cache_key(tool: &str, query: &str, budget: &str) -> u64 {
     hasher.finish()
 }
 
+/// One background embeddings job at a time, process-wide. Shared by the auto-sync
+/// after reindex and the explicit embeddings_build tool.
+pub(crate) static EMBED_JOB_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Kick off a background embeddings sync for the project. Never blocks the request
+/// path (synchronous inference in handlers once stalled the whole MCP server).
+/// No-ops when a job is already running; the sync itself no-ops cheaply when the
+/// store doesn't exist or nothing changed.
+pub(crate) fn spawn_embeddings_sync(project_root: std::path::PathBuf) {
+    use std::sync::atomic::Ordering;
+    if EMBED_JOB_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::spawn(move || {
+        let result = kungfu_core::KungfuService::open(&project_root)
+            .map_err(|e| e.to_string())
+            .and_then(|svc| svc.embeddings_sync().map_err(|e| e.to_string()));
+        match result {
+            Ok(r) => info!(
+                "embeddings sync: {} (embedded {}, pruned {}, compacted {})",
+                r.status, r.embedded, r.pruned, r.compacted
+            ),
+            Err(e) => tracing::warn!("embeddings sync failed: {}", e),
+        }
+        EMBED_JOB_RUNNING.store(false, Ordering::SeqCst);
+    });
+}
+
 impl KungfuMcp {
     pub(crate) fn service(&self) -> std::result::Result<kungfu_core::KungfuService, String> {
         let svc =
@@ -138,6 +170,8 @@ impl KungfuMcp {
                 cache.clear();
                 info!("cache cleared after reindex");
             }
+            // Keep vectors in step with the new index, off the request path.
+            spawn_embeddings_sync(self.project_root.clone());
         }
         Ok(svc)
     }
