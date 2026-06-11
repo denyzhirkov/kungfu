@@ -1,6 +1,6 @@
 use crate::params::{
-    parse_budget, AskContextParam, BudgetParam, DebugTraceParam, FilePathBudgetParam, QueryParam,
-    SymbolBudgetParam,
+    parse_budget, AskContextParam, BudgetParam, DebugTraceParam, EditContextParam,
+    FilePathBudgetParam, QueryParam, SymbolBudgetParam,
 };
 use crate::KungfuMcp;
 
@@ -91,6 +91,24 @@ pub(crate) fn investigate(mcp: &KungfuMcp, params: QueryParam) -> Result<String,
         let service = mcp.service()?;
         let result = service
             .investigate(&query, budget)
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    })
+}
+
+pub(crate) fn edit_context(mcp: &KungfuMcp, params: EditContextParam) -> Result<String, String> {
+    let name = params.name.clone();
+    let scope = params.scope.clone();
+    // Scope goes into the cache key by hand: it changes which symbol is *selected*,
+    // so the generic apply_scope post-filter (which strips items by path) must not run.
+    let key = match scope.as_deref() {
+        Some(s) if !s.is_empty() => format!("{name}|{s}"),
+        _ => name.clone(),
+    };
+    mcp.cached("edit_context", &key, "", || {
+        let service = mcp.service()?;
+        let result = service
+            .edit_context(&name, scope.as_deref())
             .map_err(|e| e.to_string())?;
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     })

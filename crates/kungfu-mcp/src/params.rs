@@ -15,6 +15,21 @@ pub struct FilePathParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct EditContextParam {
+    /// Symbol name to get edit-ready context for
+    pub name: String,
+    /// Disambiguate same-name symbols: only consider files under this path prefix (e.g. "crates/kungfu-core")
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReindexParam {
+    /// Files to reindex (relative to project root, or absolute under it).
+    /// Pass exactly the files you just created/edited/deleted.
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct QueryParam {
     /// Search query or symbol name
     pub query: String,

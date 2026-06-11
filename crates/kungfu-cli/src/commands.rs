@@ -345,12 +345,14 @@ pub fn config_show(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn index(full: bool, changed: bool, json: bool) -> Result<()> {
+pub fn index(full: bool, changed: bool, only: Vec<String>, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let service = KungfuService::open(&cwd)?;
 
     let start = std::time::Instant::now();
-    let stats = if full {
+    let stats = if !only.is_empty() {
+        service.index_paths(&only)?
+    } else if full {
         service.index_full()?
     } else if changed {
         service.index_changed()?
@@ -1500,6 +1502,82 @@ pub fn explore_symbol(name: &str, budget: Budget, json: bool) -> Result<()> {
                         o["name"].as_str().unwrap_or(""),
                     );
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn edit_context(name: &str, scope: Option<&str>, json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let result = service.edit_context(name, scope)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if let Some(err) = result.get("error") {
+        println!("{}", err.as_str().unwrap_or("not found"));
+        if let Some(hint) = result.get("hint").and_then(|h| h.as_str()) {
+            println!("  hint: {}", hint);
+        }
+        return Ok(());
+    }
+
+    let sym = &result["symbol"];
+    println!(
+        "{} ({}) at {}:{}-{}  [{} lines]",
+        sym["name"].as_str().unwrap_or(""),
+        sym["kind"].as_str().unwrap_or(""),
+        sym["path"].as_str().unwrap_or(""),
+        result["span"]["start_line"].as_u64().unwrap_or(0),
+        result["span"]["end_line"].as_u64().unwrap_or(0),
+        result["line_count"].as_u64().unwrap_or(0),
+    );
+    if let Some(code) = result.get("code").and_then(|c| c.as_str()) {
+        println!("---");
+        println!("{}", code);
+        println!("---");
+    }
+    if let Some(callees) = result.get("callees").and_then(|c| c.as_array()) {
+        if !callees.is_empty() {
+            println!("Calls:");
+            for c in callees {
+                println!(
+                    "  {}:{}  {}",
+                    c["path"].as_str().unwrap_or(""),
+                    c["line"].as_u64().unwrap_or(0),
+                    c["name"].as_str().unwrap_or(""),
+                );
+            }
+        }
+    }
+    let callers_count = result["callers_count"].as_u64().unwrap_or(0);
+    if callers_count > 0 {
+        println!("Called by ({}):", callers_count);
+        if let Some(callers) = result.get("callers").and_then(|c| c.as_array()) {
+            for c in callers {
+                println!(
+                    "  {}:{}  {}",
+                    c["path"].as_str().unwrap_or(""),
+                    c["line"].as_u64().unwrap_or(0),
+                    c["name"].as_str().unwrap_or(""),
+                );
+            }
+        }
+    } else if result["call_graph"].as_str() == Some("not_indexed") {
+        println!("Call graph not indexed — callers/callees unavailable.");
+    }
+    if let Some(rationale) = result.get("rationale").and_then(|r| r.as_array()) {
+        if !rationale.is_empty() {
+            println!("Rationale:");
+            for r in rationale {
+                println!(
+                    "  [{}] {}",
+                    r["kind"].as_str().unwrap_or(""),
+                    truncate_str(r["text"].as_str().unwrap_or(""), 100),
+                );
             }
         }
     }

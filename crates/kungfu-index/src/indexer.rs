@@ -205,11 +205,13 @@ impl<'a> Indexer<'a> {
         let old_files = self.store.load_files()?;
         let old_symbols = self.store.load_symbols()?;
         let old_relations = self.store.load_relations()?;
-        // Files re-parsed this run; their old relations are dropped and rebuilt. Unchanged
-        // files keep their existing relations — otherwise a no-op reindex would wipe the
-        // whole graph, since edges are only collected for re-parsed files.
+        // Files re-parsed this run; their old relations/memories are dropped and rebuilt.
+        // Unchanged files keep theirs — otherwise a no-op reindex would wipe the whole
+        // graph and all comment/doc memories, since both are only collected for
+        // re-parsed files.
         let mut changed_file_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut changed_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         let paths = scanner::scan_files(&self.root, &self.config)?;
 
@@ -288,6 +290,7 @@ impl<'a> Indexer<'a> {
                             all_calls.push((entry.path.clone(), calls));
                         }
                         changed_file_ids.insert(entry.id.clone());
+                        changed_paths.insert(entry.path.clone());
                         new_symbols.extend(symbols);
                         new_files.push(entry);
                     }
@@ -300,6 +303,7 @@ impl<'a> Indexer<'a> {
                     let entry = self.name_only_entry(path, size);
                     new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
                     changed_file_ids.insert(entry.id.clone());
+                    changed_paths.insert(entry.path.clone());
                     new_files.push(entry);
                 }
             }
@@ -337,7 +341,21 @@ impl<'a> Indexer<'a> {
             &all_calls,
         ));
         relations.extend(fresh);
-        let memories = Self::build_memories(&all_comments);
+
+        // Merge memories the same way: keep entries from unchanged still-existing files,
+        // rebuild from re-parsed ones. Changed doc files are re-parsed explicitly — doc
+        // memories come from scan_docs, which only runs on full index.
+        let old_memories = self.store.load_memories().unwrap_or_default();
+        let mut memories: Vec<MemoryEntry> = old_memories
+            .into_iter()
+            .filter(|m| !changed_paths.contains(m.path.as_str()) && current_paths.contains(&m.path))
+            .collect();
+        memories.extend(Self::build_memories(&all_comments));
+        for path in &changed_paths {
+            if is_doc_memory_source(path) {
+                self.parse_md_file(&self.root.join(path), &mut memories);
+            }
+        }
 
         self.store.save_files(&new_files)?;
         self.store.save_symbols(&new_symbols)?;
@@ -471,6 +489,11 @@ impl<'a> Indexer<'a> {
             .filter(|m| !changed_set.contains(m.path.as_str()))
             .collect();
         memories.extend(Self::build_memories(&all_comments));
+        for path in changed_paths {
+            if is_doc_memory_source(path) && self.root.join(path).exists() {
+                self.parse_md_file(&self.root.join(path), &mut memories);
+            }
+        }
 
         self.store.save_files(&new_files)?;
         self.store.save_symbols(&new_symbols)?;
@@ -1118,6 +1141,7 @@ fn is_ubiquitous_callable(name: &str) -> bool {
             | "or_default"
             | "or_insert"
             | "or_insert_with"
+            | "entry"
             | "cmp"
             | "partial_cmp"
             | "fmt"
@@ -1389,6 +1413,20 @@ fn resolve_import<'a>(
     }
 
     results
+}
+
+/// Whether `scan_docs` would pick this file up as a doc-memory source: a root-level
+/// markdown file or one under a known docs directory. Used by incremental paths to
+/// re-parse only the changed docs instead of re-running the full scan.
+fn is_doc_memory_source(path: &str) -> bool {
+    if !path.to_lowercase().ends_with(".md") {
+        return false;
+    }
+    !path.contains('/')
+        || path.starts_with("docs/")
+        || path.starts_with("doc/")
+        || path.starts_with("adr/")
+        || path.starts_with("decisions/")
 }
 
 fn is_test_file(path: &str) -> bool {
@@ -1690,6 +1728,85 @@ mod tests {
         assert_eq!(
             calls_after_incremental, calls_after_full,
             "incremental with no changes must preserve Calls relations"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn incremental_with_no_changes_preserves_memories() {
+        let root = temp_indexer_root();
+        std::fs::write(
+            root.join("lib.rs"),
+            "// TODO: tighten the retry budget\nfn helper() {}\n",
+        )
+        .unwrap();
+        let index_dir = root.join(".kungfu").join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let store = JsonStore::new(&index_dir);
+        let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+
+        indexer.index_full().unwrap();
+        let memories_after_full = store.load_memories().unwrap().len();
+        assert!(
+            memories_after_full > 0,
+            "full index should extract the TODO comment memory"
+        );
+
+        // Same bug class as the relations wipe: memories were rebuilt only from
+        // re-parsed files, so a no-op incremental zeroed comment/doc memories.
+        indexer.index_incremental().unwrap();
+        let memories_after_incremental = store.load_memories().unwrap().len();
+        assert_eq!(
+            memories_after_incremental, memories_after_full,
+            "incremental with no changes must preserve memories"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn index_only_touches_just_the_given_file() {
+        let root = temp_indexer_root();
+        std::fs::write(
+            root.join("a.rs"),
+            "fn helper() {}\nfn run() { helper(); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("b.rs"), "fn unrelated() {}\n").unwrap();
+        let index_dir = root.join(".kungfu").join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let store = JsonStore::new(&index_dir);
+        let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+
+        indexer.index_full().unwrap();
+        let calls_before = store
+            .load_relations()
+            .unwrap()
+            .iter()
+            .filter(|r| r.kind == RelationKind::Calls)
+            .count();
+        assert_eq!(calls_before, 1);
+
+        // Edit only b.rs, reindex only b.rs — a.rs's graph must survive,
+        // and the new symbol must become searchable.
+        std::fs::write(root.join("b.rs"), "fn unrelated() {}\nfn fresh_fn() {}\n").unwrap();
+        indexer.index_only(&["b.rs".to_string()]).unwrap();
+
+        let symbols = store.load_symbols().unwrap();
+        assert!(
+            symbols.iter().any(|s| s.name == "fresh_fn"),
+            "new symbol from the targeted file must be indexed"
+        );
+        let calls_after = store
+            .load_relations()
+            .unwrap()
+            .iter()
+            .filter(|r| r.kind == RelationKind::Calls)
+            .count();
+        assert_eq!(
+            calls_after, calls_before,
+            "untouched file's call graph must survive a targeted reindex"
         );
 
         std::fs::remove_dir_all(&root).ok();

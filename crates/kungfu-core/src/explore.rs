@@ -106,58 +106,7 @@ impl KungfuService {
         let candidates = search.find_symbol(name, budget)?;
 
         // 2. Pick best candidate — on tie prefer: definitions > variables, src > test, exported
-        let (symbol, score) = if let Some(best) = candidates.iter().max_by(|a, b| {
-            a.score
-                .partial_cmp(&b.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    // Strongest signal: prefer source over test/example paths
-                    fn is_non_src(path: &str) -> bool {
-                        path.contains("test")
-                            || path.contains("example")
-                            || path.contains("spec/")
-                            || path.contains("fixture")
-                            || path.contains("evals/")
-                            || path.contains("/bench/")
-                            || path.contains("__tests__")
-                            || path.contains("__mocks__")
-                    }
-                    let a_test = is_non_src(&a.item.path);
-                    let b_test = is_non_src(&b.item.path);
-                    b_test.cmp(&a_test)
-                })
-                .then_with(|| {
-                    // Prefer exact case match
-                    let a_exact = a.item.name == name;
-                    let b_exact = b.item.name == name;
-                    a_exact.cmp(&b_exact)
-                })
-                .then_with(|| {
-                    // Prefer definition kinds over variables/modules
-                    fn kind_rank(sym: &Symbol) -> u8 {
-                        match sym.kind {
-                            kungfu_types::symbol::SymbolKind::Class => 5,
-                            kungfu_types::symbol::SymbolKind::Struct => 5,
-                            kungfu_types::symbol::SymbolKind::Trait => 5,
-                            kungfu_types::symbol::SymbolKind::Interface => 5,
-                            kungfu_types::symbol::SymbolKind::Enum => 4,
-                            kungfu_types::symbol::SymbolKind::Function => 3,
-                            kungfu_types::symbol::SymbolKind::Method => 3,
-                            kungfu_types::symbol::SymbolKind::Impl => 2,
-                            kungfu_types::symbol::SymbolKind::Module => 1,
-                            _ => 0,
-                        }
-                    }
-                    kind_rank(&a.item).cmp(&kind_rank(&b.item))
-                })
-                .then_with(|| {
-                    // Prefer larger symbols (class definition > getter/field)
-                    let a_size = a.item.span.end_line.saturating_sub(a.item.span.start_line);
-                    let b_size = b.item.span.end_line.saturating_sub(b.item.span.start_line);
-                    a_size.cmp(&b_size)
-                })
-                .then_with(|| a.item.exported.cmp(&b.item.exported))
-        }) {
+        let (symbol, score) = if let Some(best) = pick_best_definition(&candidates, name) {
             (best.item.clone(), best.score)
         } else if let Some(sym) = search.get_symbol(name)? {
             (sym, 1.0)
@@ -356,4 +305,66 @@ impl KungfuService {
         }
         Some(snippet.join("\n"))
     }
+}
+
+/// Pick the best definition among same-name candidates — on tie prefer:
+/// source over test/example paths, exact case, definition kinds over
+/// variables/modules, larger bodies, exported. Shared by explore_symbol
+/// and edit_context so both resolve a name to the same symbol.
+pub(crate) fn pick_best_definition<'a>(
+    candidates: &'a [kungfu_search::SearchResult<Symbol>],
+    name: &str,
+) -> Option<&'a kungfu_search::SearchResult<Symbol>> {
+    candidates.iter().max_by(|a, b| {
+        a.score
+            .partial_cmp(&b.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                // Strongest signal: prefer source over test/example paths
+                fn is_non_src(path: &str) -> bool {
+                    path.contains("test")
+                        || path.contains("example")
+                        || path.contains("spec/")
+                        || path.contains("fixture")
+                        || path.contains("evals/")
+                        || path.contains("/bench/")
+                        || path.contains("__tests__")
+                        || path.contains("__mocks__")
+                }
+                let a_test = is_non_src(&a.item.path);
+                let b_test = is_non_src(&b.item.path);
+                b_test.cmp(&a_test)
+            })
+            .then_with(|| {
+                // Prefer exact case match
+                let a_exact = a.item.name == name;
+                let b_exact = b.item.name == name;
+                a_exact.cmp(&b_exact)
+            })
+            .then_with(|| {
+                // Prefer definition kinds over variables/modules
+                fn kind_rank(sym: &Symbol) -> u8 {
+                    match sym.kind {
+                        kungfu_types::symbol::SymbolKind::Class => 5,
+                        kungfu_types::symbol::SymbolKind::Struct => 5,
+                        kungfu_types::symbol::SymbolKind::Trait => 5,
+                        kungfu_types::symbol::SymbolKind::Interface => 5,
+                        kungfu_types::symbol::SymbolKind::Enum => 4,
+                        kungfu_types::symbol::SymbolKind::Function => 3,
+                        kungfu_types::symbol::SymbolKind::Method => 3,
+                        kungfu_types::symbol::SymbolKind::Impl => 2,
+                        kungfu_types::symbol::SymbolKind::Module => 1,
+                        _ => 0,
+                    }
+                }
+                kind_rank(&a.item).cmp(&kind_rank(&b.item))
+            })
+            .then_with(|| {
+                // Prefer larger symbols (class definition > getter/field)
+                let a_size = a.item.span.end_line.saturating_sub(a.item.span.start_line);
+                let b_size = b.item.span.end_line.saturating_sub(b.item.span.start_line);
+                a_size.cmp(&b_size)
+            })
+            .then_with(|| a.item.exported.cmp(&b.item.exported))
+    })
 }

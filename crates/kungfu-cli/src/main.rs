@@ -43,6 +43,10 @@ enum Commands {
         /// Index only changed files
         #[arg(long)]
         changed: bool,
+
+        /// Reindex only these files (e.g. after an edit). For editor/agent hooks.
+        #[arg(long, num_args = 1.., value_name = "PATH")]
+        only: Vec<String>,
     },
 
     /// Remove caches and indexes
@@ -138,6 +142,17 @@ enum Commands {
 
         #[arg(long, default_value = "small")]
         budget: String,
+    },
+
+    /// Edit-ready context: full verbatim symbol body + sibling/callee/caller contracts
+    #[command(name = "edit-context")]
+    EditContext {
+        /// Symbol name
+        name: String,
+
+        /// Only consider files under this path prefix (disambiguation)
+        #[arg(long)]
+        scope: Option<String>,
     },
 
     /// Composite: explore a file — outline + related files + key symbols in one call
@@ -448,7 +463,11 @@ fn main() {
         Commands::Status => commands::status(json),
         Commands::Doctor => commands::doctor(json),
         Commands::Config => commands::config_show(json),
-        Commands::Index { full, changed } => commands::index(full, changed, json),
+        Commands::Index {
+            full,
+            changed,
+            only,
+        } => commands::index(full, changed, only, json),
         Commands::Clean => commands::clean(json),
         Commands::RepoOutline { budget } => commands::repo_outline(parse_budget(&budget), json),
         Commands::FileOutline { path } => commands::file_outline(&path, json),
@@ -481,6 +500,9 @@ fn main() {
         Commands::Callees { name, budget } => commands::callees(&name, parse_budget(&budget), json),
         Commands::ExploreSymbol { name, budget } => {
             commands::explore_symbol(&name, parse_budget(&budget), json)
+        }
+        Commands::EditContext { name, scope } => {
+            commands::edit_context(&name, scope.as_deref(), json)
         }
         Commands::ExploreFile { path, budget } => {
             commands::explore_file(&path, parse_budget(&budget), json)

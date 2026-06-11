@@ -40,6 +40,13 @@ impl KungfuMcp {
     }
 
     #[tool(
+        description = "Reindex specific files after you create/edit/delete them. Call this with the paths you just touched so subsequent queries see fresh symbols immediately — much faster and more reliable than waiting for the automatic staleness check"
+    )]
+    fn reindex(&self, Parameters(params): Parameters<ReindexParam>) -> Result<String, String> {
+        tools::project::reindex(self, params)
+    }
+
+    #[tool(
         description = "Return compact repo map: top directories, language distribution, entrypoints"
     )]
     fn repo_outline(&self, Parameters(params): Parameters<BudgetParam>) -> Result<String, String> {
@@ -104,6 +111,16 @@ impl KungfuMcp {
         Parameters(params): Parameters<SymbolBudgetParam>,
     ) -> Result<String, String> {
         tools::context::explore_symbol(self, params)
+    }
+
+    #[tool(
+        description = "Edit-ready context for a symbol: FULL verbatim body (never truncated — usable directly as Edit old_string) plus sibling signatures, callees, callers, and attached rationale. Use this instead of explore_symbol + Read when you are about to modify the symbol"
+    )]
+    fn edit_context(
+        &self,
+        Parameters(params): Parameters<EditContextParam>,
+    ) -> Result<String, String> {
+        tools::context::edit_context(self, params)
     }
 
     #[tool(

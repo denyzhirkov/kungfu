@@ -129,6 +129,7 @@ kungfu export --format jsonl > graph.jsonl   # dump files/symbols/relations/memo
 ```sh
 kungfu index --full                     # full rebuild
 kungfu index --changed                  # reindex only git-changed files
+kungfu index --only src/foo.rs          # reindex specific files (editor/agent hooks)
 kungfu doctor                           # validate installation and index
 kungfu watch                            # auto re-index on file changes
 kungfu clean                            # wipe index and cache
@@ -236,6 +237,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | Tool | Description |
 |------|-------------|
 | `project_status` | File count, symbol count, languages, git status |
+| `reindex` | Reindex specific files right after editing them — agent-driven freshness instead of waiting for the staleness check |
 | `repo_outline` | Top directories, language distribution, entrypoints |
 | `file_outline` | Symbols, signatures, exports for a file |
 | `find_symbol` | Search symbols by name (exact + fuzzy + stem) |
@@ -252,6 +254,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `commit_context` | Build a packet focused on a specific git commit |
 | `pr_context` | Build a packet covering all commits in a GitHub PR (needs `gh`) |
 | `explore_symbol` | Composite: find + detail + related + snippet in one call |
+| `edit_context` | Edit-ready context: full verbatim symbol body (never truncated) + sibling/callee/caller contracts + rationale. Use before modifying a symbol — no follow-up file read needed |
 | `explore_file` | Composite: outline + related files + key symbols |
 | `investigate` | Composite: ask_context + diff awareness |
 | `callers` | Call graph: who calls this symbol? |
@@ -283,9 +286,36 @@ Add to `CLAUDE.md` or system prompt. Keep it about *policy*, not tool catalogs �
 ## kungfu
 - Prefer kungfu MCP tools over reading files directly. Only open a file when kungfu confirms you need it.
 - Default to tiny/small budget. Escalate only when the packet is clearly insufficient.
+- After creating/editing files, call `reindex` with those paths so the next query sees them.
 - Use `memory_search` before implementing — project may already have a decision or warning about this.
 - Use `memory_add` to preserve facts, decisions, and warnings worth remembering across sessions. Prefer pinning sparingly.
 ```
+
+### Auto-reindex on edit (Claude Code hook)
+
+Instead of relying on the agent to remember `reindex`, wire it into the harness — every
+`Edit`/`Write` triggers a targeted reindex of exactly that file (~10 ms):
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | xargs -I{} kungfu index --only {} >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Add to the project's `.claude/settings.json`. The lazy staleness check stays as a safety
+net for files changed outside the agent (git pull, formatters, codegen).
 
 Four lines is enough. The agent will pick `ask_context`, `explore_symbol`, `affected`, etc. on its own from tool descriptions.
 

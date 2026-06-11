@@ -1,5 +1,29 @@
-use crate::params::{parse_budget, BudgetParam, FilePathParam};
+use crate::params::{parse_budget, BudgetParam, FilePathParam, ReindexParam};
 use crate::KungfuMcp;
+
+/// Agent-driven freshness: reindex exactly the files the agent just touched,
+/// instead of waiting for the lazy mtime-based staleness check to guess.
+pub(crate) fn reindex(mcp: &KungfuMcp, params: ReindexParam) -> Result<String, String> {
+    // Untracked open on purpose: ensure_fresh_index would run its own incremental
+    // scan first, defeating the point of the explicit targeted reindex.
+    let service = mcp.service_untracked()?;
+    let stats = service
+        .index_paths(&params.paths)
+        .map_err(|e| e.to_string())?;
+    if let Ok(mut cache) = mcp.cache.lock() {
+        cache.clear();
+    }
+    serde_json::to_string_pretty(&serde_json::json!({
+        "status": "reindexed",
+        "paths": params.paths,
+        "new_files": stats.new_files,
+        "changed_files": stats.changed_files,
+        "removed_files": stats.removed_files,
+        "symbols_extracted": stats.symbols_extracted,
+        "total_files": stats.total_files,
+    }))
+    .map_err(|e| e.to_string())
+}
 
 pub(crate) fn project_status(mcp: &KungfuMcp) -> Result<String, String> {
     let service = mcp.service()?;

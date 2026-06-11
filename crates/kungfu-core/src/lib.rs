@@ -14,6 +14,7 @@ use tracing::info;
 
 mod ask;
 mod debug;
+mod edit;
 mod embeddings;
 mod explore;
 mod export;
@@ -171,6 +172,28 @@ impl KungfuService {
         let mut indexer =
             Indexer::new(&self.project.root, self.project.config.clone(), &self.store);
         indexer.index_incremental()
+    }
+
+    /// Reindex only the given files. Agent-driven freshness: the editor knows exactly
+    /// which files it touched, so it tells us instead of us guessing via mtime scans.
+    /// Accepts paths relative to the project root or absolute ones under it.
+    pub fn index_paths(&self, paths: &[String]) -> Result<kungfu_index::indexer::IndexStats> {
+        if paths.is_empty() {
+            bail!("no paths given — pass the files you changed, or run a full/incremental index");
+        }
+        let root = &self.project.root;
+        let rels: Vec<String> = paths
+            .iter()
+            .map(|p| {
+                let path = std::path::Path::new(p);
+                let rel = path.strip_prefix(root).unwrap_or(path);
+                rel.to_string_lossy().trim_start_matches("./").to_string()
+            })
+            .collect();
+        self.store.invalidate();
+        let mut indexer =
+            Indexer::new(&self.project.root, self.project.config.clone(), &self.store);
+        indexer.index_only(&rels)
     }
 
     pub fn index_changed(&self) -> Result<kungfu_index::indexer::IndexStats> {
