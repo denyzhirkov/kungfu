@@ -1,4 +1,4 @@
-use crate::params::{parse_budget, QueryParam, SymbolNameParam};
+use crate::params::{parse_budget, QueryParam};
 use crate::KungfuMcp;
 
 pub(crate) fn find_symbol(mcp: &KungfuMcp, params: QueryParam) -> Result<String, String> {
@@ -24,18 +24,14 @@ pub(crate) fn find_symbol(mcp: &KungfuMcp, params: QueryParam) -> Result<String,
                 })
             })
             .collect();
-        serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
-    })
-}
-
-pub(crate) fn get_symbol(mcp: &KungfuMcp, params: SymbolNameParam) -> Result<String, String> {
-    let name = params.name.clone();
-    mcp.cached("get_symbol", &name, "", || {
-        let service = mcp.service()?;
-        match service.get_symbol(&name).map_err(|e| e.to_string())? {
-            Some(sym) => serde_json::to_string_pretty(&sym).map_err(|e| e.to_string()),
-            None => Ok(format!("Symbol '{}' not found", name)),
+        if items.is_empty() {
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "results": [],
+                "hint": format!("no symbol name matches '{query}' — for concept-level lookup try semantic_search; for content matches try search_text"),
+            }))
+            .map_err(|e| e.to_string());
         }
+        serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
     })
 }
 
@@ -59,6 +55,13 @@ pub(crate) fn search_text(mcp: &KungfuMcp, params: QueryParam) -> Result<String,
                 })
             })
             .collect();
+        if items.is_empty() {
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "results": [],
+                "hint": format!("no content matches for '{query}' — try semantic_search (concepts) or find_symbol (names)"),
+            }))
+            .map_err(|e| e.to_string());
+        }
         serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
     })
 }
@@ -105,38 +108,4 @@ pub(crate) fn semantic_search(mcp: &KungfuMcp, params: QueryParam) -> Result<Str
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         },
     )
-}
-
-pub(crate) fn find_related_symbols(
-    mcp: &KungfuMcp,
-    params: SymbolNameParam,
-) -> Result<String, String> {
-    let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
-    let name = params.name.clone();
-    mcp.cached("find_related_symbols", &name, &budget_str, || {
-        let budget = parse_budget(Some(&budget_str));
-        let service = mcp.service()?;
-        let sym = service.get_symbol(&name).map_err(|e| e.to_string())?;
-        match sym {
-            Some(s) => {
-                let file_outline = service.file_outline(&s.path).map_err(|e| e.to_string())?;
-                let items: Vec<_> = file_outline
-                    .symbols
-                    .iter()
-                    .filter(|os| os.name != name)
-                    .take(budget.top_k())
-                    .map(|os| {
-                        serde_json::json!({
-                            "name": os.name,
-                            "kind": os.kind,
-                            "path": s.path,
-                            "line": os.line,
-                        })
-                    })
-                    .collect();
-                serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
-            }
-            None => Ok(format!("Symbol '{}' not found", name)),
-        }
-    })
 }

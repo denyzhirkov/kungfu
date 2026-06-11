@@ -683,6 +683,74 @@ pub fn affected(name: &str, depth: usize, staged: bool, json: bool) -> Result<()
     Ok(())
 }
 
+pub fn verify_change(depth: usize, json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let result = service.verify_change(depth)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if result["status"].as_str() == Some("clean") {
+        println!("Working tree matches HEAD — nothing to verify.");
+        return Ok(());
+    }
+    println!(
+        "Changed: {} symbols in {} files  |  risk: {}",
+        result["changed_symbols"].as_array().map_or(0, |a| a.len()),
+        result["changed_files"].as_array().map_or(0, |a| a.len()),
+        result["affected"]["risk"].as_str().unwrap_or("?"),
+    );
+    if let Some(contracts) = result["touched_contracts"].as_array() {
+        if !contracts.is_empty() {
+            println!("Public contracts touched:");
+            for c in contracts {
+                println!(
+                    "  {}:{}  {}",
+                    c["path"].as_str().unwrap_or(""),
+                    c["line"].as_u64().unwrap_or(0),
+                    c["name"].as_str().unwrap_or(""),
+                );
+            }
+        }
+    }
+    if let Some(entries) = result["affected"]["entries"].as_array() {
+        if !entries.is_empty() {
+            println!(
+                "Affected ({} total):",
+                result["affected"]["total"].as_u64().unwrap_or(0)
+            );
+            for e in entries.iter().take(10) {
+                println!(
+                    "  d{}  {}  {}",
+                    e["depth"].as_u64().unwrap_or(0),
+                    e["path"].as_str().unwrap_or(""),
+                    e["name"].as_str().unwrap_or(""),
+                );
+            }
+        }
+    }
+    if let Some(tests) = result["suggested_tests"].as_array() {
+        if tests.is_empty() {
+            println!("Suggested tests: none found — consider adding coverage.");
+        } else {
+            println!("Suggested tests:");
+            for t in tests.iter().take(15) {
+                println!(
+                    "  {}  {}",
+                    t["path"].as_str().unwrap_or(""),
+                    t["name"].as_str().unwrap_or(""),
+                );
+            }
+        }
+    }
+    if let Some(note) = result["note"].as_str() {
+        println!("note: {}", note);
+    }
+    Ok(())
+}
+
 pub fn smart_test(json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let service = KungfuService::open(&cwd)?;

@@ -239,6 +239,14 @@ enum Commands {
     #[command(name = "smart-test")]
     SmartTest,
 
+    /// Verify edits: changed symbols, blast radius, minimal tests, touched contracts
+    #[command(name = "verify-change")]
+    VerifyChange {
+        /// Blast-radius traversal depth
+        #[arg(long, default_value = "3")]
+        depth: usize,
+    },
+
     /// Reverse of smart-test: production code exercised by a given test
     #[command(name = "test-subjects")]
     TestSubjects {
@@ -519,6 +527,7 @@ fn main() {
             staged,
         } => commands::affected(&name, depth, staged, json),
         Commands::SmartTest => commands::smart_test(json),
+        Commands::VerifyChange { depth } => commands::verify_change(depth, json),
         Commands::TestSubjects { name } => commands::test_subjects(&name, json),
         Commands::Review => commands::review(json),
         Commands::Coupling { top } => commands::coupling(top, json),

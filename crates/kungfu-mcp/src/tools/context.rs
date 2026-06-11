@@ -1,6 +1,6 @@
 use crate::params::{
-    parse_budget, AskContextParam, BudgetParam, DebugTraceParam, EditContextParam,
-    FilePathBudgetParam, QueryParam, SymbolBudgetParam,
+    parse_budget, AskContextParam, DebugTraceParam, EditContextParam, FilePathBudgetParam,
+    QueryParam, SymbolBudgetParam,
 };
 use crate::KungfuMcp;
 
@@ -38,15 +38,6 @@ pub(crate) fn ask_context(mcp: &KungfuMcp, params: AskContextParam) -> Result<St
 
         serde_json::to_string_pretty(&packet).map_err(|e| e.to_string())
     })
-}
-
-pub(crate) fn diff_context(mcp: &KungfuMcp, params: BudgetParam) -> Result<String, String> {
-    let budget = parse_budget(params.budget.as_deref());
-    let service = mcp.service()?;
-    let packet = service.diff_context(budget).map_err(|e| e.to_string())?;
-    let out = serde_json::to_string_pretty(&packet).map_err(|e| e.to_string())?;
-    mcp.record_served("diff_context", &out);
-    Ok(out)
 }
 
 pub(crate) fn explore_symbol(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Result<String, String> {

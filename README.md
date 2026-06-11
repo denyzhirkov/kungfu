@@ -243,15 +243,12 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `repo_outline` | Top directories, language distribution, entrypoints |
 | `file_outline` | Symbols, signatures, exports for a file |
 | `find_symbol` | Search symbols by name (exact + fuzzy + stem) |
-| `get_symbol` | Detailed symbol info by exact name |
 | `search_text` | Text search across indexed files |
 | `find_files` | Find files by path pattern |
 | `semantic_search` | Concept-level search; vector cosine top-K when embeddings are built, keyword expansion otherwise. Pick this when you don't know the exact symbol name |
 | `embeddings_status` | Are vectors wired up? Returns model id, dim, feature/install/index state, and a one-line `hint` for the next step |
 | `embeddings_build` | Build vectors in the background (downloads weights on first run). Idempotent; after the first build, vectors auto-sync on every reindex |
-| `find_related_symbols` | Related symbols in same file |
 | `ask_context` | Smart retrieval: intent + multi-strategy search + rationale + project memory + conflict surfacing |
-| `diff_context` | Context focused on git changes |
 | `debug_trace` | Parse a stack trace (Rust panic, JS stack, Python traceback, Go panic) and return involved symbols + siblings |
 | `commit_context` | Build a packet focused on a specific git commit |
 | `pr_context` | Build a packet covering all commits in a GitHub PR (needs `gh`) |
@@ -273,6 +270,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 | `onboard` | Project summary: architecture, patterns, key symbols, naming |
 | `affected` | Blast radius: transitive callers/dependents of a symbol (use `staged: true` for current diff) |
 | `smart_test` | Minimal test set based on git diff |
+| `verify_change` | Composite post-edit check: changed symbols, blast radius, minimal test set, touched public contracts. Call after finishing edits |
 | `test_subjects` | Reverse of smart_test: production code exercised by a given test |
 | `review` | Code review context: risks, missing co-changes, untested code |
 | `coupling` | Module coupling: fan-in, fan-out, co-change frequency |
@@ -289,6 +287,7 @@ Add to `CLAUDE.md` or system prompt. Keep it about *policy*, not tool catalogs �
 - Prefer kungfu MCP tools over reading files directly. Only open a file when kungfu confirms you need it.
 - Default to tiny/small budget. Escalate only when the packet is clearly insufficient.
 - After creating/editing files, call `reindex` with those paths so the next query sees them.
+- After finishing a series of edits, call `verify_change` — it returns the blast radius and the minimal test set to run before declaring the work done.
 - Use `memory_search` before implementing — project may already have a decision or warning about this.
 - Use `memory_add` to preserve facts, decisions, and warnings worth remembering across sessions. Prefer pinning sparingly.
 ```

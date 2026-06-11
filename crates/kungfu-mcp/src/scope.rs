@@ -19,10 +19,19 @@ pub(crate) fn apply_scope(json_str: &str, scope: Option<&str>) -> String {
         return serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| json_str.to_string());
     }
 
-    // Try parsing as object with "items" array
+    // Try parsing as object with "items" / "results" array
     if let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(json_str) {
         if let Some(items) = obj.get_mut("items").and_then(|v| v.as_array_mut()) {
             items.retain(|item| {
+                item.get("path")
+                    .and_then(|p| p.as_str())
+                    .map(|p| p.starts_with(scope))
+                    .unwrap_or(true)
+            });
+            return serde_json::to_string_pretty(&obj).unwrap_or_else(|_| json_str.to_string());
+        }
+        if let Some(results) = obj.get_mut("results").and_then(|v| v.as_array_mut()) {
+            results.retain(|item| {
                 item.get("path")
                     .and_then(|p| p.as_str())
                     .map(|p| p.starts_with(scope))

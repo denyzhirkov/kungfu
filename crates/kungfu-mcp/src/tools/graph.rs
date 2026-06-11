@@ -25,8 +25,20 @@ pub(crate) fn callers(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Result<Stri
                 })
             })
             .collect();
-        serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
+        graph_response(&name, items)
     })
+}
+
+/// Uniform call-graph response shape (the empty diagnostics already use objects,
+/// so non-empty results match), with provenance on how edges are derived.
+fn graph_response(name: &str, items: Vec<serde_json::Value>) -> Result<String, String> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "status": "ok",
+        "name": name,
+        "results": items,
+        "provenance": "AST call graph; an edge exists only when the callee name resolves unambiguously — ambiguous names (several same-name definitions) are omitted, not guessed",
+    }))
+    .map_err(|e| e.to_string())
 }
 
 /// Distinguish "no edges for this symbol" from "no call graph built at all".
@@ -80,6 +92,6 @@ pub(crate) fn callees(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Result<Stri
                 })
             })
             .collect();
-        serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
+        graph_response(&name, items)
     })
 }

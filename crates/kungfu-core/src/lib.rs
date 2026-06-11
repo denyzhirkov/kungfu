@@ -25,6 +25,7 @@ mod onboard;
 mod review;
 mod search_ops;
 mod types;
+mod verify;
 
 pub use debug::{DebugTraceResult, TraceFrame};
 pub use embeddings::{EmbeddingsBuildResult, EmbeddingsStatus};

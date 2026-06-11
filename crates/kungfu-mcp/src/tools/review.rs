@@ -135,6 +135,19 @@ pub(crate) fn review(mcp: &KungfuMcp) -> Result<String, String> {
     Ok(out)
 }
 
+pub(crate) fn verify_change(
+    mcp: &KungfuMcp,
+    params: crate::params::VerifyChangeParam,
+) -> Result<String, String> {
+    // No cache — depends on current diff state
+    let depth = params.depth.unwrap_or(3);
+    let service = mcp.service()?;
+    let result = service.verify_change(depth).map_err(|e| e.to_string())?;
+    let out = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
+    mcp.record_served("verify_change", &out);
+    Ok(out)
+}
+
 pub(crate) fn embeddings_status(mcp: &KungfuMcp) -> Result<String, String> {
     let service = mcp.service()?;
     let status = service.embeddings_status().map_err(|e| e.to_string())?;

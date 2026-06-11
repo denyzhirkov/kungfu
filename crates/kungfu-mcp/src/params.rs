@@ -15,6 +15,12 @@ pub struct FilePathParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct VerifyChangeParam {
+    /// Blast-radius traversal depth through the call/import graph. Default: 3
+    pub depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct EditContextParam {
     /// Symbol name to get edit-ready context for
     pub name: String,

@@ -68,14 +68,6 @@ impl KungfuMcp {
         tools::search::find_symbol(self, params)
     }
 
-    #[tool(description = "Get detailed info about a specific symbol by exact name")]
-    fn get_symbol(
-        &self,
-        Parameters(params): Parameters<SymbolNameParam>,
-    ) -> Result<String, String> {
-        tools::search::get_symbol(self, params)
-    }
-
     #[tool(description = "Search text across indexed files by path and name matching")]
     fn search_text(&self, Parameters(params): Parameters<QueryParam>) -> Result<String, String> {
         tools::search::search_text(self, params)
@@ -94,13 +86,6 @@ impl KungfuMcp {
         Parameters(params): Parameters<AskContextParam>,
     ) -> Result<String, String> {
         tools::context::ask_context(self, params)
-    }
-
-    #[tool(
-        description = "Build context focused on changed code and nearby dependencies using git diff"
-    )]
-    fn diff_context(&self, Parameters(params): Parameters<BudgetParam>) -> Result<String, String> {
-        tools::context::diff_context(self, params)
     }
 
     #[tool(
@@ -268,6 +253,16 @@ impl KungfuMcp {
     }
 
     #[tool(
+        description = "Verify your edits in one call: changed symbols in the working-tree diff, blast radius (transitive callers), the minimal test set covering them, and any touched public contracts. Call this after finishing a series of edits, before declaring the work done"
+    )]
+    fn verify_change(
+        &self,
+        Parameters(params): Parameters<VerifyChangeParam>,
+    ) -> Result<String, String> {
+        tools::review::verify_change(self, params)
+    }
+
+    #[tool(
         description = "Analyze module coupling: fan-in (who depends on this), fan-out (what this depends on), co-change frequency. Identifies fragile modules with high risk"
     )]
     fn coupling(&self, Parameters(params): Parameters<CouplingParam>) -> Result<String, String> {
@@ -282,26 +277,10 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Compute or refresh embeddings for all indexed symbols. Idempotent — skips symbols whose name+signature+doc hash already matches the manifest. Call this after `index` to keep vector search in sync. Errors clearly if the binary lacks `--features semantic` or the model is not installed."
+        description = "Build embeddings in the background (downloads model weights on first run). Returns immediately; poll embeddings_status until indexed_vectors catches up. Idempotent. After the first build, vectors auto-sync on every reindex — no need to call this again."
     )]
-    async fn embeddings_build(&self) -> Result<String, String> {
-        // Embedding the whole symbol table is minutes of CPU-bound inference. Run it on the
-        // blocking pool so it can't freeze the stdio event loop (and every other tool call)
-        // for the duration of the build.
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || tools::review::embeddings_build(&this))
-            .await
-            .map_err(|e| format!("embeddings_build task panicked: {e}"))?
-    }
-
-    #[tool(
-        description = "Find symbols related to a given symbol by name, path, or structural proximity"
-    )]
-    fn find_related_symbols(
-        &self,
-        Parameters(params): Parameters<SymbolNameParam>,
-    ) -> Result<String, String> {
-        tools::search::find_related_symbols(self, params)
+    fn embeddings_build(&self) -> Result<String, String> {
+        tools::review::embeddings_build(self)
     }
 
     #[tool(
