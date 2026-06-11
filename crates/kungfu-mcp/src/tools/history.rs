@@ -8,7 +8,9 @@ pub(crate) fn file_history(mcp: &KungfuMcp, params: FilePathParam) -> Result<Str
     let result = service
         .file_history(&params.path, 10)
         .map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    let out = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
+    mcp.record_served("file_history", &out);
+    Ok(out)
 }
 
 pub(crate) fn symbol_history(mcp: &KungfuMcp, params: SymbolNameParam) -> Result<String, String> {

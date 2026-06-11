@@ -11,16 +11,16 @@ pub(crate) fn usage_stats(mcp: &KungfuMcp) -> Result<String, String> {
         0.0
     };
 
-    // Estimate raw size: each call would read ~8KB (avg file) without kungfu
-    // Token estimate: ~4 chars per token
-    let estimated_raw_bytes = cache.calls_served * 8192;
+    // Real baseline: the on-disk size of the source files served results referenced — what an
+    // agent would have read by opening them directly — versus the distilled bytes kungfu returned.
+    let raw_bytes = cache.raw_bytes_baseline;
     let kungfu_bytes = cache.bytes_served;
     let savings_ratio = if kungfu_bytes > 0 {
-        estimated_raw_bytes as f64 / kungfu_bytes as f64
+        raw_bytes as f64 / kungfu_bytes as f64
     } else {
         0.0
     };
-    let estimated_tokens_saved = estimated_raw_bytes.saturating_sub(kungfu_bytes) / 4;
+    let estimated_tokens_saved = raw_bytes.saturating_sub(kungfu_bytes) / 4;
 
     let persistent = mcp
         .service()
@@ -31,9 +31,10 @@ pub(crate) fn usage_stats(mcp: &KungfuMcp) -> Result<String, String> {
         "session": {
             "calls_served": cache.calls_served,
             "bytes_served": kungfu_bytes,
-            "estimated_raw_bytes": estimated_raw_bytes,
+            "raw_bytes_baseline": raw_bytes,
             "compression_ratio": format!("{:.1}x", savings_ratio),
             "estimated_tokens_saved": estimated_tokens_saved,
+            "baseline_method": "sum of on-disk sizes of source files referenced by served results, vs bytes returned (~4 chars/token)",
             "cache": {
                 "entries": cache.entries.len(),
                 "capacity": CACHE_CAPACITY,
@@ -55,7 +56,9 @@ pub(crate) fn hotspots(mcp: &KungfuMcp, params: HotspotsParam) -> Result<String,
     let entries = service
         .hotspots(top, churn, files)
         .map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())
+    let out = serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?;
+    mcp.record_served("hotspots", &out);
+    Ok(out)
 }
 
 pub(crate) fn onboard(mcp: &KungfuMcp) -> Result<String, String> {
@@ -93,7 +96,9 @@ pub(crate) fn smart_test(mcp: &KungfuMcp) -> Result<String, String> {
     // No cache — depends on current diff state
     let service = mcp.service()?;
     let result = service.smart_test().map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    let out = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
+    mcp.record_served("smart_test", &out);
+    Ok(out)
 }
 
 pub(crate) fn test_subjects(
@@ -125,7 +130,9 @@ pub(crate) fn review(mcp: &KungfuMcp) -> Result<String, String> {
     // No cache — depends on current diff state
     let service = mcp.service()?;
     let result = service.review().map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    let out = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
+    mcp.record_served("review", &out);
+    Ok(out)
 }
 
 pub(crate) fn embeddings_status(mcp: &KungfuMcp) -> Result<String, String> {

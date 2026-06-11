@@ -339,12 +339,21 @@ impl KungfuService {
             return None;
         }
 
-        let take = (end - start).min(max_lines);
-        let snippet: Vec<&str> = lines[start..start + take].to_vec();
+        let symbol_len = end - start;
+        let take = symbol_len.min(max_lines);
+        let mut snippet: Vec<String> = lines[start..start + take]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         if snippet.is_empty() {
-            None
-        } else {
-            Some(snippet.join("\n"))
+            return None;
         }
+        if take < symbol_len {
+            snippet.push(format!(
+                "    … truncated, showing {} of {} lines",
+                take, symbol_len
+            ));
+        }
+        Some(snippet.join("\n"))
     }
 }

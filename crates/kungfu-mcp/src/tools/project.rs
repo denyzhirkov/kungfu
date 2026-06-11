@@ -4,7 +4,7 @@ use crate::KungfuMcp;
 pub(crate) fn project_status(mcp: &KungfuMcp) -> Result<String, String> {
     let service = mcp.service()?;
     let info = service.status().map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&serde_json::json!({
+    let out = serde_json::to_string_pretty(&serde_json::json!({
         "project_name": info.project_name,
         "root": info.root,
         "indexed_files": info.indexed_files,
@@ -12,7 +12,9 @@ pub(crate) fn project_status(mcp: &KungfuMcp) -> Result<String, String> {
         "languages": info.languages,
         "has_git": info.has_git,
     }))
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    mcp.record_served("project_status", &out);
+    Ok(out)
 }
 
 pub(crate) fn repo_outline(mcp: &KungfuMcp, params: BudgetParam) -> Result<String, String> {
@@ -26,7 +28,7 @@ pub(crate) fn repo_outline(mcp: &KungfuMcp, params: BudgetParam) -> Result<Strin
         .map(|d| serde_json::json!({"path": d.path, "files": d.file_count}))
         .collect();
 
-    serde_json::to_string_pretty(&serde_json::json!({
+    let out = serde_json::to_string_pretty(&serde_json::json!({
         "project": outline.project_name,
         "total_files": outline.total_files,
         "total_symbols": outline.total_symbols,
@@ -34,7 +36,9 @@ pub(crate) fn repo_outline(mcp: &KungfuMcp, params: BudgetParam) -> Result<Strin
         "directories": dirs,
         "entrypoints": outline.entrypoints,
     }))
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    mcp.record_served("repo_outline", &out);
+    Ok(out)
 }
 
 pub(crate) fn file_outline(mcp: &KungfuMcp, params: FilePathParam) -> Result<String, String> {
@@ -57,10 +61,12 @@ pub(crate) fn file_outline(mcp: &KungfuMcp, params: FilePathParam) -> Result<Str
         })
         .collect();
 
-    serde_json::to_string_pretty(&serde_json::json!({
+    let out = serde_json::to_string_pretty(&serde_json::json!({
         "path": outline.path,
         "language": outline.language,
         "symbols": symbols,
     }))
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    mcp.record_served("file_outline", &out);
+    Ok(out)
 }

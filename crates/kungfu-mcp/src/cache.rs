@@ -17,6 +17,12 @@ pub(crate) struct CacheState {
     pub bytes_served: u64,
     /// Total MCP tool calls served
     pub calls_served: u64,
+    /// Sum of on-disk sizes of the distinct source files referenced by served results — i.e. the
+    /// bytes an agent would have read by opening those files directly. This is the real baseline
+    /// the served bytes are compared against, not a per-call constant.
+    pub raw_bytes_baseline: u64,
+    /// Cached path → file size map (from the index), reloaded after a reindex clears the cache.
+    pub file_sizes: Option<HashMap<String, u64>>,
 }
 
 impl CacheState {
@@ -29,6 +35,8 @@ impl CacheState {
             misses: 0,
             bytes_served: 0,
             calls_served: 0,
+            raw_bytes_baseline: 0,
+            file_sizes: None,
         }
     }
 
@@ -61,6 +69,53 @@ impl CacheState {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
+        // File sizes may have changed with the reindex that triggered this clear.
+        self.file_sizes = None;
+    }
+}
+
+/// Load path → file size from the index, for computing the raw-read baseline.
+fn load_file_sizes(project_root: &std::path::Path) -> HashMap<String, u64> {
+    let path = project_root
+        .join(".kungfu")
+        .join("index")
+        .join("files.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<Vec<kungfu_types::file::FileEntry>>(&c).ok())
+        .map(|files| files.into_iter().map(|f| (f.path, f.size)).collect())
+        .unwrap_or_default()
+}
+
+/// Distinct values of every `"path"` string field in a result JSON — the source files an agent
+/// would otherwise open. Non-JSON or path-less results yield an empty set (baseline 0).
+fn referenced_paths(result: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(result) {
+        collect_paths(&value, &mut out);
+    }
+    out
+}
+
+fn collect_paths(value: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if k == "path" {
+                    if let Some(p) = v.as_str() {
+                        out.insert(p.to_string());
+                    }
+                } else {
+                    collect_paths(v, out);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                collect_paths(v, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -113,6 +168,41 @@ impl KungfuMcp {
         }
     }
 
+    /// Bytes an agent would have read to reproduce this result by opening the files it references.
+    fn raw_baseline_bytes(&self, result: &str) -> u64 {
+        let paths = referenced_paths(result);
+        if paths.is_empty() {
+            return 0;
+        }
+        let mut cache = match self.cache.lock() {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        if cache.file_sizes.is_none() {
+            cache.file_sizes = Some(load_file_sizes(&self.project_root));
+        }
+        let sizes = cache.file_sizes.as_ref().expect("just populated");
+        paths
+            .iter()
+            .filter_map(|p| sizes.get(p.as_str()).copied())
+            .sum()
+    }
+
+    /// Single accounting point for every served tool result — session counters (calls, bytes,
+    /// raw baseline) and the persistent per-command stats. Cached and uncached tools both route
+    /// through here so usage stats cover the full surface, not just the cached subset.
+    pub(crate) fn record_served(&self, tool: &str, result: &str) {
+        let baseline = self.raw_baseline_bytes(result);
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.bytes_served += result.len() as u64;
+            cache.calls_served += 1;
+            cache.raw_bytes_baseline += baseline;
+        }
+        if let Ok(svc) = self.service_untracked() {
+            svc.track_call(tool, result.len());
+        }
+    }
+
     /// Try to get a cached result, or compute and cache it.
     /// If scope is provided, it's included in the cache key and applied as a post-filter.
     pub(crate) fn cached(
@@ -142,18 +232,13 @@ impl KungfuMcp {
         let key = cache_key(&full_key, "", "");
 
         // Check cache
-        if let Ok(mut cache) = self.cache.lock() {
-            if let Some(val) = cache.get(key) {
-                let val = val.clone();
-                cache.bytes_served += val.len() as u64;
-                cache.calls_served += 1;
-                // Persistent stats for cache hits too
-                drop(cache);
-                if let Ok(svc) = self.service_untracked() {
-                    svc.track_call(tool, val.len());
-                }
-                return Ok(val);
-            }
+        let cached_val = match self.cache.lock() {
+            Ok(mut cache) => cache.get(key).cloned(),
+            Err(_) => None,
+        };
+        if let Some(val) = cached_val {
+            self.record_served(tool, &val);
+            return Ok(val);
         }
 
         // Compute
@@ -162,18 +247,40 @@ impl KungfuMcp {
         // Apply scope filter
         let result = apply_scope(&result, scope);
 
-        // Store + track
         if let Ok(mut cache) = self.cache.lock() {
-            cache.bytes_served += result.len() as u64;
-            cache.calls_served += 1;
             cache.put(key, result.clone());
         }
-
-        // Persistent stats
-        if let Ok(svc) = self.service_untracked() {
-            svc.track_call(tool, result.len());
-        }
+        self.record_served(tool, &result);
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn referenced_paths_collects_distinct_path_fields() {
+        let json = r#"{
+            "query": "x",
+            "items": [
+                {"name": "a", "path": "src/foo.rs"},
+                {"name": "b", "path": "src/foo.rs"},
+                {"name": "c", "path": "src/bar.rs"}
+            ],
+            "nested": {"path": "src/baz.rs"}
+        }"#;
+        let paths = referenced_paths(json);
+        assert_eq!(paths.len(), 3, "dedups repeated paths: {paths:?}");
+        assert!(paths.contains("src/foo.rs"));
+        assert!(paths.contains("src/bar.rs"));
+        assert!(paths.contains("src/baz.rs"));
+    }
+
+    #[test]
+    fn referenced_paths_empty_for_pathless_or_invalid() {
+        assert!(referenced_paths(r#"{"project_name":"k","files":3}"#).is_empty());
+        assert!(referenced_paths("not json").is_empty());
     }
 }

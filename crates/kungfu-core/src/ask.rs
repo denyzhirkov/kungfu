@@ -45,6 +45,13 @@ pub struct StrategyWeights {
     /// Strategy A2: minimum cosine to accept a vector hit. Below this, the model is essentially
     /// guessing and a string match is more trustworthy.
     pub vector_min_score: f64,
+    /// File-level fallback: score for a symbol injected purely because its file path matched a
+    /// keyword. A filename match is a weaker signal than a symbol-name match, so this sits below
+    /// a typical name hit — it should backfill, not outrank genuine matches.
+    pub path_fallback_score: f64,
+    /// Multiplier applied to test symbols for Understand/Lookup intents, where the user wants the
+    /// implementation, not its tests. <1.0 demotes; tests still appear, just below real code.
+    pub test_penalty: f64,
 }
 
 impl Default for StrategyWeights {
@@ -65,6 +72,8 @@ impl Default for StrategyWeights {
             secondary_lang_penalty: 0.85,
             vector_score: 0.55,
             vector_min_score: 0.55,
+            path_fallback_score: 0.3,
+            test_penalty: 0.5,
         }
     }
 }
@@ -94,6 +103,8 @@ impl StrategyWeights {
         w.secondary_lang_penalty = env_f64("KUNGFU_W_LANG_PENALTY", w.secondary_lang_penalty);
         w.vector_score = env_f64("KUNGFU_W_VECTOR", w.vector_score);
         w.vector_min_score = env_f64("KUNGFU_W_VECTOR_MIN", w.vector_min_score);
+        w.path_fallback_score = env_f64("KUNGFU_W_PATH_FALLBACK", w.path_fallback_score);
+        w.test_penalty = env_f64("KUNGFU_W_TEST_PENALTY", w.test_penalty);
         w
     }
 }
@@ -455,7 +466,7 @@ impl KungfuService {
                         seen_ids.insert(rep.id.clone());
                         scored_symbols.push(ScoredSymbol {
                             symbol: rep.clone(),
-                            score: 0.55,
+                            score: w.path_fallback_score,
                             reason: format!("file path match: {}", fr.item.path),
                         });
                     }
@@ -491,6 +502,18 @@ impl KungfuService {
                 {
                     s.score += w.changed_file_bonus;
                     s.reason = format!("{}, recently changed", s.reason);
+                }
+            }
+        }
+
+        // Demote test symbols when the user wants the implementation, not its tests.
+        // Uses the symbol-table walk so inline `#[cfg(test)] mod tests` members are caught,
+        // not just `test_`-prefixed names.
+        if matches!(intent, Intent::Understand | Intent::Lookup) {
+            let test_ids = crate::helpers::test_symbol_ids(&all_symbols);
+            for s in &mut scored_symbols {
+                if test_ids.contains(&s.symbol.id) {
+                    s.score *= w.test_penalty;
                 }
             }
         }
@@ -770,10 +793,13 @@ impl KungfuService {
             // Fallback: first max_lines of symbol
             let symbol_len = end_idx - start_idx;
             let take = symbol_len.min(max_lines);
-            let snippet: Vec<&str> = lines[start_idx..start_idx + take]
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
+            let mut snippet: Vec<String> = lines[start_idx..start_idx + take].to_vec();
+            if take < symbol_len {
+                snippet.push(format!(
+                    "    … truncated, showing {} of {} lines",
+                    take, symbol_len
+                ));
+            }
             if !snippet.is_empty() {
                 item.snippet = Some(snippet.join("\n"));
             }
@@ -827,6 +853,7 @@ fn extract_keyword_lines(
 
     for &i in &indices {
         if result.len() >= max_lines {
+            result.push("    … (truncated)".to_string());
             break;
         }
         if let Some(p) = prev {
@@ -834,9 +861,10 @@ fn extract_keyword_lines(
                 result.push("    ...".to_string());
             }
         }
-        // Highlight keyword lines with >>> marker
+        // Mark keyword lines with a >>> prefix; the line itself stays verbatim
+        // so snippets remain valid, greppable, copy-pasteable code.
         if hit_indices.contains(&i) {
-            result.push(format!(">>> {}", highlight_keywords(&lines[i], keywords)));
+            result.push(format!(">>> {}", lines[i]));
         } else {
             result.push(lines[i].clone());
         }
@@ -846,62 +874,34 @@ fn extract_keyword_lines(
     result.join("\n")
 }
 
-/// Highlight keyword occurrences in a line by wrapping them with «» markers.
-fn highlight_keywords(line: &str, keywords: &[&str]) -> String {
-    use kungfu_search::simple_stem;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let line_lower = line.to_lowercase();
-    // Collect all match positions (start, end) in the original line
-    let mut matches: Vec<(usize, usize)> = Vec::new();
+    #[test]
+    fn keyword_lines_mark_matched_lines_and_keep_code_verbatim() {
+        let lines: Vec<String> = vec![
+            "fn handle(budget: Budget) {".into(),
+            "    let limit = budget.max_lines();".into(),
+            "    do_work(limit);".into(),
+        ];
+        let out = extract_keyword_lines(&lines, 0, lines.len(), &["budget"], 40);
+        // Matched lines get the >>> prefix; identifiers stay intact (no «» wrapping).
+        assert!(out.contains(">>> fn handle(budget: Budget) {"));
+        assert!(!out.contains('\u{ab}') && !out.contains('\u{bb}'));
+    }
 
-    for kw in keywords {
-        // Find all occurrences of keyword (case-insensitive)
-        let mut pos = 0;
-        while let Some(idx) = line_lower[pos..].find(kw) {
-            let start = pos + idx;
-            let end = start + kw.len();
-            matches.push((start, end));
-            pos = end;
+    #[test]
+    fn keyword_lines_emit_truncation_marker_when_capped() {
+        let mut lines: Vec<String> = vec!["fn big(needle: u8) {".into()];
+        for i in 0..30 {
+            lines.push(format!("    needle_{i}();"));
         }
-        // Also try stem
-        if let Some(stem) = simple_stem(kw) {
-            pos = 0;
-            while let Some(idx) = line_lower[pos..].find(&stem) {
-                let start = pos + idx;
-                let end = start + stem.len();
-                matches.push((start, end));
-                pos = end;
-            }
-        }
+        lines.push("}".into());
+        let out = extract_keyword_lines(&lines, 0, lines.len(), &["needle"], 5);
+        assert!(
+            out.contains("(truncated)"),
+            "expected truncation marker, got:\n{out}"
+        );
     }
-
-    if matches.is_empty() {
-        return line.to_string();
-    }
-
-    // Sort by start position and merge overlapping ranges
-    matches.sort_by_key(|&(s, _)| s);
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (s, e) in matches {
-        if let Some(last) = merged.last_mut() {
-            if s <= last.1 {
-                last.1 = last.1.max(e);
-                continue;
-            }
-        }
-        merged.push((s, e));
-    }
-
-    // Build highlighted string
-    let mut result = String::with_capacity(line.len() + merged.len() * 4);
-    let mut cursor = 0;
-    for (s, e) in &merged {
-        result.push_str(&line[cursor..*s]);
-        result.push('«');
-        result.push_str(&line[*s..*e]);
-        result.push('»');
-        cursor = *e;
-    }
-    result.push_str(&line[cursor..]);
-    result
 }

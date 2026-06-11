@@ -9,6 +9,9 @@ pub(crate) fn callers(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Result<Stri
         let budget = parse_budget(Some(&budget_str));
         let service = mcp.service()?;
         let results = service.callers(&name, budget).map_err(|e| e.to_string())?;
+        if results.is_empty() {
+            return call_graph_diagnostic(&service, &name);
+        }
         let items: Vec<_> = results
             .iter()
             .map(|(sym, reason)| {
@@ -26,6 +29,33 @@ pub(crate) fn callers(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Result<Stri
     })
 }
 
+/// Distinguish "no edges for this symbol" from "no call graph built at all".
+/// The latter must steer the agent to `search_text` instead of trusting `[]`.
+fn call_graph_diagnostic(
+    service: &kungfu_core::KungfuService,
+    name: &str,
+) -> Result<String, String> {
+    let has_graph = service.has_call_graph().map_err(|e| e.to_string())?;
+    let body = if has_graph {
+        serde_json::json!({
+            "status": "no_edges",
+            "name": name,
+            "results": [],
+        })
+    } else {
+        serde_json::json!({
+            "status": "call_graph_not_indexed",
+            "name": name,
+            "hint": format!(
+                "No call relations are built for this project, so callers/callees are unavailable. Use search_text(\"{}\") to find usages by name.",
+                name
+            ),
+            "results": [],
+        })
+    };
+    serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
+}
+
 pub(crate) fn callees(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Result<String, String> {
     let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
     let name = params.name.clone();
@@ -34,6 +64,9 @@ pub(crate) fn callees(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Result<Stri
         let budget = parse_budget(Some(&budget_str));
         let service = mcp.service()?;
         let results = service.callees(&name, budget).map_err(|e| e.to_string())?;
+        if results.is_empty() {
+            return call_graph_diagnostic(&service, &name);
+        }
         let items: Vec<_> = results
             .iter()
             .map(|(sym, reason)| {

@@ -1294,11 +1294,52 @@ pub fn symbol_history(name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Empty callers/callees: tell "no edges" apart from "no call graph built",
+/// and point at `search_text` when the graph is absent.
+fn report_empty_call_graph(
+    service: &KungfuService,
+    name: &str,
+    direction: &str,
+    json: bool,
+) -> Result<()> {
+    let has_graph = service.has_call_graph()?;
+    if json {
+        let status = if has_graph {
+            "no_edges"
+        } else {
+            "call_graph_not_indexed"
+        };
+        let mut body = serde_json::json!({
+            "status": status,
+            "name": name,
+            "results": [],
+        });
+        if !has_graph {
+            body["hint"] = serde_json::json!(format!(
+                "No call relations are built for this project. Use `kungfu search-text {}` to find usages by name.",
+                name
+            ));
+        }
+        println!("{}", serde_json::to_string_pretty(&body)?);
+    } else if has_graph {
+        println!("No {} found for '{}'", direction, name);
+    } else {
+        println!(
+            "Call graph not indexed for this project — {} unavailable.\nUse `kungfu search-text {}` to find usages by name.",
+            direction, name
+        );
+    }
+    Ok(())
+}
+
 pub fn callers(name: &str, budget: Budget, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let service = KungfuService::open(&cwd)?;
     let results = service.callers(name, budget)?;
 
+    if results.is_empty() {
+        return report_empty_call_graph(&service, name, "callers", json);
+    }
     if json {
         let items: Vec<_> = results
             .iter()
@@ -1314,8 +1355,6 @@ pub fn callers(name: &str, budget: Budget, json: bool) -> Result<()> {
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
-    } else if results.is_empty() {
-        println!("No callers found for '{}'", name);
     } else {
         println!("Callers of '{}':", name);
         for (sym, _) in &results {
@@ -1365,6 +1404,9 @@ pub fn callees(name: &str, budget: Budget, json: bool) -> Result<()> {
     let service = KungfuService::open(&cwd)?;
     let results = service.callees(name, budget)?;
 
+    if results.is_empty() {
+        return report_empty_call_graph(&service, name, "callees", json);
+    }
     if json {
         let items: Vec<_> = results
             .iter()
@@ -1380,8 +1422,6 @@ pub fn callees(name: &str, budget: Budget, json: bool) -> Result<()> {
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
-    } else if results.is_empty() {
-        println!("No callees found for '{}'", name);
     } else {
         println!("'{}' calls:", name);
         for (sym, _) in &results {
@@ -1422,8 +1462,15 @@ pub fn explore_symbol(name: &str, budget: Budget, json: bool) -> Result<()> {
         }
         if let Some(snippet) = result.get("snippet").and_then(|s| s.as_str()) {
             println!("  ---");
+            let total = snippet.lines().count();
             for line in snippet.lines().take(15) {
                 println!("  {}", line);
+            }
+            if total > 15 {
+                println!(
+                    "  … {} more lines (use --json for the full snippet)",
+                    total - 15
+                );
             }
         }
         if let Some(siblings) = result.get("siblings_in_file").and_then(|s| s.as_array()) {
@@ -1593,8 +1640,15 @@ pub fn investigate(query: &str, budget: Budget, json: bool) -> Result<()> {
                 );
                 if let Some(snippet) = item.get("snippet").and_then(|s| s.as_str()) {
                     println!("        ---");
+                    let total = snippet.lines().count();
                     for line in snippet.lines().take(10) {
                         println!("        {}", line);
+                    }
+                    if total > 10 {
+                        println!(
+                            "        … {} more lines (use --json for the full snippet)",
+                            total - 10
+                        );
                     }
                     println!();
                 }
@@ -1765,13 +1819,24 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
             let results = service.memory_search(&query, &filter)?;
             service.track_call("memory_search", 0);
             if json {
+                // Mirror the MCP tool: full entry only for confident hits; below the
+                // threshold emit a stub + excerpt so weak matches don't flood context.
+                const FULL_CONTENT_THRESHOLD: f64 = 0.45;
                 let items: Vec<_> = results
                     .iter()
                     .map(|(score, e)| {
-                        serde_json::json!({
-                            "score": score,
-                            "entry": e,
-                        })
+                        if *score >= FULL_CONTENT_THRESHOLD {
+                            serde_json::json!({ "score": score, "entry": e })
+                        } else {
+                            serde_json::json!({
+                                "score": score,
+                                "id": e.id,
+                                "kind": e.kind,
+                                "title": e.title,
+                                "excerpt": truncate_str(&e.content, 160),
+                                "hint": "low relevance — run `kungfu memory show <id>` for the full entry",
+                            })
+                        }
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&items)?);

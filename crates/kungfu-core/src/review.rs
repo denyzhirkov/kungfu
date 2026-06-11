@@ -1,4 +1,4 @@
-use crate::helpers::is_code_language;
+use crate::helpers::{is_code_language, is_test_symbol};
 use crate::types::{
     AffectedEntry, AffectedResult, CouplingEntry, HotspotEntry, ReviewResult, SmartTestEntry,
     SmartTestResult,
@@ -702,65 +702,6 @@ impl KungfuService {
     }
 }
 
-pub(crate) fn is_test_symbol(sym: &Symbol) -> bool {
-    sym.name.starts_with("test_")
-        || sym.name.starts_with("Test")
-        || sym.name.contains("_test")
-        || sym.path.contains("test")
-        || sym.path.contains("spec")
-}
-
 pub(crate) fn count_test_symbols(symbols: &[Symbol]) -> usize {
     symbols.iter().filter(|s| is_test_symbol(s)).count()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use kungfu_types::symbol::{Span, SymbolKind};
-
-    #[test]
-    fn test_is_test_symbol() {
-        let sym = Symbol {
-            id: "1".into(),
-            file_id: "f1".into(),
-            name: "test_something".into(),
-            kind: SymbolKind::Function,
-            language: "rust".into(),
-            path: "src/lib.rs".into(),
-            signature: None,
-            span: Span {
-                start_line: 1,
-                end_line: 5,
-                start_col: 0,
-                end_col: 0,
-            },
-            parent_symbol_id: None,
-            exported: false,
-            visibility: None,
-            doc_summary: None,
-        };
-        assert!(is_test_symbol(&sym));
-
-        let sym2 = Symbol {
-            id: "2".into(),
-            file_id: "f1".into(),
-            name: "do_work".into(),
-            kind: SymbolKind::Function,
-            language: "rust".into(),
-            path: "src/lib.rs".into(),
-            signature: None,
-            span: Span {
-                start_line: 6,
-                end_line: 10,
-                start_col: 0,
-                end_col: 0,
-            },
-            parent_symbol_id: None,
-            exported: true,
-            visibility: None,
-            doc_summary: None,
-        };
-        assert!(!is_test_symbol(&sym2));
-    }
 }

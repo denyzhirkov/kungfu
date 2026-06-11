@@ -7,6 +7,16 @@ use kungfu_types::symbol::Symbol;
 use std::collections::HashSet;
 
 impl KungfuService {
+    /// Whether the index contains any call relations at all.
+    ///
+    /// Lets adapters tell "this symbol has 0 callers" apart from "the call graph
+    /// was never built for this project" — the latter should steer the agent to
+    /// `search_text` rather than reading an empty result as ground truth.
+    pub fn has_call_graph(&self) -> Result<bool> {
+        let relations = self.store().load_relations()?;
+        Ok(relations.iter().any(|r| r.kind == RelationKind::Calls))
+    }
+
     /// Find all symbols that call the given symbol (callers / "who calls this?").
     pub fn callers(&self, name: &str, budget: Budget) -> Result<Vec<(Symbol, String)>> {
         let budget = self.resolve_budget(budget);
@@ -122,7 +132,7 @@ impl KungfuService {
                             .collect();
                         return Ok(serde_json::json!({
                             "query": query,
-                            "engine": "vector",
+                            "mode": "vector",
                             "results": items,
                         }));
                     }
@@ -146,16 +156,26 @@ impl KungfuService {
         let mut results = Vec::new();
         let mut seen = HashSet::new();
 
+        // Lexical name matches pull in test helpers that merely share words with the
+        // implementation. Demote them so concept search surfaces real code first.
+        let test_ids = crate::helpers::test_symbol_ids(&self.search().get_all_symbols()?);
+        const TEST_PENALTY: f64 = 0.5;
+
         // Search with original keywords
         let keyword_query = keywords.join(" ");
         for r in search.find_symbol(&keyword_query, Budget::Full)? {
             if seen.insert(r.item.id.clone()) {
+                let score = if test_ids.contains(&r.item.id) {
+                    r.score * TEST_PENALTY
+                } else {
+                    r.score
+                };
                 results.push(serde_json::json!({
                     "name": r.item.name,
                     "kind": r.item.kind.to_string(),
                     "path": r.item.path,
                     "line": r.item.span.start_line,
-                    "score": r.score,
+                    "score": score,
                     "match_type": "direct",
                 }));
             }
@@ -166,12 +186,16 @@ impl KungfuService {
             let expanded_query = new_terms.join(" ");
             for r in search.find_symbol(&expanded_query, Budget::Full)? {
                 if seen.insert(r.item.id.clone()) && r.score >= 0.5 {
+                    let mut score = r.score * 0.6;
+                    if test_ids.contains(&r.item.id) {
+                        score *= TEST_PENALTY;
+                    }
                     results.push(serde_json::json!({
                         "name": r.item.name,
                         "kind": r.item.kind.to_string(),
                         "path": r.item.path,
                         "line": r.item.span.start_line,
-                        "score": r.score * 0.6,
+                        "score": score,
                         "match_type": "semantic",
                     }));
                 }
@@ -190,6 +214,8 @@ impl KungfuService {
 
         Ok(serde_json::json!({
             "query": query,
+            "mode": "keyword_fallback",
+            "hint": "Lexical match + query expansion (no vector embeddings). Run `kungfu embeddings build` for semantic ranking.",
             "keywords": keywords,
             "expanded_terms": new_terms,
             "results": results,

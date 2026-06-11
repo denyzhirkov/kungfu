@@ -1,6 +1,63 @@
-use crate::RawImport;
+use crate::{RawCall, RawImport};
 use kungfu_types::symbol::{Span, Symbol, SymbolKind};
 use tree_sitter::Node;
+
+/// Extract function/method call sites, each tagged with the enclosing function's start line.
+/// Calls outside any function (e.g. in a `const` initializer) are ignored — there is no caller
+/// symbol to attribute them to.
+pub fn extract_calls(root: Node, source: &str) -> Vec<RawCall> {
+    let mut calls = Vec::new();
+    walk_calls(root, source, None, &mut calls);
+    calls
+}
+
+fn walk_calls(node: Node, source: &str, enclosing_fn: Option<usize>, calls: &mut Vec<RawCall>) {
+    // A `function_item` opens a new caller scope; nested fns/closures inherit until overridden.
+    let enclosing = if node.kind() == "function_item" {
+        Some(node.start_position().row + 1)
+    } else {
+        enclosing_fn
+    };
+
+    if node.kind() == "call_expression" {
+        if let (Some(line), Some(func)) = (enclosing, node.child_by_field_name("function")) {
+            if let Some(callee) = callee_name(func, source) {
+                calls.push(RawCall {
+                    caller_line: line,
+                    callee,
+                    is_method: func.kind() == "field_expression",
+                });
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_calls(child, source, enclosing, calls);
+    }
+}
+
+/// Resolve the simple callee name from a `call_expression`'s `function` child.
+/// Handles free calls (`foo()`), path calls (`a::b::foo()`, `Type::foo()`), method calls
+/// (`x.foo()`), and turbofish (`foo::<T>()`). Returns `None` for shapes we can't name.
+fn callee_name(func: Node, source: &str) -> Option<String> {
+    match func.kind() {
+        "identifier" => Some(node_text(func, source)),
+        // a::b::foo  → last segment
+        "scoped_identifier" => func
+            .child_by_field_name("name")
+            .map(|n| node_text(n, source)),
+        // x.foo()  → method name
+        "field_expression" => func
+            .child_by_field_name("field")
+            .map(|n| node_text(n, source)),
+        // foo::<T>()  → unwrap to the inner function node
+        "generic_function" => func
+            .child_by_field_name("function")
+            .and_then(|inner| callee_name(inner, source)),
+        _ => None,
+    }
+}
 
 pub fn extract_imports(root: Node, source: &str) -> Vec<RawImport> {
     let mut imports = Vec::new();
@@ -295,5 +352,41 @@ mod tests {
         let symbols = extract(tree.root_node(), source, "f:test", "test.rs");
         assert!(symbols.iter().any(|s| s.name == "hello"));
         assert!(symbols.iter().any(|s| s.name == "Foo"));
+    }
+
+    fn parse_calls(source: &str) -> Vec<RawCall> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        extract_calls(tree.root_node(), source)
+    }
+
+    #[test]
+    fn extracts_call_shapes_with_enclosing_fn() {
+        let source = "\
+fn caller() {
+    free_fn();
+    a::b::path_fn();
+    value.method_call();
+    generic_fn::<u8>();
+}
+";
+        let calls = parse_calls(source);
+        let names: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(names.contains(&"free_fn"));
+        assert!(names.contains(&"path_fn"));
+        assert!(names.contains(&"method_call"));
+        assert!(names.contains(&"generic_fn"));
+        // Every call is attributed to `caller` (line 1).
+        assert!(calls.iter().all(|c| c.caller_line == 1));
+    }
+
+    #[test]
+    fn ignores_calls_outside_a_function() {
+        // A call in a const initializer has no enclosing function — skip it.
+        let calls = parse_calls("const N: usize = compute();");
+        assert!(calls.is_empty());
     }
 }

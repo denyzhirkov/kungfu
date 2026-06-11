@@ -25,6 +25,18 @@ pub struct RawImport {
     pub line: usize,
 }
 
+/// A function/method call site extracted from source code.
+#[derive(Debug, Clone)]
+pub struct RawCall {
+    /// Start line (1-based) of the enclosing function/method — matches the symbol id line.
+    pub caller_line: usize,
+    /// Simple (unqualified) name of the callee, e.g. `foo` for `a::b::foo()` or `x.foo()`.
+    pub callee: String,
+    /// True for receiver method calls (`x.foo()`), whose target type is unknown. These can
+    /// only be resolved when the name is globally unique; free/path calls may resolve locally.
+    pub is_method: bool,
+}
+
 /// Classification of a source code comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentKind {
@@ -51,6 +63,9 @@ pub struct ParseResult {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<RawImport>,
     pub comments: Vec<RawComment>,
+    /// Call sites within this file. Currently populated for Rust only; empty for other
+    /// languages until per-language call extractors land.
+    pub calls: Vec<RawCall>,
 }
 
 /// Classify a comment's text into a CommentKind.
@@ -346,10 +361,17 @@ impl Parser {
         // Fill doc_summary on symbols from attached Doc comments
         fill_doc_summaries(&mut symbols, &comments);
 
+        // Call extraction is Rust-only for now; other languages get an empty list.
+        let calls = match language {
+            Language::Rust => rust_parser::extract_calls(root, source),
+            _ => Vec::new(),
+        };
+
         Ok(ParseResult {
             symbols,
             imports,
             comments,
+            calls,
         })
     }
 }

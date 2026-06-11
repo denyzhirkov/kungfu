@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use kungfu_config::KungfuConfig;
-use kungfu_parse::{CommentKind, Parser, RawComment, RawImport};
+use kungfu_parse::{CommentKind, Parser, RawCall, RawComment, RawImport};
 use kungfu_storage::JsonStore;
 use kungfu_types::file::{FileEntry, Language};
 use kungfu_types::memory::{MemoryEntry, MemoryKind};
@@ -13,7 +13,13 @@ use tracing::{debug, info, warn};
 
 use crate::scanner;
 
-type ParsedFile = (FileEntry, Vec<Symbol>, Vec<RawImport>, Vec<RawComment>);
+type ParsedFile = (
+    FileEntry,
+    Vec<Symbol>,
+    Vec<RawImport>,
+    Vec<RawComment>,
+    Vec<RawCall>,
+);
 
 /// Outcome of deciding whether a file's content should be read for indexing.
 enum ReadOutcome {
@@ -140,16 +146,20 @@ impl<'a> Indexer<'a> {
         let mut all_symbols = Vec::new();
         let mut all_imports: Vec<(String, Vec<RawImport>)> = Vec::new();
         let mut all_comments: Vec<(String, Vec<RawComment>)> = Vec::new();
+        let mut all_calls: Vec<(String, Vec<RawCall>)> = Vec::new();
 
         for path in &paths {
             match self.index_file(path) {
-                Ok((entry, symbols, imports, comments)) => {
+                Ok((entry, symbols, imports, comments, calls)) => {
                     fingerprints.insert(entry.path.clone(), entry.hash.clone());
                     if !imports.is_empty() {
                         all_imports.push((entry.path.clone(), imports));
                     }
                     if !comments.is_empty() {
                         all_comments.push((entry.path.clone(), comments));
+                    }
+                    if !calls.is_empty() {
+                        all_calls.push((entry.path.clone(), calls));
                     }
                     all_symbols.extend(symbols);
                     files.push(entry);
@@ -160,7 +170,8 @@ impl<'a> Indexer<'a> {
             }
         }
 
-        let relations = Self::build_relations(&files, &all_imports);
+        let mut relations = Self::build_relations(&files, &all_imports);
+        relations.extend(Self::build_call_relations(&files, &all_symbols, &all_calls));
         let mut memories = Self::build_memories(&all_comments);
         let doc_memories = self.scan_docs();
         memories.extend(doc_memories);
@@ -193,6 +204,12 @@ impl<'a> Indexer<'a> {
         let old_fingerprints = self.store.load_fingerprints()?;
         let old_files = self.store.load_files()?;
         let old_symbols = self.store.load_symbols()?;
+        let old_relations = self.store.load_relations()?;
+        // Files re-parsed this run; their old relations are dropped and rebuilt. Unchanged
+        // files keep their existing relations — otherwise a no-op reindex would wipe the
+        // whole graph, since edges are only collected for re-parsed files.
+        let mut changed_file_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         let paths = scanner::scan_files(&self.root, &self.config)?;
 
@@ -201,6 +218,7 @@ impl<'a> Indexer<'a> {
         let mut new_symbols = Vec::new();
         let mut all_imports: Vec<(String, Vec<RawImport>)> = Vec::new();
         let mut all_comments: Vec<(String, Vec<RawComment>)> = Vec::new();
+        let mut all_calls: Vec<(String, Vec<RawCall>)> = Vec::new();
 
         let mut stats = IndexStats {
             total_files: 0,
@@ -258,7 +276,7 @@ impl<'a> Indexer<'a> {
 
             match read {
                 ReadOutcome::Full(content) => match self.index_file_with_content(path, content) {
-                    Ok((entry, symbols, imports, comments)) => {
+                    Ok((entry, symbols, imports, comments, calls)) => {
                         new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
                         if !imports.is_empty() {
                             all_imports.push((entry.path.clone(), imports));
@@ -266,6 +284,10 @@ impl<'a> Indexer<'a> {
                         if !comments.is_empty() {
                             all_comments.push((entry.path.clone(), comments));
                         }
+                        if !calls.is_empty() {
+                            all_calls.push((entry.path.clone(), calls));
+                        }
+                        changed_file_ids.insert(entry.id.clone());
                         new_symbols.extend(symbols);
                         new_files.push(entry);
                     }
@@ -277,6 +299,7 @@ impl<'a> Indexer<'a> {
                     debug!("indexing {} by name only ({})", path.display(), reason);
                     let entry = self.name_only_entry(path, size);
                     new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
+                    changed_file_ids.insert(entry.id.clone());
                     new_files.push(entry);
                 }
             }
@@ -292,7 +315,28 @@ impl<'a> Indexer<'a> {
         stats.total_files = new_files.len();
         stats.symbols_extracted = new_symbols.len();
 
-        let relations = Self::build_relations(&new_files, &all_imports);
+        // Merge: keep relations whose source is an unchanged file, rebuild the rest.
+        // Source ids are file-level (imports/test/config) or symbol-level (`s:{file_id}:…`, calls).
+        let changed_sym_prefixes: Vec<String> = changed_file_ids
+            .iter()
+            .map(|fid| format!("s:{fid}:"))
+            .collect();
+        let mut relations: Vec<Relation> = old_relations
+            .into_iter()
+            .filter(|r| {
+                !changed_file_ids.contains(r.source_id.as_str())
+                    && !changed_sym_prefixes
+                        .iter()
+                        .any(|p| r.source_id.starts_with(p))
+            })
+            .collect();
+        let mut fresh = Self::build_relations(&new_files, &all_imports);
+        fresh.extend(Self::build_call_relations(
+            &new_files,
+            &new_symbols,
+            &all_calls,
+        ));
+        relations.extend(fresh);
         let memories = Self::build_memories(&all_comments);
 
         self.store.save_files(&new_files)?;
@@ -350,6 +394,7 @@ impl<'a> Indexer<'a> {
         }
 
         let mut all_comments: Vec<(String, Vec<RawComment>)> = Vec::new();
+        let mut all_calls: Vec<(String, Vec<RawCall>)> = Vec::new();
 
         // Re-index changed files
         for rel_path in changed_paths {
@@ -367,7 +412,7 @@ impl<'a> Indexer<'a> {
             }
 
             match self.index_file(&abs_path) {
-                Ok((entry, symbols, imports, comments)) => {
+                Ok((entry, symbols, imports, comments, calls)) => {
                     new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
                     stats.symbols_extracted += symbols.len();
                     if !imports.is_empty() {
@@ -375,6 +420,9 @@ impl<'a> Indexer<'a> {
                     }
                     if !comments.is_empty() {
                         all_comments.push((entry.path.clone(), comments));
+                    }
+                    if !calls.is_empty() {
+                        all_calls.push((entry.path.clone(), calls));
                     }
                     new_symbols.extend(symbols);
                     new_files.push(entry);
@@ -387,17 +435,33 @@ impl<'a> Indexer<'a> {
 
         stats.total_files = new_files.len();
 
-        // Merge: keep old relations for unchanged files, add new ones for changed files
+        // Merge: keep old relations for unchanged files, add new ones for changed files.
+        // Imports/test/config relations are file-level (source_id = file id); Calls are
+        // symbol-level (source_id = `s:{file_id}:…`), so drop both shapes for changed files.
         let changed_file_ids: std::collections::HashSet<&str> = new_files
             .iter()
             .filter(|f| changed_set.contains(f.path.as_str()))
             .map(|f| f.id.as_str())
             .collect();
+        let changed_sym_prefixes: Vec<String> = changed_file_ids
+            .iter()
+            .map(|fid| format!("s:{fid}:"))
+            .collect();
         let mut relations: Vec<Relation> = old_relations
             .into_iter()
-            .filter(|r| !changed_file_ids.contains(r.source_id.as_str()))
+            .filter(|r| {
+                !changed_file_ids.contains(r.source_id.as_str())
+                    && !changed_sym_prefixes
+                        .iter()
+                        .any(|p| r.source_id.starts_with(p))
+            })
             .collect();
-        let new_relations = Self::build_relations(&new_files, &all_imports);
+        let mut new_relations = Self::build_relations(&new_files, &all_imports);
+        new_relations.extend(Self::build_call_relations(
+            &new_files,
+            &new_symbols,
+            &all_calls,
+        ));
         relations.extend(new_relations);
 
         // Merge memories: keep old for unchanged, add new for changed
@@ -428,6 +492,7 @@ impl<'a> Indexer<'a> {
                 debug!("indexing {} by name only ({})", path.display(), reason);
                 Ok((
                     self.name_only_entry(path, size),
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -522,7 +587,7 @@ impl<'a> Indexer<'a> {
             tags: Vec::new(),
         };
 
-        let (symbols, imports, comments) = if language.is_code() {
+        let (symbols, imports, comments, calls) = if language.is_code() {
             let content_str = String::from_utf8_lossy(&content);
             match self
                 .parser
@@ -530,24 +595,30 @@ impl<'a> Indexer<'a> {
             {
                 Ok(result) => {
                     debug!(
-                        "extracted {} symbols, {} imports, {} comments from {}",
+                        "extracted {} symbols, {} imports, {} comments, {} calls from {}",
                         result.symbols.len(),
                         result.imports.len(),
                         result.comments.len(),
+                        result.calls.len(),
                         rel_path
                     );
-                    (result.symbols, result.imports, result.comments)
+                    (
+                        result.symbols,
+                        result.imports,
+                        result.comments,
+                        result.calls,
+                    )
                 }
                 Err(e) => {
                     debug!("parsing failed for {}: {}", rel_path, e);
-                    (Vec::new(), Vec::new(), Vec::new())
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new())
                 }
             }
         } else {
-            (Vec::new(), Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         };
 
-        Ok((entry, symbols, imports, comments))
+        Ok((entry, symbols, imports, comments, calls))
     }
 
     /// Resolve collected imports into Relations.
@@ -562,6 +633,23 @@ impl<'a> Indexer<'a> {
             .iter()
             .map(|f| (f.path.as_str(), f.id.as_str()))
             .collect();
+
+        // Workspace crate roots: import name → crate src dir.
+        // "crates/kungfu-core/src/lib.rs" → "kungfu_core" → "crates/kungfu-core/src".
+        // Lets cross-crate `use kungfu_types::…` resolve to the right crate instead of
+        // falling through to the fuzzy stem fallback (which left coupling nearly empty).
+        let mut crate_roots: HashMap<String, String> = HashMap::new();
+        for f in files {
+            if let Some(idx) = f.path.find("/src/") {
+                let before = &f.path[..idx];
+                let crate_dir = before.rsplit('/').next().unwrap_or(before);
+                if !crate_dir.is_empty() {
+                    crate_roots
+                        .entry(crate_dir.replace('-', "_"))
+                        .or_insert_with(|| format!("{before}/src"));
+                }
+            }
+        }
 
         // Stem lookup: "foo" → ["src/foo.rs", "src/foo/mod.rs", ...]
         let mut stem_to_paths: HashMap<String, Vec<&str>> = HashMap::new();
@@ -623,6 +711,7 @@ impl<'a> Indexer<'a> {
                     &stem_to_paths,
                     &suffix_to_paths,
                     &dir_suffix_to_paths,
+                    &crate_roots,
                 );
                 for target_path in resolved {
                     if let Some(&target_id) = path_to_id.get(target_path) {
@@ -651,6 +740,89 @@ impl<'a> Indexer<'a> {
             a.source_id == b.source_id && a.target_id == b.target_id && a.kind == b.kind
         });
 
+        relations
+    }
+
+    /// Resolve extracted call sites into symbol-level `Calls` relations.
+    ///
+    /// Precision over recall: an edge is emitted only when the callee name resolves
+    /// unambiguously — it is unique project-wide, or (for free/path calls, not method calls)
+    /// there is exactly one same-file definition. Ambiguous names (`clone`, a method shared by
+    /// many types, an overloaded helper) are dropped rather than guessed, so callers/callees stay
+    /// trustworthy. Method calls, whose receiver type we cannot infer, resolve only via a
+    /// globally-unique name. Calls to unindexed symbols (std, external crates) produce no edge.
+    fn build_call_relations(
+        files: &[FileEntry],
+        symbols: &[Symbol],
+        file_calls: &[(String, Vec<RawCall>)],
+    ) -> Vec<Relation> {
+        use kungfu_types::symbol::SymbolKind;
+
+        let path_to_id: HashMap<&str, &str> = files
+            .iter()
+            .map(|f| (f.path.as_str(), f.id.as_str()))
+            .collect();
+
+        let is_callable = |k: SymbolKind| matches!(k, SymbolKind::Function | SymbolKind::Method);
+        let mut by_name: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+        let mut by_file_line: HashMap<(&str, usize), &Symbol> = HashMap::new();
+        for s in symbols {
+            if is_callable(s.kind) {
+                by_name.entry(s.name.as_str()).or_default().push(s);
+                by_file_line.insert((s.file_id.as_str(), s.span.start_line), s);
+            }
+        }
+
+        let mut relations = Vec::new();
+        for (path, calls) in file_calls {
+            let file_id = match path_to_id.get(path.as_str()) {
+                Some(id) => *id,
+                None => continue,
+            };
+            for call in calls {
+                let caller = match by_file_line.get(&(file_id, call.caller_line)) {
+                    Some(c) => *c,
+                    None => continue,
+                };
+                if is_ubiquitous_callable(&call.callee) {
+                    continue;
+                }
+                let candidates = match by_name.get(call.callee.as_str()) {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                let target = if !call.is_method {
+                    // Free/path call: a single same-file definition is a confident local target.
+                    let same: Vec<&&Symbol> = candidates
+                        .iter()
+                        .filter(|c| c.file_id == file_id && c.id != caller.id)
+                        .collect();
+                    if same.len() == 1 {
+                        Some(*same[0])
+                    } else {
+                        unique_global(candidates, caller)
+                    }
+                } else {
+                    // Method call: only a project-wide unique name is safe to attribute.
+                    unique_global(candidates, caller)
+                };
+
+                if let Some(t) = target {
+                    relations.push(Relation {
+                        source_id: caller.id.clone(),
+                        target_id: t.id.clone(),
+                        kind: RelationKind::Calls,
+                        weight: 1.0,
+                    });
+                }
+            }
+        }
+
+        relations.sort_by(|a, b| (&a.source_id, &a.target_id).cmp(&(&b.source_id, &b.target_id)));
+        relations.dedup_by(|a, b| {
+            a.source_id == b.source_id && a.target_id == b.target_id && a.kind == b.kind
+        });
         relations
     }
 
@@ -890,6 +1062,84 @@ impl<'a> Indexer<'a> {
 }
 
 /// Try to resolve an import path to actual file paths in the index.
+/// The sole project-wide callable with this name, if unique and not the caller itself.
+fn unique_global<'a>(candidates: &[&'a Symbol], caller: &Symbol) -> Option<&'a Symbol> {
+    match candidates {
+        [only] if only.id != caller.id => Some(only),
+        _ => None,
+    }
+}
+
+/// Names that std/core provide on countless types. Even if exactly one such symbol is indexed,
+/// a `.len()` / `Type::new()` call almost never targets *that* one — attributing it would forge a
+/// high-weight edge. Dropping these keeps the call graph precise at a small recall cost.
+fn is_ubiquitous_callable(name: &str) -> bool {
+    matches!(
+        name,
+        "new"
+            | "default"
+            | "clone"
+            | "len"
+            | "is_empty"
+            | "to_string"
+            | "to_owned"
+            | "to_vec"
+            | "from"
+            | "into"
+            | "try_from"
+            | "try_into"
+            | "as_str"
+            | "as_ref"
+            | "as_mut"
+            | "as_bytes"
+            | "as_deref"
+            | "iter"
+            | "iter_mut"
+            | "into_iter"
+            | "next"
+            | "unwrap"
+            | "unwrap_or"
+            | "unwrap_or_else"
+            | "unwrap_or_default"
+            | "expect"
+            | "map"
+            | "map_err"
+            | "and_then"
+            | "filter"
+            | "collect"
+            | "push"
+            | "pop"
+            | "insert"
+            | "remove"
+            | "get"
+            | "get_mut"
+            | "contains"
+            | "contains_key"
+            | "or_default"
+            | "or_insert"
+            | "or_insert_with"
+            | "cmp"
+            | "partial_cmp"
+            | "fmt"
+            | "parse"
+            | "extend"
+            | "take"
+            | "count"
+            | "find"
+            | "any"
+            | "all"
+            | "cloned"
+            | "copied"
+            | "starts_with"
+            | "ends_with"
+            | "trim"
+            | "split"
+            | "join"
+            | "replace"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn resolve_import<'a>(
     import_path: &str,
     source_dir: &str,
@@ -897,8 +1147,37 @@ fn resolve_import<'a>(
     stem_to_paths: &HashMap<String, Vec<&'a str>>,
     suffix_to_paths: &HashMap<&'a str, Vec<&'a str>>,
     dir_suffix_to_paths: &HashMap<&'a str, Vec<&'a str>>,
+    crate_roots: &HashMap<String, String>,
 ) -> Vec<&'a str> {
     let mut results = Vec::new();
+
+    // 0. Workspace crate import: `kungfu_types::budget::Budget` → that crate's src dir.
+    //    Checked before the generic fallbacks so it wins over a fuzzy stem match.
+    let (crate_name, rest) = match import_path.split_once("::") {
+        Some((c, r)) => (c, r),
+        None => (import_path, ""),
+    };
+    if let Some(src_dir) = crate_roots.get(crate_name) {
+        let module_path = rest.replace("::", "/");
+        let candidates = if module_path.is_empty() {
+            vec![format!("{src_dir}/lib.rs")]
+        } else {
+            vec![
+                format!("{src_dir}/{module_path}.rs"),
+                format!("{src_dir}/{module_path}/mod.rs"),
+                // Re-export through the crate root (e.g. `kungfu_types::Budget`).
+                format!("{src_dir}/lib.rs"),
+            ]
+        };
+        for candidate in &candidates {
+            if let Some((&path, _)) = path_to_id.get_key_value(candidate.as_str()) {
+                results.push(path);
+            }
+        }
+        if !results.is_empty() {
+            return results;
+        }
+    }
 
     // 1. Relative imports: ./foo, ../foo
     if import_path.starts_with('.') {
@@ -1329,5 +1608,99 @@ mod tests {
         assert_eq!(entry.hash, "skip:64");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn full_index_builds_call_relations() {
+        let root = temp_indexer_root();
+        std::fs::write(
+            root.join("lib.rs"),
+            "fn helper() {}\nfn run() { helper(); }\nfn shared() {} \n",
+        )
+        .unwrap();
+
+        let index_dir = root.join(".kungfu").join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let store = JsonStore::new(&index_dir);
+        let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+        indexer.index_full().unwrap();
+
+        let symbols = store.load_symbols().unwrap();
+        let relations = store.load_relations().unwrap();
+        let id = |name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.id.clone())
+        };
+        let run = id("run").expect("run symbol");
+        let helper = id("helper").expect("helper symbol");
+
+        // run() → helper() is a unique, same-file free call: must be linked.
+        assert!(
+            relations.iter().any(|r| r.kind == RelationKind::Calls
+                && r.source_id == run
+                && r.target_id == helper),
+            "expected Calls edge run→helper, got {:?}",
+            relations
+                .iter()
+                .filter(|r| r.kind == RelationKind::Calls)
+                .collect::<Vec<_>>()
+        );
+        // No call to shared(): it must not appear as a Calls target.
+        let shared = id("shared").expect("shared symbol");
+        assert!(!relations
+            .iter()
+            .any(|r| r.kind == RelationKind::Calls && r.target_id == shared));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn incremental_with_no_changes_preserves_relations() {
+        let root = temp_indexer_root();
+        std::fs::write(
+            root.join("lib.rs"),
+            "fn helper() {}\nfn run() { helper(); }\n",
+        )
+        .unwrap();
+        let index_dir = root.join(".kungfu").join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let store = JsonStore::new(&index_dir);
+        let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+
+        indexer.index_full().unwrap();
+        let calls_after_full = store
+            .load_relations()
+            .unwrap()
+            .iter()
+            .filter(|r| r.kind == RelationKind::Calls)
+            .count();
+        assert_eq!(calls_after_full, 1, "full index should link run→helper");
+
+        // A no-op incremental (no file changed) must NOT wipe the graph — regression for the
+        // bug where relations were rebuilt only from re-parsed files, zeroing them on no-ops.
+        indexer.index_incremental().unwrap();
+        let calls_after_incremental = store
+            .load_relations()
+            .unwrap()
+            .iter()
+            .filter(|r| r.kind == RelationKind::Calls)
+            .count();
+        assert_eq!(
+            calls_after_incremental, calls_after_full,
+            "incremental with no changes must preserve Calls relations"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ubiquitous_names_are_not_linked() {
+        assert!(is_ubiquitous_callable("len"));
+        assert!(is_ubiquitous_callable("new"));
+        assert!(is_ubiquitous_callable("clone"));
+        assert!(!is_ubiquitous_callable("ask_context"));
+        assert!(!is_ubiquitous_callable("fill_snippets"));
     }
 }
