@@ -221,16 +221,4 @@ impl KungfuService {
             "results": results,
         }))
     }
-
-    pub fn search_rationale(
-        &self,
-        query: &str,
-        budget: Budget,
-    ) -> Result<Vec<kungfu_types::context::RationaleItem>> {
-        let budget = self.resolve_budget(budget);
-        let memories = self.store().load_memories()?;
-        Ok(kungfu_memory::matcher::match_memories(
-            query, &memories, budget,
-        ))
-    }
 }
