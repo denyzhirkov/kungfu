@@ -780,6 +780,12 @@ impl KungfuService {
             let start_idx = start.saturating_sub(1);
             let end_idx = end.min(lines.len());
 
+            // Stale span: the indexed symbol points past the current file
+            // (file shrank since indexing). Skip rather than slice out of range.
+            if start_idx >= lines.len() || end_idx <= start_idx {
+                continue;
+            }
+
             // Try keyword-relevant extraction first
             if !keywords.is_empty() && end_idx > start_idx {
                 let relevant =
