@@ -256,7 +256,13 @@ fn first_sentence(text: &str, max_len: usize) -> String {
     if sentence.len() <= max_len {
         sentence.to_string()
     } else {
-        format!("{}...", &sentence[..max_len])
+        // Truncate on a UTF-8 char boundary at or below max_len so multi-byte
+        // characters (e.g. Cyrillic) don't trigger a slice panic.
+        let mut end = max_len;
+        while end > 0 && !sentence.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &sentence[..end])
     }
 }
 
@@ -390,6 +396,16 @@ impl Parser {
 mod tests {
     use super::*;
     use kungfu_types::symbol::SymbolKind;
+
+    #[test]
+    fn first_sentence_truncates_on_char_boundary() {
+        // 60 Cyrillic chars = 120 bytes; max_len of 119 lands inside a 'т'.
+        let text = "т".repeat(60);
+        let summary = first_sentence(&text, 119);
+        assert!(summary.ends_with("..."));
+        // Must not panic and must be valid UTF-8 (guaranteed by String).
+        assert!(summary.len() <= 119 + 3);
+    }
 
     #[test]
     fn rust_symbols_and_imports() {
