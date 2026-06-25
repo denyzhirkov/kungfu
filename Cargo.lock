@@ -1569,6 +1569,7 @@ dependencies = [
  "kungfu-types",
  "serde",
  "serde_json",
+ "toml",
  "tracing",
 ]
 

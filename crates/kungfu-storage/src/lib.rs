@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use kungfu_types::chunk::Chunk;
 use kungfu_types::file::FileEntry;
-use kungfu_types::memory::{MemoryEntry, MemoryStatus, ProjectMemoryEntry};
+use kungfu_types::memory::{MemoryEntry, ProjectMemoryEntry};
 use kungfu_types::relation::Relation;
 use kungfu_types::symbol::Symbol;
 use std::cell::RefCell;
@@ -11,11 +11,14 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::debug;
 
+mod project_memory;
+pub use project_memory::{MemoryMeta, ProjectMemoryStore};
+
 /// Atomically replace `path` with `contents`: write a sibling temp file, then
 /// rename it over the target. Rename is atomic on the same filesystem, so a
 /// crash mid-write leaves the old file intact instead of a truncated one — the
 /// index/memory store is never observed half-written.
-fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("store");
     let tmp = dir.join(format!(".{}.{}.tmp", name, std::process::id()));
@@ -34,10 +37,13 @@ pub struct JsonStore {
     relations_cache: RefCell<Option<Vec<Relation>>>,
     fingerprints_cache: RefCell<Option<HashMap<String, String>>>,
     memories_cache: RefCell<Option<Vec<MemoryEntry>>>,
+    pmem: ProjectMemoryStore,
 }
 
 impl JsonStore {
     pub fn new(base_dir: &Path) -> Self {
+        // Manual memory lives under `.kungfu/`, one level up from the index dir.
+        let kungfu_dir = base_dir.parent().unwrap_or(base_dir);
         Self {
             base_dir: base_dir.to_path_buf(),
             files_cache: RefCell::new(None),
@@ -45,6 +51,7 @@ impl JsonStore {
             relations_cache: RefCell::new(None),
             fingerprints_cache: RefCell::new(None),
             memories_cache: RefCell::new(None),
+            pmem: ProjectMemoryStore::new(kungfu_dir),
         }
     }
 
@@ -187,51 +194,21 @@ impl JsonStore {
     }
 
     // --- Project memory (explicit, user/agent managed) ---
-
-    fn project_memory_path(&self) -> std::path::PathBuf {
-        // Store alongside index dir, one level up: .kungfu/project_memory.json
-        self.base_dir
-            .parent()
-            .unwrap_or(&self.base_dir)
-            .join("project_memory.json")
-    }
-
-    pub fn save_project_memories(&self, entries: &[ProjectMemoryEntry]) -> Result<()> {
-        let path = self.project_memory_path();
-        let json = serde_json::to_string_pretty(entries)?;
-        atomic_write(&path, &json)?;
-        debug!("saved {} project memory entries", entries.len());
-        Ok(())
-    }
-
-    pub fn load_project_memories(&self) -> Result<Vec<ProjectMemoryEntry>> {
-        let path = self.project_memory_path();
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(&path)?;
-        let entries: Vec<ProjectMemoryEntry> = serde_json::from_str(&content)?;
-        Ok(entries)
-    }
+    //
+    // Backed by `.kungfu/memory/` (one `.md` per entry + derived manifest). The
+    // single-file `project_memory.json` is migrated on first use. These methods
+    // delegate to `ProjectMemoryStore`; CLI/MCP adapters are unaffected.
 
     pub fn next_project_memory_id(&self) -> Result<String> {
-        let entries = self.load_project_memories()?;
-        let max_num = entries
-            .iter()
-            .filter_map(|e| {
-                e.id.strip_prefix("mem_")
-                    .and_then(|n| n.parse::<u32>().ok())
-            })
-            .max()
-            .unwrap_or(0);
-        Ok(format!("mem_{:04}", max_num + 1))
+        self.pmem.next_id()
     }
 
     pub fn add_project_memory(&self, entry: ProjectMemoryEntry) -> Result<ProjectMemoryEntry> {
-        let mut entries = self.load_project_memories()?;
-        entries.push(entry.clone());
-        self.save_project_memories(&entries)?;
-        Ok(entry)
+        self.pmem.add(entry)
+    }
+
+    pub fn get_project_memory(&self, id: &str) -> Result<ProjectMemoryEntry> {
+        self.pmem.get(id)
     }
 
     pub fn update_project_memory(
@@ -239,40 +216,42 @@ impl JsonStore {
         id: &str,
         f: impl FnOnce(&mut ProjectMemoryEntry),
     ) -> Result<ProjectMemoryEntry> {
-        let mut entries = self.load_project_memories()?;
-        let entry = entries
-            .iter_mut()
-            .find(|e| e.id == id)
-            .ok_or_else(|| anyhow::anyhow!("memory entry not found: {}", id))?;
-        f(entry);
-        entry.updated_at = chrono::Utc::now().to_rfc3339();
-        let result = entry.clone();
-        self.save_project_memories(&entries)?;
-        Ok(result)
+        self.pmem.update(id, f)
     }
 
     pub fn remove_project_memory(&self, id: &str) -> Result<()> {
-        let mut entries = self.load_project_memories()?;
-        let len_before = entries.len();
-        entries.retain(|e| e.id != id);
-        if entries.len() == len_before {
-            anyhow::bail!("memory entry not found: {}", id);
-        }
-        self.save_project_memories(&entries)?;
-        Ok(())
+        self.pmem.remove(id)
     }
 
     pub fn archive_project_memory(&self, id: &str) -> Result<ProjectMemoryEntry> {
-        self.update_project_memory(id, |e| {
-            e.status = MemoryStatus::Archived;
-        })
+        self.pmem.archive(id)
+    }
+
+    /// All entry metadata (no bodies) — cheap listing/filtering.
+    pub fn list_project_memory_meta(&self) -> Result<Vec<MemoryMeta>> {
+        self.pmem.list_meta()
+    }
+
+    /// Candidate ids for a query via the inverted index (recall filter).
+    pub fn project_memory_candidates(&self, query: &str) -> Result<Vec<String>> {
+        self.pmem.candidate_ids(query)
+    }
+
+    /// Load full entries for specific ids (bodies read only for these).
+    pub fn load_project_memory_bodies(&self, ids: &[String]) -> Result<Vec<ProjectMemoryEntry>> {
+        self.pmem.load_bodies(ids)
+    }
+
+    /// Every entry with its body. O(N) reads — for export/maintenance, not hot paths.
+    pub fn load_project_memories(&self) -> Result<Vec<ProjectMemoryEntry>> {
+        self.pmem.load_all()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kungfu_types::memory::ProjectMemoryKind;
+    use kungfu_types::memory::{MemoryStatus, ProjectMemoryKind};
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let mut dir = std::env::temp_dir();

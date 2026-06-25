@@ -547,9 +547,11 @@ impl KungfuService {
             packet.evidence = evidence;
         }
 
-        // 9. Inject project memory (facts, decisions, warnings)
-        let project_memories = store.load_project_memories().unwrap_or_default();
-        if !project_memories.is_empty() {
+        // 9. Inject project memory (facts, decisions, warnings).
+        // Selective: pull only candidate bodies (query terms ∪ pinned ∪ cross-ref
+        // overlap) and conflict-cluster bodies, instead of loading every entry.
+        let metas = store.list_project_memory_meta().unwrap_or_default();
+        if !metas.is_empty() {
             let max_memory = match budget {
                 Budget::Tiny => 1,
                 Budget::Small => 3,
@@ -571,21 +573,46 @@ impl KungfuService {
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
+
+            // Recall set, all derived from metadata (no bodies read yet):
+            //   query-term candidates ∪ active-pinned ∪ cross-ref overlap.
+            let mut want: HashSet<String> = store
+                .project_memory_candidates(task)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            for m in &metas {
+                if m.status != kungfu_types::memory::MemoryStatus::Active {
+                    continue;
+                }
+                let xref = m
+                    .related_files
+                    .iter()
+                    .any(|rf| matched_files.iter().any(|mf| meta_path_overlap(rf, mf)))
+                    || m.related_symbols
+                        .iter()
+                        .any(|rs| matched_symbols.iter().any(|ms| rs == ms));
+                if m.pinned || xref {
+                    want.insert(m.id.clone());
+                }
+            }
+
+            let pool = store
+                .load_project_memory_bodies(&want.into_iter().collect::<Vec<_>>())
+                .unwrap_or_default();
+
             let ctx = kungfu_memory::project_search::SearchContext {
                 matched_files: &matched_files,
                 matched_symbols: &matched_symbols,
             };
             let filter = kungfu_memory::project_search::MemoryFilter::default();
             let matched = kungfu_memory::project_search::search_project_memory_with_context(
-                task,
-                &project_memories,
-                &filter,
-                &ctx,
+                task, &pool, &filter, &ctx,
             );
 
             // Also include pinned entries not already matched
             let matched_ids: HashSet<String> = matched.iter().map(|(_, e)| e.id.clone()).collect();
-            let pinned: Vec<_> = project_memories
+            let pinned: Vec<_> = pool
                 .iter()
                 .filter(|e| {
                     e.pinned
@@ -611,16 +638,23 @@ impl KungfuService {
                 })
                 .collect();
 
-            // Surface contradictions inside the full active memory pool (not just selected entries),
-            // so the agent sees disagreements even if only one side made it into project_memory.
-            let conflicts = kungfu_memory::project_search::detect_conflicts(&project_memories);
-            packet.memory_conflicts = conflicts
-                .into_iter()
-                .map(|c| kungfu_types::context::MemoryConflictItem {
-                    on: c.on,
-                    entry_ids: c.entries.iter().map(|e| e.id.clone()).collect(),
-                })
-                .collect();
+            // Surface contradictions across active memory. Conflicts can only form
+            // between entries sharing a tag/symbol, so cluster on metadata first and
+            // load bodies only for entries in a cluster of ≥2.
+            let cluster_ids = conflict_cluster_ids(&metas);
+            if !cluster_ids.is_empty() {
+                let cluster_pool = store
+                    .load_project_memory_bodies(&cluster_ids)
+                    .unwrap_or_default();
+                let conflicts = kungfu_memory::project_search::detect_conflicts(&cluster_pool);
+                packet.memory_conflicts = conflicts
+                    .into_iter()
+                    .map(|c| kungfu_types::context::MemoryConflictItem {
+                        on: c.on,
+                        entry_ids: c.entries.iter().map(|e| e.id.clone()).collect(),
+                    })
+                    .collect();
+            }
         }
 
         Ok(packet)
@@ -811,6 +845,49 @@ impl KungfuService {
             }
         }
     }
+}
+
+/// Permissive overlap between a memory's `related_*` path and a packet path:
+/// equal, equal basename, or one being a suffix of the other. Over-inclusive on
+/// purpose — the memory scorer makes the final call; this only widens recall.
+fn meta_path_overlap(a: &str, b: &str) -> bool {
+    if a == b || a.ends_with(b) || b.ends_with(a) {
+        return true;
+    }
+    let base = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    base(a) == base(b)
+}
+
+/// Ids of active entries that share a tag or related-symbol with at least one
+/// other active entry — the only entries that can take part in a conflict.
+/// Computed from metadata so bodies are read only for genuine clusters.
+fn conflict_cluster_ids(metas: &[kungfu_storage::MemoryMeta]) -> Vec<String> {
+    use kungfu_types::memory::MemoryStatus;
+    let mut by_signal: HashMap<String, Vec<String>> = HashMap::new();
+    for m in metas {
+        if m.status != MemoryStatus::Active {
+            continue;
+        }
+        for tag in &m.tags {
+            by_signal
+                .entry(format!("tag:{tag}"))
+                .or_default()
+                .push(m.id.clone());
+        }
+        for sym in &m.related_symbols {
+            by_signal
+                .entry(format!("sym:{sym}"))
+                .or_default()
+                .push(m.id.clone());
+        }
+    }
+    let mut ids: HashSet<String> = HashSet::new();
+    for group in by_signal.values() {
+        if group.len() >= 2 {
+            ids.extend(group.iter().cloned());
+        }
+    }
+    ids.into_iter().collect()
 }
 
 /// Extract lines from a symbol body that contain query keywords, with 1 line of context.

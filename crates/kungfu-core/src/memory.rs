@@ -37,41 +37,30 @@ impl KungfuService {
         &self,
         filter: &kungfu_memory::project_search::MemoryFilter,
     ) -> Result<Vec<ProjectMemoryEntry>> {
-        let entries = self.store().load_project_memories()?;
+        // Filter on metadata first (no bodies), then read only the survivors.
         let status_filter = filter
             .status
             .unwrap_or(kungfu_types::memory::MemoryStatus::Active);
-        let filtered: Vec<_> = entries
+        let ids: Vec<String> = self
+            .store()
+            .list_project_memory_meta()?
             .into_iter()
-            .filter(|e| {
-                if e.status != status_filter {
-                    return false;
-                }
-                if let Some(kind) = filter.kind {
-                    if e.kind != kind {
-                        return false;
-                    }
-                }
-                if let Some(ref tag) = filter.tag {
-                    if !e.tags.iter().any(|t| t == tag) {
-                        return false;
-                    }
-                }
-                if filter.pinned_only && !e.pinned {
-                    return false;
-                }
-                true
+            .filter(|m| {
+                m.status == status_filter
+                    && filter.kind.is_none_or(|k| m.kind == k)
+                    && filter
+                        .tag
+                        .as_ref()
+                        .is_none_or(|tag| m.tags.iter().any(|t| t == tag))
+                    && (!filter.pinned_only || m.pinned)
             })
+            .map(|m| m.id)
             .collect();
-        Ok(filtered)
+        self.store().load_project_memory_bodies(&ids)
     }
 
     pub fn memory_show(&self, id: &str) -> Result<ProjectMemoryEntry> {
-        let entries = self.store().load_project_memories()?;
-        entries
-            .into_iter()
-            .find(|e| e.id == id)
-            .ok_or_else(|| anyhow::anyhow!("memory entry not found: {}", id))
+        self.store().get_project_memory(id)
     }
 
     pub fn memory_search(
@@ -79,7 +68,15 @@ impl KungfuService {
         query: &str,
         filter: &kungfu_memory::project_search::MemoryFilter,
     ) -> Result<Vec<(f64, ProjectMemoryEntry)>> {
-        let entries = self.store().load_project_memories()?;
+        // Generate candidates from the inverted index, then read and score only
+        // those bodies. An empty query degenerates to a filtered list, so load
+        // all (rare path). Scoring semantics are unchanged from the full scan.
+        let entries = if query.trim().is_empty() {
+            self.store().load_project_memories()?
+        } else {
+            let ids = self.store().project_memory_candidates(query)?;
+            self.store().load_project_memory_bodies(&ids)?
+        };
         Ok(kungfu_memory::project_search::search_project_memory(
             query, &entries, filter,
         ))
