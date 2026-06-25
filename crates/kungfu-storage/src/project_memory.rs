@@ -208,6 +208,18 @@ impl ProjectMemoryStore {
             if self.legacy_json.exists() {
                 self.migrate_legacy()?;
             }
+        } else if self.legacy_json.exists() {
+            // The `.md` store already exists, yet a legacy file is present again.
+            // Migration only runs when the store dir is absent, so we will NOT
+            // absorb this file — surface it rather than silently ignoring data.
+            // Almost always an outdated `kungfu` binary (e.g. a stale MCP server)
+            // writing the old format alongside the new store.
+            warn!(
+                "ignoring stale {} next to the .md memory store — likely an outdated \
+                 kungfu binary (upgrade to >=2.5.21 and restart the MCP server, then \
+                 remove it); its entries are NOT visible to the new store",
+                self.legacy_json.display()
+            );
         }
         let manifest = self.load_or_rebuild_manifest()?;
         *self.manifest.borrow_mut() = Some(manifest);
@@ -607,6 +619,28 @@ mod tests {
         let store2 = ProjectMemoryStore::new(&dir);
         assert_eq!(store2.list_meta().unwrap().len(), 2);
         assert!(store2.candidate_ids("content").unwrap().len() == 2);
+    }
+
+    #[test]
+    fn stray_legacy_next_to_populated_store_is_ignored() {
+        let dir = temp_dir("stray");
+        // Populate the .md store first.
+        let store = ProjectMemoryStore::new(&dir);
+        store
+            .add(entry("mem_0001", "Real", "real body", &["t"]))
+            .unwrap();
+        drop(store);
+        // An old binary drops a legacy file back next to the existing store.
+        std::fs::write(
+            dir.join("project_memory.json"),
+            serde_json::to_string(&vec![entry("mem_0001", "Ghost", "ghost body", &["t"])]).unwrap(),
+        )
+        .unwrap();
+        // A fresh store must NOT migrate/clobber: it serves the .md entry only.
+        let store2 = ProjectMemoryStore::new(&dir);
+        let all = store2.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].content, "real body");
     }
 
     #[test]
