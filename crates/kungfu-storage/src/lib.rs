@@ -12,7 +12,7 @@ use std::path::Path;
 use tracing::debug;
 
 mod project_memory;
-pub use project_memory::{MemoryMeta, ProjectMemoryStore};
+pub use project_memory::{AbsorbReport, MemoryMeta, ProjectMemoryStore};
 
 /// Atomically replace `path` with `contents`: write a sibling temp file, then
 /// rename it over the target. Rename is atomic on the same filesystem, so a
@@ -245,6 +245,16 @@ impl JsonStore {
     /// Every entry with its body. O(N) reads — for export/maintenance, not hot paths.
     pub fn load_project_memories(&self) -> Result<Vec<ProjectMemoryEntry>> {
         self.pmem.load_all()
+    }
+
+    /// True if a stray legacy `project_memory.json` sits next to the `.md` store.
+    pub fn project_memory_legacy_present(&self) -> bool {
+        self.pmem.legacy_present()
+    }
+
+    /// Absorb a stray legacy memory file into the `.md` store (doctor --fix).
+    pub fn absorb_project_memory_legacy(&self) -> Result<Option<AbsorbReport>> {
+        self.pmem.absorb_legacy()
     }
 }
 

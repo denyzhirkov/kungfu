@@ -1,6 +1,16 @@
 use crate::KungfuService;
 use anyhow::Result;
-use kungfu_types::memory::ProjectMemoryEntry;
+use kungfu_types::memory::{MemoryStatus, ProjectMemoryEntry};
+
+/// Health + repair summary for the manual memory store (`kungfu doctor`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryDoctor {
+    pub total: usize,
+    pub active: usize,
+    pub archived: usize,
+    pub legacy_present: bool,
+    pub absorbed: Option<kungfu_storage::AbsorbReport>,
+}
 
 impl KungfuService {
     #[allow(clippy::too_many_arguments)]
@@ -112,6 +122,31 @@ impl KungfuService {
 
     pub fn memory_remove(&self, id: &str) -> Result<()> {
         self.store().remove_project_memory(id)
+    }
+
+    /// Diagnose the manual memory store; with `fix`, absorb a stray legacy file.
+    pub fn memory_doctor(&self, fix: bool) -> Result<MemoryDoctor> {
+        let absorbed = if fix && self.store().project_memory_legacy_present() {
+            self.store().absorb_project_memory_legacy()?
+        } else {
+            None
+        };
+        let metas = self.store().list_project_memory_meta()?;
+        let archived = metas
+            .iter()
+            .filter(|m| m.status == MemoryStatus::Archived)
+            .count();
+        let active = metas
+            .iter()
+            .filter(|m| m.status == MemoryStatus::Active)
+            .count();
+        Ok(MemoryDoctor {
+            total: metas.len(),
+            active,
+            archived,
+            legacy_present: self.store().project_memory_legacy_present(),
+            absorbed,
+        })
     }
 
     pub fn memory_pin(&self, id: &str) -> Result<ProjectMemoryEntry> {

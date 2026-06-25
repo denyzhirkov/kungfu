@@ -62,7 +62,7 @@ pub fn status(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn doctor(json: bool) -> Result<()> {
+pub fn doctor(json: bool, fix: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let mut checks: Vec<(&str, bool, String)> = Vec::new();
 
@@ -274,6 +274,43 @@ pub fn doctor(json: bool) -> Result<()> {
                             "missing".into()
                         },
                     ));
+                }
+
+                // Manual memory store (.kungfu/memory). With --fix, absorb a stray
+                // legacy project_memory.json left by an outdated binary.
+                match KungfuService::open(&cwd).and_then(|s| s.memory_doctor(fix)) {
+                    Ok(d) => {
+                        checks.push((
+                            "memory_store",
+                            true,
+                            format!(
+                                "{} entries ({} active, {} archived)",
+                                d.total, d.active, d.archived
+                            ),
+                        ));
+                        if let Some(rep) = &d.absorbed {
+                            checks.push((
+                                "memory_absorbed",
+                                true,
+                                format!(
+                                    "absorbed {} legacy entr{} ({} duplicate(s) skipped, {} renumbered)",
+                                    rep.added.len(),
+                                    if rep.added.len() == 1 { "y" } else { "ies" },
+                                    rep.skipped_duplicates,
+                                    rep.renumbered.len()
+                                ),
+                            ));
+                        } else if d.legacy_present {
+                            checks.push((
+                                "memory_legacy",
+                                false,
+                                "stray legacy project_memory.json present (outdated binary?) — \
+                                 restart the MCP server, then run 'kungfu doctor --fix' to absorb it"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    Err(e) => checks.push(("memory_store", false, format!("error: {}", e))),
                 }
             }
         }

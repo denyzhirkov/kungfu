@@ -30,6 +30,7 @@ mod verify;
 pub use debug::{DebugTraceResult, TraceFrame};
 pub use embeddings::{EmbeddingsBuildResult, EmbeddingsStatus};
 pub use export::ExportStats;
+pub use memory::MemoryDoctor;
 
 pub use ask::StrategyWeights;
 pub use types::*;

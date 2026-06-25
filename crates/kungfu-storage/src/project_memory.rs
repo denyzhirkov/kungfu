@@ -493,6 +493,77 @@ impl ProjectMemoryStore {
             self.with_manifest(|m| m.metas.iter().map(|e| e.id.clone()).collect::<Vec<_>>())?;
         self.load_bodies(&ids)
     }
+
+    // --- health & repair (kungfu doctor) -------------------------------------
+
+    /// True if a legacy `project_memory.json` sits next to the `.md` store —
+    /// usually written by an outdated binary (e.g. a stale MCP server). Its
+    /// entries are invisible until absorbed.
+    pub fn legacy_present(&self) -> bool {
+        self.dir.exists() && self.legacy_json.exists()
+    }
+
+    /// Absorb a stray legacy `project_memory.json` into the `.md` store:
+    /// entries with content already present are skipped; id collisions are
+    /// renumbered to fresh ids; the legacy file is then moved aside. Returns
+    /// `None` when there is nothing to absorb. Idempotent and non-destructive.
+    pub fn absorb_legacy(&self) -> Result<Option<AbsorbReport>> {
+        self.ensure_ready()?;
+        if !self.legacy_json.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&self.legacy_json)
+            .with_context(|| format!("reading {}", self.legacy_json.display()))?;
+        let incoming: Vec<ProjectMemoryEntry> =
+            serde_json::from_str(&content).context("parsing legacy project_memory.json")?;
+
+        let existing = self.load_all()?;
+        let mut seen_content: HashSet<String> =
+            existing.iter().map(|e| e.content.clone()).collect();
+        let mut seen_ids: HashSet<String> = existing.iter().map(|e| e.id.clone()).collect();
+
+        let mut report = AbsorbReport::default();
+        for mut entry in incoming {
+            if seen_content.contains(&entry.content) {
+                report.skipped_duplicates += 1;
+                continue;
+            }
+            if seen_ids.contains(&entry.id) {
+                let new_id = self.next_id()?;
+                report.renumbered.push((entry.id.clone(), new_id.clone()));
+                entry.id = new_id;
+            }
+            seen_ids.insert(entry.id.clone());
+            seen_content.insert(entry.content.clone());
+            self.add(entry.clone())?;
+            report.added.push(entry.id);
+        }
+
+        // Move the legacy file aside with a unique suffix so an existing `.bak`
+        // (from the initial migration) is never clobbered.
+        let backup = self
+            .legacy_json
+            .with_extension(format!("json.absorbed.{}.bak", std::process::id()));
+        std::fs::rename(&self.legacy_json, &backup).with_context(|| {
+            format!(
+                "moving {} -> {}",
+                self.legacy_json.display(),
+                backup.display()
+            )
+        })?;
+        Ok(Some(report))
+    }
+}
+
+/// Outcome of absorbing a stray legacy memory file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AbsorbReport {
+    /// Ids added to the `.md` store (post-renumbering).
+    pub added: Vec<String>,
+    /// Entries skipped because identical content already existed.
+    pub skipped_duplicates: usize,
+    /// `(old_id, new_id)` for entries whose id collided and was reassigned.
+    pub renumbered: Vec<(String, String)>,
 }
 
 fn remove_id_from_postings(postings: &mut HashMap<String, Vec<String>>, id: &str) {
@@ -619,6 +690,40 @@ mod tests {
         let store2 = ProjectMemoryStore::new(&dir);
         assert_eq!(store2.list_meta().unwrap().len(), 2);
         assert!(store2.candidate_ids("content").unwrap().len() == 2);
+    }
+
+    #[test]
+    fn absorb_legacy_dedups_and_renumbers() {
+        let dir = temp_dir("absorb");
+        let store = ProjectMemoryStore::new(&dir);
+        store
+            .add(entry("mem_0001", "Real", "real body", &["t"]))
+            .unwrap();
+
+        // Old binary drops a legacy file: one duplicate (same content) and one
+        // genuinely new entry whose id collides with the existing mem_0001.
+        let stray = vec![
+            entry("mem_0001", "Dup", "real body", &["t"]),
+            entry("mem_0001", "Fresh", "fresh body", &["t"]),
+        ];
+        std::fs::write(
+            dir.join("project_memory.json"),
+            serde_json::to_string(&stray).unwrap(),
+        )
+        .unwrap();
+
+        let report = store.absorb_legacy().unwrap().unwrap();
+        assert_eq!(report.skipped_duplicates, 1);
+        assert_eq!(report.added.len(), 1);
+        assert_eq!(report.renumbered.len(), 1);
+        assert_eq!(report.added[0], "mem_0002"); // collision renumbered
+
+        let all = store.load_all().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|e| e.content == "fresh body"));
+        // Legacy file moved aside; second run is a no-op.
+        assert!(!store.legacy_present());
+        assert!(store.absorb_legacy().unwrap().is_none());
     }
 
     #[test]

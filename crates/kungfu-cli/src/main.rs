@@ -28,7 +28,11 @@ enum Commands {
     Status,
 
     /// Validate installation, config, and index integrity
-    Doctor,
+    Doctor {
+        /// Repair what is safely fixable (e.g. absorb a stray legacy memory file)
+        #[arg(long)]
+        fix: bool,
+    },
 
     /// Show current configuration
     #[command(name = "config")]
@@ -469,7 +473,7 @@ fn main() {
     let result = match cli.command {
         Commands::Init => commands::init(json),
         Commands::Status => commands::status(json),
-        Commands::Doctor => commands::doctor(json),
+        Commands::Doctor { fix } => commands::doctor(json, fix),
         Commands::Config => commands::config_show(json),
         Commands::Index {
             full,
