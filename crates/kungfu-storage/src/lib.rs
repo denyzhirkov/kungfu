@@ -11,6 +11,21 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::debug;
 
+/// Atomically replace `path` with `contents`: write a sibling temp file, then
+/// rename it over the target. Rename is atomic on the same filesystem, so a
+/// crash mid-write leaves the old file intact instead of a truncated one — the
+/// index/memory store is never observed half-written.
+fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("store");
+    let tmp = dir.join(format!(".{}.{}.tmp", name, std::process::id()));
+    std::fs::write(&tmp, contents)
+        .with_context(|| format!("writing temp file {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
 pub struct JsonStore {
     base_dir: std::path::PathBuf,
     // In-memory caches: loaded once per JsonStore instance
@@ -45,7 +60,7 @@ impl JsonStore {
     pub fn save_files(&self, files: &[FileEntry]) -> Result<()> {
         let path = self.base_dir.join("files.json");
         let json = serde_json::to_string_pretty(files)?;
-        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+        atomic_write(&path, &json)?;
         debug!("saved {} files to index", files.len());
         *self.files_cache.borrow_mut() = Some(files.to_vec());
         Ok(())
@@ -68,7 +83,7 @@ impl JsonStore {
     pub fn save_symbols(&self, symbols: &[Symbol]) -> Result<()> {
         let path = self.base_dir.join("symbols.json");
         let json = serde_json::to_string(symbols)?;
-        std::fs::write(&path, json)?;
+        atomic_write(&path, &json)?;
         debug!("saved {} symbols to index", symbols.len());
         *self.symbols_cache.borrow_mut() = Some(symbols.to_vec());
         Ok(())
@@ -91,7 +106,7 @@ impl JsonStore {
     pub fn save_relations(&self, relations: &[Relation]) -> Result<()> {
         let path = self.base_dir.join("relations.json");
         let json = serde_json::to_string(relations)?;
-        std::fs::write(&path, json)?;
+        atomic_write(&path, &json)?;
         *self.relations_cache.borrow_mut() = Some(relations.to_vec());
         Ok(())
     }
@@ -113,7 +128,7 @@ impl JsonStore {
     pub fn save_chunks(&self, chunks: &[Chunk]) -> Result<()> {
         let path = self.base_dir.join("chunks.json");
         let json = serde_json::to_string(chunks)?;
-        std::fs::write(&path, json)?;
+        atomic_write(&path, &json)?;
         Ok(())
     }
 
@@ -129,7 +144,7 @@ impl JsonStore {
     pub fn save_fingerprints(&self, fingerprints: &HashMap<String, String>) -> Result<()> {
         let path = self.base_dir.join("fingerprints.json");
         let json = serde_json::to_string(fingerprints)?;
-        std::fs::write(&path, json)?;
+        atomic_write(&path, &json)?;
         *self.fingerprints_cache.borrow_mut() = Some(fingerprints.clone());
         Ok(())
     }
@@ -151,7 +166,7 @@ impl JsonStore {
     pub fn save_memories(&self, memories: &[MemoryEntry]) -> Result<()> {
         let path = self.base_dir.join("memories.json");
         let json = serde_json::to_string(memories)?;
-        std::fs::write(&path, json)?;
+        atomic_write(&path, &json)?;
         debug!("saved {} memories to index", memories.len());
         *self.memories_cache.borrow_mut() = Some(memories.to_vec());
         Ok(())
@@ -184,7 +199,7 @@ impl JsonStore {
     pub fn save_project_memories(&self, entries: &[ProjectMemoryEntry]) -> Result<()> {
         let path = self.project_memory_path();
         let json = serde_json::to_string_pretty(entries)?;
-        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+        atomic_write(&path, &json)?;
         debug!("saved {} project memory entries", entries.len());
         Ok(())
     }
@@ -251,5 +266,82 @@ impl JsonStore {
         self.update_project_memory(id, |e| {
             e.status = MemoryStatus::Archived;
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kungfu_types::memory::ProjectMemoryKind;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        let unique = format!(
+            "kungfu-store-test-{}-{}-{:p}",
+            tag,
+            std::process::id(),
+            &dir as *const _
+        );
+        dir.push(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn entry(id: &str, content: &str) -> ProjectMemoryEntry {
+        ProjectMemoryEntry {
+            id: id.to_string(),
+            kind: ProjectMemoryKind::Fact,
+            title: None,
+            content: content.to_string(),
+            tags: vec![],
+            related_files: vec![],
+            related_symbols: vec![],
+            pinned: false,
+            status: MemoryStatus::Active,
+            supersedes: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn atomic_write_round_trips_and_leaves_no_tmp() {
+        let dir = temp_dir("atomic");
+        let path = dir.join("data.json");
+        atomic_write(&path, "{\"k\":1}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"k\":1}");
+        // Overwrite, then confirm no stray .tmp siblings remain in the dir.
+        atomic_write(&path, "{\"k\":2}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"k\":2}");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp file left behind: {:?}",
+            leftovers
+        );
+    }
+
+    #[test]
+    fn project_memory_add_and_remove_persist() {
+        let index_dir = temp_dir("projmem").join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let store = JsonStore::new(&index_dir);
+
+        store
+            .add_project_memory(entry("mem_0001", "first"))
+            .unwrap();
+        store
+            .add_project_memory(entry("mem_0002", "second"))
+            .unwrap();
+        assert_eq!(store.load_project_memories().unwrap().len(), 2);
+
+        store.remove_project_memory("mem_0001").unwrap();
+        let left = store.load_project_memories().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, "mem_0002");
     }
 }
