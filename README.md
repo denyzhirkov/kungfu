@@ -304,6 +304,11 @@ max_file_bytes = 2097152   # skip files larger than this (2 MiB)
 
 [git]
 enabled = true
+
+[call_graph]
+enabled = true          # build Calls relations at all
+cross_file_only = true  # store only edges whose caller and callee are in different files
+max_caller_files = 25   # callee invoked from more distinct files is utility-noise; 0 disables
 ```
 
 ## Benchmarks

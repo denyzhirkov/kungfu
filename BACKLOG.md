@@ -40,24 +40,20 @@ Features that are planned or considered but not yet committed to implementation.
 
 ### Call Graph (Calls relations)
 
-**Status:** Paused — needs design rethink
+**Status:** Shipped with noise filtering (v2.5.25)
 
 **What:** Extract function/method calls from AST, resolve them to known symbols, store as `Calls` relations. Enables `callers`/`callees` queries and impact analysis.
 
-**Why paused:**
-- Generates massive relation counts on real projects (Go stdlib: 1M calls, home-assistant: 440K)
-- Most calls are noise (stdlib functions, common utilities like `push`, `len`, `unwrap`)
-- Without filtering, call graph pollutes the index instead of helping the agent save tokens
-- Ambiguous resolution: same function name in many files leads to false positives
+**Implemented filtering (precision over recall, all self-declared via `provenance`/`status`):**
+1. Per-language stop-list of ubiquitous std/utility callables (`kungfu-index/src/stoplist.rs`, single data table keyed by language-group bitmask). A query for a stop-listed name returns `status: "filtered_ubiquitous"` + a `search_text` hint, never a silent `[]`.
+2. Cross-file-only storage (default): same-file edges are not persisted. `[call_graph] cross_file_only = false` opts out.
+3. Frequency cutoff: a callee invoked from more than `max_caller_files` (default 25) distinct files is utility-noise; its incoming edges are dropped at relation-build time and the count is surfaced in index stats (`call_edges_filtered`).
+4. `[call_graph] enabled = false` turns the graph off entirely; callers/callees respond `status: "call_graph_disabled"`.
+5. Index schema versioning (`schema_version.json`, `INDEX_SCHEMA_VERSION`): outdated indexes upgrade via automatic full reindex.
 
-**What needs to happen before resuming:**
-1. Filter out stdlib/common function calls (need language-specific stop lists)
-2. Only store calls that cross file boundaries (same-file calls are trivially discoverable)
-3. Limit to unique/specific function names (skip names shorter than 4 chars or appearing in >N files)
-4. Benchmark: measure how often callers/callees actually improve context retrieval vs adding noise
-5. Consider making it opt-in via config
+On kungfu itself the filters halve the graph: 989 → 482 call edges, relations.json 137 KB → 71 KB.
 
-**Prototype code:** Removed in the commit that added this entry. See git history for the implementation (RawCall extraction in kungfu-parse, build_call_relations in indexer).
+**Still open:** benchmark on the giant repos below (Go stdlib etc.) to validate the cutoff default at that scale.
 
 **Benchmark data (before removal):**
 

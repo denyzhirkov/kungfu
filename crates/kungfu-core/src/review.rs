@@ -218,6 +218,10 @@ impl KungfuService {
             entries,
             test_files,
             risk,
+            provenance: format!(
+                "reverse deps over imports + call edges; call edges: {}",
+                self.call_graph_provenance()
+            ),
         })
     }
 
@@ -329,6 +333,10 @@ impl KungfuService {
                 entries: Vec::new(),
                 test_files: Vec::new(),
                 risk: "NONE".to_string(),
+                provenance: format!(
+                    "reverse deps over imports + call edges; call edges: {}",
+                    self.call_graph_provenance()
+                ),
             });
         }
 
@@ -376,6 +384,10 @@ impl KungfuService {
             entries,
             test_files,
             risk: risk.to_string(),
+            provenance: format!(
+                "reverse deps over imports + call edges; call edges: {}",
+                self.call_graph_provenance()
+            ),
         })
     }
 

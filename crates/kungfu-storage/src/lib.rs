@@ -16,6 +16,16 @@ mod process_cache;
 mod project_memory;
 pub use project_memory::{AbsorbReport, MemoryMeta, ProjectMemoryStore};
 
+/// Version of the persisted index semantics. Bump whenever what gets stored
+/// changes shape or meaning (e.g. which relations are emitted), so existing
+/// indexes are rebuilt instead of silently mixing old and new data.
+/// Re-index is the migration path.
+///
+/// History:
+/// - 2: call-graph noise filtering — cross-file-only Calls edges, per-language
+///   ubiquitous-callee stop-list, frequency cutoff (v2.5.25).
+pub const INDEX_SCHEMA_VERSION: u32 = 2;
+
 /// Atomically replace `path` with `contents`: write a sibling temp file, then
 /// rename it over the target. Rename is atomic on the same filesystem, so a
 /// crash mid-write leaves the old file intact instead of a truncated one — the
@@ -228,6 +238,22 @@ impl JsonStore {
             })?;
         *self.fingerprints_cache.borrow_mut() = Some(Arc::clone(&data));
         Ok(data.as_ref().clone())
+    }
+
+    /// Persist the current index schema version. Called at the end of every
+    /// indexing run so a freshly written index is always self-describing.
+    pub fn save_schema_version(&self) -> Result<()> {
+        let path = self.base_dir.join("schema_version.json");
+        atomic_write(&path, &INDEX_SCHEMA_VERSION.to_string())
+    }
+
+    /// Schema version of the on-disk index. `None` means the index predates
+    /// schema versioning (or the marker is unreadable) — treat as outdated.
+    pub fn load_schema_version(&self) -> Option<u32> {
+        let path = self.base_dir.join("schema_version.json");
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
     }
 
     pub fn save_memories(&self, memories: &[MemoryEntry]) -> Result<()> {

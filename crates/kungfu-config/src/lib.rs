@@ -32,6 +32,9 @@ pub struct KungfuConfig {
 
     #[serde(default)]
     pub git: GitConfig,
+
+    #[serde(default)]
+    pub call_graph: CallGraphConfig,
 }
 
 fn default_project_name() -> String {
@@ -179,6 +182,39 @@ impl Default for GitConfig {
     }
 }
 
+/// Noise controls for the AST call graph. Real projects produce call-relation
+/// counts that dwarf their symbol counts unless edges are filtered at build time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallGraphConfig {
+    /// Build `Calls` relations at all. When off, callers/callees degrade honestly.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Store only edges where caller and callee live in different files.
+    /// Same-file calls are cheap to recompute and rarely what an agent asks for.
+    #[serde(default = "default_true")]
+    pub cross_file_only: bool,
+
+    /// A callee invoked from more than this many distinct files is treated as
+    /// utility-noise and its incoming edges are dropped. 0 disables the cutoff.
+    #[serde(default = "default_max_caller_files")]
+    pub max_caller_files: usize,
+}
+
+fn default_max_caller_files() -> usize {
+    25
+}
+
+impl Default for CallGraphConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cross_file_only: true,
+            max_caller_files: default_max_caller_files(),
+        }
+    }
+}
+
 impl Default for KungfuConfig {
     fn default() -> Self {
         Self {
@@ -191,6 +227,7 @@ impl Default for KungfuConfig {
             search: SearchConfig::default(),
             index: IndexConfig::default(),
             git: GitConfig::default(),
+            call_graph: CallGraphConfig::default(),
         }
     }
 }
