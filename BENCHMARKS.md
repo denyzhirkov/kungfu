@@ -54,7 +54,9 @@ Quality is tracked by a 50-case suite against pinned checkouts of these repos
 (`research/cases/`, commits pinned in `research/bench-repos.lock.json`; run it with
 `scripts/eval.sh && scripts/score.sh`). Categories cover concept-recall, identifier
 mismatch, over-selection, cross-file context, debugging, and orientation. The current
-recorded baseline is `research/baseline-score-v3.json`. Self-targeting cases drift as this
+recorded baseline is `research/baseline-score-v4.json` (v2.6.0: aggregate 53.03, 37/50
+passing — up from 46.41 / 32 before the v2.6.0 retrieval work; vector-layer cases require
+`kungfu embeddings build` in the target repos first). Self-targeting cases drift as this
 codebase evolves — A/B comparisons always re-run the BEFORE side at HEAD.
 
 ## What's measured elsewhere
