@@ -1,0 +1,16 @@
+{
+  "name": "kungfu",
+  "owner": {
+    "name": "Denis Zhirkov"
+  },
+  "description": "Marketplace for the kungfu context retrieval engine plugin",
+  "plugins": [
+    {
+      "name": "kungfu",
+      "source": "./plugin",
+      "description": "Context retrieval and distillation engine for coding agents: MCP server, always-on routing rules, and an auto-reindex hook — zero manual setup",
+      "category": "productivity",
+      "tags": ["context", "codebase", "indexing", "search", "mcp", "token-optimization"]
+    }
+  ]
+}

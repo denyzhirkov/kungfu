@@ -1,6 +1,8 @@
 {
-  "kungfu": {
-    "command": "kungfu",
-    "args": ["mcp"]
+  "mcpServers": {
+    "kungfu": {
+      "command": "kungfu",
+      "args": ["mcp"]
+    }
   }
 }
