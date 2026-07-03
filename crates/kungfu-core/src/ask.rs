@@ -182,18 +182,30 @@ impl KungfuService {
                                 if cos < w.vector_min_score {
                                     continue;
                                 }
+                                let rank_decay = 1.0 - (rank as f64 * 0.08).min(0.4);
+                                let vector_score = w.vector_score * rank_decay;
                                 if seen_ids.contains(&id) {
+                                    // Already found by name search — a symbol must not
+                                    // rank *lower* just because two strategies found it.
+                                    // Keep the stronger of the two scores.
+                                    if let Some(existing) = scored_symbols
+                                        .iter_mut()
+                                        .find(|s| s.symbol.id == id && s.score < vector_score)
+                                    {
+                                        existing.score = vector_score;
+                                        existing.reason =
+                                            format!("vector match ({:.2} cosine)", cos);
+                                    }
                                     continue;
                                 }
                                 let sym = match symbols_by_id.get(id.as_str()) {
                                     Some(s) => *s,
                                     None => continue,
                                 };
-                                let rank_decay = 1.0 - (rank as f64 * 0.08).min(0.4);
                                 seen_ids.insert(id);
                                 scored_symbols.push(ScoredSymbol {
                                     symbol: sym.clone(),
-                                    score: w.vector_score * rank_decay,
+                                    score: vector_score,
                                     reason: format!("vector match ({:.2} cosine)", cos),
                                 });
                                 added += 1;
