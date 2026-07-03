@@ -1,5 +1,8 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod agent_init;
+pub mod templates;
+
 use anyhow::{bail, Context, Result};
 use kungfu_config::KungfuConfig;
 use kungfu_types::project::ProjectMeta;
