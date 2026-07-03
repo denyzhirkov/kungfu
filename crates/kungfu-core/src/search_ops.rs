@@ -6,6 +6,26 @@ use kungfu_types::relation::RelationKind;
 use kungfu_types::symbol::Symbol;
 use std::collections::{HashMap, HashSet};
 
+/// Why an empty callers/callees result is empty. Adapters map each cause to a
+/// distinct `status` + hint, so a silent `[]` never masquerades as ground truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmptyCallGraphCause {
+    /// `[call_graph] enabled = false` — no `Calls` relations are stored at all.
+    Disabled,
+    /// The name is on the ubiquitous-callables stop-list; edges to it are never stored.
+    FilteredUbiquitous,
+    /// The index has no `Calls` relations for this project.
+    NotIndexed,
+    /// The name's incoming edges were built, then dropped by the frequency
+    /// cutoff (`call_graph.max_caller_files`) — recorded in `call_graph_meta.json`.
+    FrequencyFiltered { max_caller_files: usize },
+    /// Several callable definitions share the name — ambiguous callees never
+    /// get edges (precision over completeness), so callers is empty by design.
+    AmbiguousTarget { definitions: usize },
+    /// The graph exists and none of the above applies — genuinely no edges.
+    NoEdges,
+}
+
 impl KungfuService {
     /// Whether the index contains any call relations at all.
     ///
@@ -55,6 +75,79 @@ impl KungfuService {
             ));
         }
         parts.join("; ")
+    }
+
+    /// Diagnose why `callers(name)` came back empty, from data already in the
+    /// process cache (symbols + relations) plus the small `call_graph_meta.json`
+    /// sidecar. Order matters: exact recorded evidence (the frequency cutoff
+    /// fired for this name) beats graph-level checks, and the ambiguity
+    /// heuristic (many same-name definitions) beats a plain `no_edges`. A
+    /// missing sidecar (index written by an older binary) simply never yields
+    /// `FrequencyFiltered`.
+    ///
+    /// A name that is not in the index at all falls through to `NoEdges` —
+    /// unchanged pre-existing behavior for not-found symbols.
+    pub fn diagnose_empty_callers(&self, name: &str) -> Result<EmptyCallGraphCause> {
+        if !self.call_graph_enabled() {
+            return Ok(EmptyCallGraphCause::Disabled);
+        }
+        if self.is_ubiquitous_callee(name) {
+            return Ok(EmptyCallGraphCause::FilteredUbiquitous);
+        }
+        // Exact recorded evidence outranks the graph-emptiness check: the
+        // cutoff can drop every edge of a small project, and "the cutoff fired
+        // for this name" is still the honest answer there.
+        if self
+            .store()
+            .load_call_graph_meta()
+            .frequency_dropped_callees
+            .iter()
+            .any(|n| n == name)
+        {
+            return Ok(EmptyCallGraphCause::FrequencyFiltered {
+                max_caller_files: self.project.config.call_graph.max_caller_files,
+            });
+        }
+        if !self.has_call_graph()? {
+            return Ok(EmptyCallGraphCause::NotIndexed);
+        }
+        let definitions = self.callable_definition_count(name)?;
+        if definitions > 1 {
+            return Ok(EmptyCallGraphCause::AmbiguousTarget { definitions });
+        }
+        Ok(EmptyCallGraphCause::NoEdges)
+    }
+
+    /// Diagnose why `callees(name)` came back empty. The callers-side causes
+    /// (ambiguity, frequency cutoff) describe edges INTO a name; they cannot
+    /// empty an outgoing-edge query — `callees` unions the outgoing edges of
+    /// every same-name source symbol — so they are deliberately not reported
+    /// here: only causes that can actually produce the emptiness are named.
+    pub fn diagnose_empty_callees(&self, name: &str) -> Result<EmptyCallGraphCause> {
+        if !self.call_graph_enabled() {
+            return Ok(EmptyCallGraphCause::Disabled);
+        }
+        if self.is_ubiquitous_callee(name) {
+            return Ok(EmptyCallGraphCause::FilteredUbiquitous);
+        }
+        if !self.has_call_graph()? {
+            return Ok(EmptyCallGraphCause::NotIndexed);
+        }
+        Ok(EmptyCallGraphCause::NoEdges)
+    }
+
+    /// How many callable (function/method) definitions share this name —
+    /// the same population the call-graph builder resolves callees against.
+    fn callable_definition_count(&self, name: &str) -> Result<usize> {
+        use kungfu_types::symbol::SymbolKind;
+        Ok(self
+            .search()
+            .get_all_symbols()?
+            .iter()
+            .filter(|s| {
+                s.name == name && matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
+            })
+            .count())
     }
 
     /// Find all symbols that call the given symbol (callers / "who calls this?").

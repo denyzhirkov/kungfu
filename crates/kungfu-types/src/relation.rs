@@ -41,3 +41,16 @@ pub struct Relation {
     pub kind: RelationKind,
     pub weight: f32,
 }
+
+/// Sidecar metadata about call-graph noise filtering, written at relation-build
+/// time (`call_graph_meta.json`). Additive shard: older binaries ignore it, and
+/// when it is missing, empty-result diagnostics degrade to plain `no_edges`
+/// instead of guessing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CallGraphMeta {
+    /// Names of callees whose incoming call edges were dropped by the frequency
+    /// cutoff (`call_graph.max_caller_files`). Sorted and deduplicated; bounded
+    /// by the number of distinct dropped callees, so the shard stays small.
+    #[serde(default)]
+    pub frequency_dropped_callees: Vec<String>,
+}

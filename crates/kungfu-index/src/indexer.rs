@@ -5,7 +5,7 @@ use kungfu_parse::{CommentKind, Parser, RawCall, RawComment, RawImport};
 use kungfu_storage::JsonStore;
 use kungfu_types::file::{FileEntry, Language};
 use kungfu_types::memory::{MemoryEntry, MemoryKind};
-use kungfu_types::relation::{Relation, RelationKind};
+use kungfu_types::relation::{CallGraphMeta, Relation, RelationKind};
 use kungfu_types::symbol::Symbol;
 use std::collections::HashMap;
 use std::path::Path;
@@ -180,7 +180,7 @@ impl<'a> Indexer<'a> {
             &all_symbols,
             &all_calls,
         ));
-        let call_edges_filtered =
+        let (call_edges_filtered, dropped_callees) =
             Self::filter_call_graph_noise(&self.config.call_graph, &mut relations, &all_symbols);
         let mut memories = Self::build_memories(&all_comments);
         let doc_memories = self.scan_docs();
@@ -198,6 +198,7 @@ impl<'a> Indexer<'a> {
         self.store.save_files(&files)?;
         self.store.save_symbols(&all_symbols)?;
         self.store.save_relations(&relations)?;
+        self.persist_call_graph_meta(dropped_callees, false)?;
         self.store.save_fingerprints(&fingerprints)?;
         self.store.save_memories(&memories)?;
         self.store.save_schema_version()?;
@@ -357,8 +358,9 @@ impl<'a> Indexer<'a> {
         relations.extend(fresh);
         // Post-merge so the noise rules also govern edges kept from unchanged files
         // (a config change takes effect without waiting for a full reindex).
-        stats.call_edges_filtered =
+        let (edges_filtered, dropped_callees) =
             Self::filter_call_graph_noise(&self.config.call_graph, &mut relations, &new_symbols);
+        stats.call_edges_filtered = edges_filtered;
 
         // Merge memories the same way: keep entries from unchanged still-existing files,
         // rebuild from re-parsed ones. Changed doc files are re-parsed explicitly — doc
@@ -378,6 +380,7 @@ impl<'a> Indexer<'a> {
         self.store.save_files(&new_files)?;
         self.store.save_symbols(&new_symbols)?;
         self.store.save_relations(&relations)?;
+        self.persist_call_graph_meta(dropped_callees, true)?;
         self.store.save_fingerprints(&new_fingerprints)?;
         self.store.save_memories(&memories)?;
         self.store.save_schema_version()?;
@@ -502,8 +505,9 @@ impl<'a> Indexer<'a> {
             &all_calls,
         ));
         relations.extend(new_relations);
-        stats.call_edges_filtered =
+        let (edges_filtered, dropped_callees) =
             Self::filter_call_graph_noise(&self.config.call_graph, &mut relations, &new_symbols);
+        stats.call_edges_filtered = edges_filtered;
 
         // Merge memories: keep old for unchanged, add new for changed
         let old_memories = self.store.load_memories().unwrap_or_default();
@@ -521,6 +525,7 @@ impl<'a> Indexer<'a> {
         self.store.save_files(&new_files)?;
         self.store.save_symbols(&new_symbols)?;
         self.store.save_relations(&relations)?;
+        self.persist_call_graph_meta(dropped_callees, true)?;
         self.store.save_fingerprints(&new_fingerprints)?;
         self.store.save_memories(&memories)?;
         self.store.save_schema_version()?;
@@ -893,15 +898,17 @@ impl<'a> Indexer<'a> {
     ///   files is utility-noise: drop its incoming edges.
     ///
     /// Returns how many edges the frequency cutoff dropped (surfaced in
-    /// `IndexStats::call_edges_filtered`).
+    /// `IndexStats::call_edges_filtered`) plus the sorted, deduplicated names
+    /// of the dropped callees — persisted via [`Self::persist_call_graph_meta`]
+    /// so an empty callers result can honestly say the cutoff fired.
     fn filter_call_graph_noise(
         cfg: &kungfu_config::CallGraphConfig,
         relations: &mut Vec<Relation>,
         symbols: &[Symbol],
-    ) -> usize {
+    ) -> (usize, Vec<String>) {
         if !cfg.enabled {
             relations.retain(|r| r.kind != RelationKind::Calls);
-            return 0;
+            return (0, Vec::new());
         }
 
         let file_of: HashMap<&str, &str> = symbols
@@ -932,7 +939,7 @@ impl<'a> Indexer<'a> {
         }
 
         if cfg.max_caller_files == 0 {
-            return 0;
+            return (0, Vec::new());
         }
 
         let mut caller_files: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
@@ -953,8 +960,17 @@ impl<'a> Indexer<'a> {
             .map(|(id, _)| (*id).to_string())
             .collect();
         if noisy.is_empty() {
-            return 0;
+            return (0, Vec::new());
         }
+
+        let name_of: HashMap<&str, &str> = symbols
+            .iter()
+            .map(|s| (s.id.as_str(), s.name.as_str()))
+            .collect();
+        let dropped_names: std::collections::BTreeSet<String> = noisy
+            .iter()
+            .filter_map(|id| name_of.get(id.as_str()).map(|n| (*n).to_string()))
+            .collect();
 
         let before = relations.len();
         relations
@@ -966,7 +982,26 @@ impl<'a> Indexer<'a> {
             noisy.len(),
             cfg.max_caller_files
         );
-        dropped
+        (dropped, dropped_names.into_iter().collect())
+    }
+
+    /// Persist the names of frequency-dropped callees (`call_graph_meta.json`).
+    ///
+    /// Dropped edges are never written to disk, so an incremental run recounts
+    /// only the surviving + freshly rebuilt edges and cannot re-detect callees
+    /// dropped in earlier runs. Incremental paths therefore merge with the
+    /// existing shard (`merge = true`); a full index recounts everything and
+    /// overwrites, which is also how a stale name ages out after a refactor.
+    fn persist_call_graph_meta(&self, dropped_names: Vec<String>, merge: bool) -> Result<()> {
+        let cfg = &self.config.call_graph;
+        let cutoff_active = cfg.enabled && cfg.max_caller_files > 0;
+        let mut names: std::collections::BTreeSet<String> = dropped_names.into_iter().collect();
+        if merge && cutoff_active {
+            names.extend(self.store.load_call_graph_meta().frequency_dropped_callees);
+        }
+        self.store.save_call_graph_meta(&CallGraphMeta {
+            frequency_dropped_callees: names.into_iter().collect(),
+        })
     }
 
     /// Scan markdown documentation files and parse them into memories.
@@ -1977,6 +2012,13 @@ mod tests {
             3
         );
         assert_eq!(stats.call_edges_filtered, 0);
+        assert!(
+            store
+                .load_call_graph_meta()
+                .frequency_dropped_callees
+                .is_empty(),
+            "nothing dropped — the meta shard must record no names"
+        );
 
         // Cutoff below the fan-in: the callee is utility-noise, edges dropped.
         let mut config = KungfuConfig::default();
@@ -1992,6 +2034,23 @@ mod tests {
             "callee invoked from more files than max_caller_files must lose its edges"
         );
         assert_eq!(stats.call_edges_filtered, 3);
+        assert_eq!(
+            store.load_call_graph_meta().frequency_dropped_callees,
+            vec!["tiny_helper".to_string()],
+            "the dropped callee's name must be recorded in call_graph_meta.json"
+        );
+
+        // Incremental run: dropped edges are gone from disk, so the recount
+        // cannot re-detect the callee — the merged shard must keep the name.
+        let mut config = KungfuConfig::default();
+        config.call_graph.max_caller_files = 2;
+        let mut indexer = Indexer::new(&root, config, &store);
+        indexer.index_incremental().unwrap();
+        assert_eq!(
+            store.load_call_graph_meta().frequency_dropped_callees,
+            vec!["tiny_helper".to_string()],
+            "incremental runs must not lose previously recorded dropped callees"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
