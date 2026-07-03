@@ -163,9 +163,32 @@ Add to your agent config (Claude Code, Cursor, etc.):
 
 While connected, the server pushes `notifications/resources/updated` (URI `kungfu://index`) whenever the index changes on disk — subscribing agents can invalidate stale assumptions.
 
-## Agent rules
+## Claude Code integration
 
-Add to `CLAUDE.md` or the system prompt. Keep it about *policy and routing* — the agent already sees tool descriptions from MCP. The block below is a working minimum; copy it verbatim.
+Two turnkey paths — either one activates the MCP server, the always-on routing rules, and the auto-reindex hook with zero manual steps. Both need the `kungfu` binary on `PATH` (see [Install](#install)).
+
+**Plugin — install from the marketplace** (one time, applies everywhere):
+
+```text
+/plugin marketplace add denyzhirkov/kungfu
+/plugin install kungfu@kungfu
+```
+
+The plugin bundles the MCP server (`.mcp.json`), injects the routing rules into context at session start (`SessionStart` hook), and reindexes every file the agent edits (`PostToolUse` hook).
+
+**`kungfu init --agent claude`** (per project):
+
+```sh
+kungfu init --agent claude
+```
+
+Writes the rules block into the project `CLAUDE.md` (versioned markers — a re-run replaces the block in place), registers the MCP server in `.mcp.json`, and adds the auto-reindex hook to `.claude/settings.json`. Idempotent; existing files are merged, not overwritten.
+
+Pick one path; enabling both is harmless but duplicates the rules in context.
+
+### Manual setup (advanced / other agents)
+
+Add the block below to `CLAUDE.md` or the system prompt. Keep it about *policy and routing* — the agent already sees tool descriptions from MCP. It is a working minimum and the source template for both turnkey paths above; copy it verbatim.
 
 ```markdown
 ## kungfu — context retrieval (use BEFORE Read / grep / find)
@@ -197,7 +220,7 @@ Skip kungfu only for: a one-line edit in a file already open this session; a fil
 exact path. Otherwise, if you reach for Read / grep / find — stop and route above.
 ```
 
-### Auto-reindex on edit (Claude Code hook)
+#### Auto-reindex on edit (Claude Code hook)
 
 Wire reindex into the harness so every `Edit`/`Write` triggers a targeted reindex of that file (~10 ms) — no reliance on the agent remembering. Add to `.claude/settings.json`:
 
@@ -219,7 +242,7 @@ Wire reindex into the harness so every `Edit`/`Write` triggers a targeted reinde
 
 The lazy staleness check stays as a safety net for files changed outside the agent (git pull, formatters, codegen).
 
-### Token savings (open-source projects)
+## Token savings (open-source projects)
 
 kungfu vs. naive grep + read, tokens to answer the same query:
 
