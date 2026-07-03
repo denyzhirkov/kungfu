@@ -1,5 +1,12 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod expand;
+
+pub use expand::{
+    split_identifier, stem_variants, ExpandedQuery, ExpandedToken, STRENGTH_EXACT, STRENGTH_STEM,
+    STRENGTH_SYNONYM,
+};
+
 use anyhow::Result;
 use kungfu_storage::JsonStore;
 use kungfu_types::file::FileEntry;
@@ -27,22 +34,21 @@ impl<'a> SearchEngine<'a> {
         let query_lower = query.to_lowercase();
         let top_k = budget.top_k();
 
-        // Split multi-word queries for broader matching
+        // Split multi-word queries (and identifier-shaped words) for broader matching
         let words: Vec<&str> = query_lower.split_whitespace().collect();
+        let eq = ExpandedQuery::new(&words);
 
+        let scores = score_all_symbols(&symbols, &eq);
         let mut results: Vec<SearchResult<Symbol>> = symbols
             .iter()
-            .filter_map(|s| {
-                let score = if words.len() > 1 {
-                    score_symbol_multi_word(s, &words)
-                } else {
-                    let mut sc = score_symbol_match(&s.name, &query_lower);
+            .zip(scores)
+            .filter_map(|(s, mut score)| {
+                // A full-name match always wins, regardless of which path scored it
+                // (e.g. query "build_context_packet" takes the multi-token path).
+                if s.name.to_lowercase() == query_lower {
                     // Exact case bonus: "DataFrame" matches "DataFrame" better than "dataFrame"
-                    if sc >= 0.99 && s.name == query {
-                        sc = 1.01;
-                    }
-                    sc
-                };
+                    score = if s.name == query { 1.01 } else { 1.0 };
+                }
                 if score > 0.0 {
                     Some(SearchResult {
                         item: s.clone(),
@@ -95,16 +101,13 @@ impl<'a> SearchEngine<'a> {
         let query_lower = query.to_lowercase();
         let top_k = budget.top_k();
         let words: Vec<&str> = query_lower.split_whitespace().collect();
+        let eq = ExpandedQuery::new(&words);
 
         // Build a map of file_id -> symbol relevance
         let mut file_symbol_scores: std::collections::HashMap<String, f64> =
             std::collections::HashMap::new();
-        for sym in symbols.iter() {
-            let sym_score = if words.len() > 1 {
-                score_symbol_multi_word(sym, &words)
-            } else {
-                score_symbol_match(&sym.name, &query_lower)
-            };
+        let scores = score_all_symbols(&symbols, &eq);
+        for (sym, sym_score) in symbols.iter().zip(scores) {
             if sym_score > 0.0 {
                 let entry = file_symbol_scores.entry(sym.file_id.clone()).or_insert(0.0);
                 if sym_score > *entry {
@@ -116,7 +119,7 @@ impl<'a> SearchEngine<'a> {
         let mut results: Vec<SearchResult<FileEntry>> = files
             .iter()
             .filter_map(|f| {
-                let path_score = score_path_match(&f.path, &query_lower, &words);
+                let path_score = score_path_match(&f.path, &query_lower, &eq);
                 let sym_score = file_symbol_scores.get(&f.id).copied().unwrap_or(0.0) * 0.8;
                 let combined = path_score.max(sym_score);
                 if combined > 0.0 {
@@ -358,7 +361,7 @@ fn score_symbol_match(name: &str, query: &str) -> f64 {
     }
 
     // Stem match: "ranking" matches "rank"
-    if let Some(stem) = simple_stem(query) {
+    for stem in stem_variants(query) {
         if name_lower.contains(&stem) {
             let coverage = stem.len() as f64 / name_lower.len() as f64;
             return 0.35 + coverage * 0.3;
@@ -371,13 +374,15 @@ fn score_symbol_match(name: &str, query: &str) -> f64 {
         }
     }
     // Reverse: query "rank" matches name "ranking"
-    if let Some(stem) = simple_stem(&name_lower) {
-        if stem == *query {
-            return 0.55;
-        }
-        if stem.contains(query) || query.contains(&stem) {
-            return 0.4;
-        }
+    let name_stems = stem_variants(&name_lower);
+    if name_stems.iter().any(|s| *s == *query) {
+        return 0.55;
+    }
+    if name_stems
+        .iter()
+        .any(|s| s.contains(query) || query.contains(s.as_str()))
+    {
+        return 0.4;
     }
 
     // Fuzzy: check if all query chars appear in order — only for longer queries
@@ -399,9 +404,44 @@ fn score_symbol_match(name: &str, query: &str) -> f64 {
     0.0
 }
 
-/// Score a symbol against multiple query words (e.g. "refresh token").
-/// Supports exact phrase matching when query contains the full phrase in symbol name/signature.
-fn score_symbol_multi_word(sym: &Symbol, words: &[&str]) -> f64 {
+/// Score every symbol against the expanded query. Multi-token queries use the
+/// two-pass pipeline: analyze all symbols, derive per-token IDF weights, then
+/// combine — so discriminative tokens dominate ubiquitous ones. Single-token
+/// queries keep the legacy scorer plus the synonym fallback.
+fn score_all_symbols(symbols: &[Symbol], eq: &ExpandedQuery) -> Vec<f64> {
+    if eq.tokens.len() > 1 {
+        let analyses: Vec<Option<SymbolTokenMatch>> = symbols
+            .iter()
+            .map(|s| analyze_symbol_multi_word(s, eq))
+            .collect();
+        let idf = token_idf_weights(&analyses, eq.tokens.len());
+        analyses
+            .iter()
+            .map(|a| a.as_ref().map_or(0.0, |m| combine_multi_word(m, &idf)))
+            .collect()
+    } else {
+        symbols
+            .iter()
+            .map(|s| score_symbol_single(&s.name, eq))
+            .collect()
+    }
+}
+
+/// Per-symbol analysis of a multi-token query match, produced in a first pass
+/// so token weights (IDF) can be computed before final scores are combined.
+struct SymbolTokenMatch {
+    /// Early-exit phrase score (0.95/0.98), or 0.0 when no phrase hit.
+    phrase: f64,
+    /// Per-token match strengths. Positive = matched in the symbol name,
+    /// negative = matched only in signature/path (weaker), 0 = no match.
+    strengths: Vec<f64>,
+    /// Name-coverage + adjacency bonus (applies only to name hits).
+    bonus: f64,
+}
+
+/// Analyze how a symbol matches an expanded multi-token query.
+/// Returns `None` when nothing matches at all.
+fn analyze_symbol_multi_word(sym: &Symbol, eq: &ExpandedQuery) -> Option<SymbolTokenMatch> {
     let name_lower = sym.name.to_lowercase();
     let sig_lower = sym
         .signature
@@ -410,12 +450,28 @@ fn score_symbol_multi_word(sym: &Symbol, words: &[&str]) -> f64 {
         .unwrap_or_default();
     let path_lower = sym.path.to_lowercase();
 
+    let words = eq.exact_words();
+
     // Exact phrase bonus: join words back and check if the phrase appears as-is
     let phrase = words.join(" ");
     let phrase_underscore = words.join("_");
-    let phrase_camel = words_to_camel(words);
+    let phrase_camel_lower = words_to_camel(&words).to_lowercase();
+    let phrase_joined = words.concat();
 
-    let phrase_camel_lower = phrase_camel.to_lowercase();
+    // Full-name phrase match ("use effect" -> useEffect) beats mere containment
+    // ("use effect" -> useInsertionEffect).
+    if name_lower == phrase
+        || name_lower == phrase_underscore
+        || name_lower == phrase_camel_lower
+        || name_lower == phrase_joined
+    {
+        return Some(SymbolTokenMatch {
+            phrase: 0.98,
+            strengths: vec![STRENGTH_EXACT; eq.tokens.len()],
+            bonus: 0.0,
+        });
+    }
+
     let has_exact_phrase = name_lower.contains(&phrase)
         || name_lower.contains(&phrase_underscore)
         || name_lower.contains(&phrase_camel_lower)
@@ -423,41 +479,148 @@ fn score_symbol_multi_word(sym: &Symbol, words: &[&str]) -> f64 {
         || sig_lower.contains(&phrase_underscore);
 
     if has_exact_phrase {
-        return 0.95;
+        return Some(SymbolTokenMatch {
+            phrase: 0.95,
+            strengths: vec![STRENGTH_EXACT; eq.tokens.len()],
+            bonus: 0.0,
+        });
     }
 
-    let mut matched = 0;
-    for word in words {
-        let direct =
-            name_lower.contains(word) || sig_lower.contains(word) || path_lower.contains(word);
-        let via_stem = !direct
-            && (simple_stem(word).is_some_and(|s| {
-                name_lower.contains(&s) || sig_lower.contains(&s) || path_lower.contains(&s)
-            }) || short_root(word).is_some_and(|r| {
-                name_lower.contains(&r) || sig_lower.contains(&r) || path_lower.contains(&r)
-            }));
-        if direct || via_stem {
-            matched += 1;
+    let name_words = split_identifier(&sym.name);
+    let name_word_stems: Vec<Vec<String>> = name_words.iter().map(|w| stem_variants(w)).collect();
+
+    let mut strengths = vec![0.0f64; eq.tokens.len()];
+    let mut any = false;
+    let mut name_hits = 0usize;
+    for (i, tok) in eq.tokens.iter().enumerate() {
+        let ns = tok.match_in_name(&name_lower, &name_words, &name_word_stems);
+        if ns > 0.0 {
+            strengths[i] = ns;
+            name_hits += 1;
+            any = true;
+            continue;
+        }
+        let ts = tok
+            .match_in_text(&sig_lower)
+            .max(tok.match_in_text(&path_lower));
+        if ts > 0.0 {
+            strengths[i] = -ts;
+            any = true;
         }
     }
 
-    if matched == 0 {
+    if !any {
+        return None;
+    }
+
+    let mut bonus = 0.0;
+    if name_hits > 0 && !name_words.is_empty() {
+        // Name-coverage bonus: reward names fully explained by the query
+        // ("useEffect" over "commitHookEffectList" for query "use effect").
+        let covered = name_words
+            .iter()
+            .filter(|w| {
+                eq.tokens
+                    .iter()
+                    .any(|t| t.exact == **w || w.contains(&t.exact))
+            })
+            .count();
+        bonus += 0.04 * (covered as f64 / name_words.len() as f64);
+
+        // Adjacency bonus: consecutive query tokens joined in the name
+        // ("auto configuration" inside "AutoConfigurationImportSelector",
+        // "ask context" inside "ask_context_with_weights").
+        for pair in words.windows(2) {
+            if name_lower.contains(&pair.concat()) || name_lower.contains(&pair.join("_")) {
+                bonus += 0.03;
+                break;
+            }
+        }
+    }
+
+    Some(SymbolTokenMatch {
+        phrase: 0.0,
+        strengths,
+        bonus,
+    })
+}
+
+/// Per-token IDF weights from document frequencies over the analyzed symbols.
+/// Rare (discriminative) tokens weigh more than ubiquitous ones, so
+/// "ws middleware" ranks WebSocketMiddleware above the thousands of
+/// *ConnectionMiddleware symbols that merely share common vocabulary.
+fn token_idf_weights(analyses: &[Option<SymbolTokenMatch>], token_count: usize) -> Vec<f64> {
+    let mut df = vec![0usize; token_count];
+    let mut n = 0usize;
+    for a in analyses.iter().flatten() {
+        n += 1;
+        for (j, s) in a.strengths.iter().enumerate() {
+            if *s != 0.0 {
+                df[j] += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return vec![1.0; token_count];
+    }
+    df.iter()
+        .map(|d| (1.0 + n as f64 / (1 + d) as f64).ln())
+        .collect()
+}
+
+/// Combine a per-symbol analysis with token IDF weights into a final score.
+/// Weighted coverage keeps the historical output range: full name coverage
+/// -> ~0.9, signature/path-only coverage -> ~0.6, phrase hits 0.95/0.98.
+fn combine_multi_word(m: &SymbolTokenMatch, idf: &[f64]) -> f64 {
+    if m.phrase > 0.0 {
+        return m.phrase;
+    }
+    let denom: f64 = idf.iter().sum();
+    if denom <= 0.0 {
         return 0.0;
     }
-
-    let ratio = matched as f64 / words.len() as f64;
-
-    // Boost if name directly matches (including via stem)
-    let name_matches = words.iter().any(|w| {
-        name_lower.contains(w)
-            || simple_stem(w).is_some_and(|s| name_lower.contains(&s))
-            || short_root(w).is_some_and(|r| name_lower.contains(&r))
-    });
-    if name_matches {
-        ratio * 0.9
+    let mut weighted = 0.0f64;
+    let mut name_hit = false;
+    for (s, w) in m.strengths.iter().zip(idf) {
+        if *s > 0.0 {
+            name_hit = true;
+        }
+        weighted += s.abs() * w;
+    }
+    let ratio = weighted / denom;
+    let score = if name_hit {
+        ratio * 0.9 + m.bonus
     } else {
         ratio * 0.6
+    };
+    score.min(0.94)
+}
+
+/// Score a symbol against an expanded multi-token query with uniform token
+/// weights. The search paths use the two-pass analyze/IDF/combine pipeline;
+/// this direct form pins the scoring contract in unit tests.
+#[cfg(test)]
+fn score_symbol_multi_word(sym: &Symbol, eq: &ExpandedQuery) -> f64 {
+    match analyze_symbol_multi_word(sym, eq) {
+        Some(m) => combine_multi_word(&m, &vec![1.0; eq.tokens.len()]),
+        None => 0.0,
     }
+}
+
+/// Single-token scoring: legacy prefix/substring/stem/fuzzy matching first,
+/// then the synonym/abbreviation table as a penalized fallback tier
+/// (exact vocabulary always ranks above expanded vocabulary).
+fn score_symbol_single(name: &str, eq: &ExpandedQuery) -> f64 {
+    let Some(tok) = eq.tokens.first() else {
+        return 0.0;
+    };
+    let base = score_symbol_match(name, &tok.exact);
+    if base > 0.0 {
+        return base;
+    }
+    let name_lower = name.to_lowercase();
+    let name_words = split_identifier(name);
+    tok.synonym_name_score(&name_lower, &name_words)
 }
 
 /// Convert words to camelCase for phrase matching (e.g. ["refresh", "token"] → "refreshtoken")
@@ -477,11 +640,11 @@ fn words_to_camel(words: &[&str]) -> String {
     result
 }
 
-fn score_path_match(path: &str, query: &str, words: &[&str]) -> f64 {
+fn score_path_match(path: &str, query: &str, eq: &ExpandedQuery) -> f64 {
     let path_lower = path.to_lowercase();
 
-    // Single word: check path containment (exact or stem)
-    if words.len() <= 1 {
+    // Single token: check path containment (exact, stem, or penalized synonym)
+    if eq.tokens.len() <= 1 {
         if path_lower.contains(query) {
             let filename = path.rsplit('/').next().unwrap_or(path).to_lowercase();
             if filename.contains(query) {
@@ -489,45 +652,36 @@ fn score_path_match(path: &str, query: &str, words: &[&str]) -> f64 {
             }
             return 0.6;
         }
+        let Some(tok) = eq.tokens.first() else {
+            return 0.0;
+        };
         // Stem match: "ranking" → "rank", "indexing" → "index"
-        if let Some(stem) = simple_stem(query) {
-            if path_lower.contains(&stem) {
-                return 0.5;
-            }
+        match tok.match_in_text(&path_lower) {
+            s if s >= STRENGTH_EXACT => return 0.6,
+            s if s >= STRENGTH_STEM => return 0.5,
+            s if s > 0.0 => return 0.4,
+            _ => return 0.0,
         }
-        return 0.0;
     }
 
-    // Multi-word: check how many words match path (with stem fallback)
-    let matched = words
+    // Multi-token: weighted coverage of the path (exact > stem > synonym)
+    let total: f64 = eq
+        .tokens
         .iter()
-        .filter(|w| {
-            path_lower.contains(*w) || simple_stem(w).is_some_and(|stem| path_lower.contains(&stem))
-        })
-        .count();
-    if matched == 0 {
+        .map(|tok| tok.match_in_text(&path_lower))
+        .sum();
+    if total == 0.0 {
         return 0.0;
     }
 
-    matched as f64 / words.len() as f64
+    total / eq.tokens.len() as f64
 }
 
-/// Simple English stemming: strip common suffixes.
+/// Simple English stemming: strip common suffixes. Returns the primary stem
+/// candidate; [`stem_variants`] exposes the full candidate set. Kept as the
+/// single stemming entry point for external callers.
 pub fn simple_stem(word: &str) -> Option<String> {
-    if word.len() < 5 {
-        return None;
-    }
-    for suffix in &[
-        "ing", "tion", "sion", "ment", "ness", "ity", "able", "ible", "ous", "ive", "er", "ed",
-        "es", "ly", "al", "ful", "less", "ize", "ise", "ation", "icate", "ication",
-    ] {
-        if let Some(stem) = word.strip_suffix(suffix) {
-            if stem.len() >= 3 {
-                return Some(stem.to_string());
-            }
-        }
-    }
-    None
+    stem_variants(word).into_iter().next()
 }
 
 /// Extract a short prefix root for long words (e.g. "authentication" → "auth").
@@ -843,26 +997,42 @@ mod tests {
         );
     }
 
+    fn eq(words: &[&str]) -> ExpandedQuery {
+        ExpandedQuery::new(words)
+    }
+
     #[test]
     fn exact_phrase_snake_case() {
         let sym = make_symbol("build_context_packet", "src/rank.rs", None);
-        let score = score_symbol_multi_word(&sym, &["context", "packet"]);
+        let score = score_symbol_multi_word(&sym, &eq(&["context", "packet"]));
         assert_eq!(score, 0.95, "snake_case phrase should score 0.95");
     }
 
     #[test]
     fn exact_phrase_camel_case() {
+        // Full-name phrase match ranks above phrase containment
         let sym = make_symbol("contextPacket", "src/types.rs", None);
-        let score = score_symbol_multi_word(&sym, &["context", "packet"]);
-        // Both words match in name → ratio=1.0 * 0.9 = 0.9
-        // camelCase check: words_to_camel returns "contextPacket" which matches
-        assert_eq!(score, 0.95, "camelCase phrase should score 0.95");
+        let score = score_symbol_multi_word(&sym, &eq(&["context", "packet"]));
+        assert_eq!(score, 0.98, "full-name camelCase phrase should score 0.98");
+    }
+
+    #[test]
+    fn full_name_match_beats_containment() {
+        let exact = make_symbol("useEffect", "src/ReactHooks.js", None);
+        let contains = make_symbol("useInsertionEffect", "src/ReactHooks.js", None);
+        let q = eq(&["use", "effect"]);
+        let s_exact = score_symbol_multi_word(&exact, &q);
+        let s_contains = score_symbol_multi_word(&contains, &q);
+        assert!(
+            s_exact > s_contains,
+            "useEffect ({s_exact}) should outrank useInsertionEffect ({s_contains})"
+        );
     }
 
     #[test]
     fn multi_word_partial() {
         let sym = make_symbol("parse_budget", "src/cli.rs", None);
-        let score = score_symbol_multi_word(&sym, &["budget", "validation"]);
+        let score = score_symbol_multi_word(&sym, &eq(&["budget", "validation"]));
         assert!(
             score > 0.0 && score < 0.95,
             "partial multi-word should be between 0 and 0.95"
@@ -872,42 +1042,113 @@ mod tests {
     #[test]
     fn multi_word_no_match() {
         let sym = make_symbol("KungfuService", "src/core.rs", None);
-        let score = score_symbol_multi_word(&sym, &["database", "migration"]);
+        let score = score_symbol_multi_word(&sym, &eq(&["database", "migration"]));
         assert_eq!(score, 0.0);
     }
 
     #[test]
+    fn multi_word_coverage_rewarded() {
+        // A symbol covering both query tokens beats one covering a single token
+        let both = make_symbol("dispatch_request", "src/app.py", None);
+        let one = make_symbol("request_finished", "src/signals.py", None);
+        let q = eq(&["dispatched", "request"]);
+        let s_both = score_symbol_multi_word(&both, &q);
+        let s_one = score_symbol_multi_word(&one, &q);
+        assert!(
+            s_both > s_one,
+            "two-token coverage ({s_both}) should beat one-token ({s_one})"
+        );
+    }
+
+    #[test]
+    fn split_name_matches_abbreviated_query() {
+        // "ws connection middleware" must surface WebSocketMiddleware via
+        // synonym expansion + word-set matching
+        let sym = make_symbol(
+            "WebSocketMiddleware",
+            "Middleware/WebSocketMiddleware.cs",
+            None,
+        );
+        let score = score_symbol_multi_word(&sym, &eq(&["ws", "connection", "middleware"]));
+        assert!(
+            score > 0.3,
+            "abbreviation match should score > 0.3, got {score}"
+        );
+    }
+
+    #[test]
+    fn expanded_match_penalized_vs_exact() {
+        // Exact vocabulary ("websocket middleware") must outrank the
+        // abbreviation-expanded form ("ws middleware") on the same symbol
+        let sym = make_symbol(
+            "WebSocketMiddleware",
+            "Middleware/WebSocketMiddleware.cs",
+            None,
+        );
+        let s_exact = score_symbol_multi_word(&sym, &eq(&["websocket", "middleware"]));
+        let s_expanded = score_symbol_multi_word(&sym, &eq(&["ws", "middleware"]));
+        assert!(
+            s_exact > s_expanded,
+            "exact ({s_exact}) should outrank expanded ({s_expanded})"
+        );
+        assert!(s_expanded > 0.0, "expanded form should still match");
+    }
+
+    #[test]
+    fn single_word_synonym_fallback() {
+        let q = eq(&["ws"]);
+        let score = score_symbol_single("WebSocketHandler", &q);
+        assert!(score > 0.0, "ws should reach WebSocketHandler via synonyms");
+        // ...but below a direct substring match on the same query
+        let direct = score_symbol_single("wsHandler", &q);
+        assert!(
+            direct > score,
+            "direct ({direct}) should beat synonym ({score})"
+        );
+    }
+
+    #[test]
     fn path_match_filename() {
-        let score = score_path_match("src/budget.rs", "budget", &["budget"]);
+        let score = score_path_match("src/budget.rs", "budget", &eq(&["budget"]));
         assert_eq!(score, 0.9, "filename match should score 0.9");
     }
 
     #[test]
     fn path_match_directory() {
-        let score = score_path_match("budget/types/mod.rs", "budget", &["budget"]);
+        let score = score_path_match("budget/types/mod.rs", "budget", &eq(&["budget"]));
         assert_eq!(score, 0.6, "directory-only match should score 0.6");
     }
 
     #[test]
     fn path_no_match() {
-        let score = score_path_match("src/search.rs", "budget", &["budget"]);
+        let score = score_path_match("src/search.rs", "budget", &eq(&["budget"]));
         assert_eq!(score, 0.0);
     }
 
     #[test]
     fn path_stem_match() {
-        let score = score_path_match("src/ranking.rs", "ranking", &["ranking"]);
+        let score = score_path_match("src/ranking.rs", "ranking", &eq(&["ranking"]));
         assert_eq!(score, 0.9, "direct filename match");
 
-        let stem_score = score_path_match("src/rank.rs", "ranking", &["ranking"]);
+        let stem_score = score_path_match("src/rank.rs", "ranking", &eq(&["ranking"]));
         assert!(stem_score > 0.0, "stem match should find rank.rs");
+    }
+
+    #[test]
+    fn path_multi_word_synonym_penalized() {
+        let q = eq(&["expiration", "handling"]);
+        let stem_hit = score_path_match("src/expire.c", "expiration handling", &q);
+        assert!(stem_hit > 0.0, "expiration should reach expire.c via stem");
+        let exact_hit = score_path_match("src/expiration.c", "expiration handling", &q);
+        assert!(exact_hit > stem_hit, "exact path hit should score higher");
     }
 
     #[test]
     fn simple_stem_works() {
         assert_eq!(simple_stem("ranking"), Some("rank".to_string()));
         assert_eq!(simple_stem("indexing"), Some("index".to_string()));
-        assert_eq!(simple_stem("configuration"), Some("configura".to_string()));
+        assert_eq!(simple_stem("configuration"), Some("configur".to_string()));
+        assert_eq!(simple_stem("migrations"), Some("migration".to_string()));
         assert_eq!(simple_stem("abc"), None); // too short
     }
 
@@ -992,13 +1233,13 @@ mod tests {
 
     #[test]
     fn path_contains_keyword() {
-        let score = score_path_match("src/auth/service.ts", "auth", &["auth"]);
+        let score = score_path_match("src/auth/service.ts", "auth", &eq(&["auth"]));
         assert!(score > 0.0, "path containing keyword should match");
     }
 
     #[test]
     fn path_exact_filename() {
-        let score = score_path_match("src/router.ts", "router", &["router"]);
+        let score = score_path_match("src/router.ts", "router", &eq(&["router"]));
         assert!(
             score >= 0.9,
             "exact filename match should score high, got {}",
