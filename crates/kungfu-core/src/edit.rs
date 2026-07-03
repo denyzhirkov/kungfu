@@ -80,7 +80,7 @@ impl KungfuService {
             .collect();
 
         // Call graph: what this symbol calls, and who calls it.
-        let relations = self.store().load_relations()?;
+        let relations = self.store().relations_arc()?;
         let call_graph_indexed = relations.iter().any(|r| r.kind == RelationKind::Calls);
         let all_symbols = search.get_all_symbols()?;
         let by_id: HashMap<&str, &Symbol> =
@@ -89,7 +89,7 @@ impl KungfuService {
         let mut callees = Vec::new();
         let mut callers = Vec::new();
         let mut callers_count = 0usize;
-        for r in &relations {
+        for r in relations.iter() {
             if r.kind != RelationKind::Calls {
                 continue;
             }

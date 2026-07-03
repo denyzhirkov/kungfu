@@ -89,7 +89,7 @@ impl KungfuService {
 
         // Provenance: with no Calls relations the radius rests on imports alone,
         // which over-approximates at file level — say so instead of looking exact.
-        let relations = self.store().load_relations()?;
+        let relations = self.store().relations_arc()?;
         let call_graph_indexed = relations.iter().any(|r| r.kind == RelationKind::Calls);
 
         let mut out = serde_json::json!({

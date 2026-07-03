@@ -6,6 +6,7 @@ use kungfu_types::file::FileEntry;
 use kungfu_types::relation::RelationKind;
 use kungfu_types::symbol::Symbol;
 use kungfu_types::Budget;
+use std::sync::Arc;
 
 pub struct SearchEngine<'a> {
     store: &'a JsonStore,
@@ -22,7 +23,7 @@ impl<'a> SearchEngine<'a> {
     }
 
     pub fn find_symbol(&self, query: &str, budget: Budget) -> Result<Vec<SearchResult<Symbol>>> {
-        let symbols = self.store.load_symbols()?;
+        let symbols = self.store.symbols_arc()?;
         let query_lower = query.to_lowercase();
         let top_k = budget.top_k();
 
@@ -30,10 +31,10 @@ impl<'a> SearchEngine<'a> {
         let words: Vec<&str> = query_lower.split_whitespace().collect();
 
         let mut results: Vec<SearchResult<Symbol>> = symbols
-            .into_iter()
+            .iter()
             .filter_map(|s| {
                 let score = if words.len() > 1 {
-                    score_symbol_multi_word(&s, &words)
+                    score_symbol_multi_word(s, &words)
                 } else {
                     let mut sc = score_symbol_match(&s.name, &query_lower);
                     // Exact case bonus: "DataFrame" matches "DataFrame" better than "dataFrame"
@@ -43,7 +44,10 @@ impl<'a> SearchEngine<'a> {
                     sc
                 };
                 if score > 0.0 {
-                    Some(SearchResult { item: s, score })
+                    Some(SearchResult {
+                        item: s.clone(),
+                        score,
+                    })
                 } else {
                     None
                 }
@@ -60,7 +64,7 @@ impl<'a> SearchEngine<'a> {
     }
 
     pub fn get_symbol(&self, name: &str) -> Result<Option<Symbol>> {
-        let symbols = self.store.load_symbols()?;
+        let symbols = self.store.symbols_arc()?;
         let name_lower = name.to_lowercase();
 
         // Try exact match first
@@ -86,8 +90,8 @@ impl<'a> SearchEngine<'a> {
     }
 
     pub fn search_text(&self, query: &str, budget: Budget) -> Result<Vec<SearchResult<FileEntry>>> {
-        let files = self.store.load_files()?;
-        let symbols = self.store.load_symbols()?;
+        let files = self.store.files_arc()?;
+        let symbols = self.store.symbols_arc()?;
         let query_lower = query.to_lowercase();
         let top_k = budget.top_k();
         let words: Vec<&str> = query_lower.split_whitespace().collect();
@@ -95,7 +99,7 @@ impl<'a> SearchEngine<'a> {
         // Build a map of file_id -> symbol relevance
         let mut file_symbol_scores: std::collections::HashMap<String, f64> =
             std::collections::HashMap::new();
-        for sym in &symbols {
+        for sym in symbols.iter() {
             let sym_score = if words.len() > 1 {
                 score_symbol_multi_word(sym, &words)
             } else {
@@ -110,14 +114,14 @@ impl<'a> SearchEngine<'a> {
         }
 
         let mut results: Vec<SearchResult<FileEntry>> = files
-            .into_iter()
+            .iter()
             .filter_map(|f| {
                 let path_score = score_path_match(&f.path, &query_lower, &words);
                 let sym_score = file_symbol_scores.get(&f.id).copied().unwrap_or(0.0) * 0.8;
                 let combined = path_score.max(sym_score);
                 if combined > 0.0 {
                     Some(SearchResult {
-                        item: f,
+                        item: f.clone(),
                         score: combined,
                     })
                 } else {
@@ -139,12 +143,14 @@ impl<'a> SearchEngine<'a> {
         self.search_text(query, budget)
     }
 
-    pub fn get_all_files(&self) -> Result<Vec<FileEntry>> {
-        self.store.load_files()
+    /// Shared snapshot of every indexed file — no per-call clone.
+    pub fn get_all_files(&self) -> Result<Arc<Vec<FileEntry>>> {
+        self.store.files_arc()
     }
 
-    pub fn get_all_symbols(&self) -> Result<Vec<Symbol>> {
-        self.store.load_symbols()
+    /// Shared snapshot of every indexed symbol — no per-call clone.
+    pub fn get_all_symbols(&self) -> Result<Arc<Vec<Symbol>>> {
+        self.store.symbols_arc()
     }
 
     /// Find files related to the given file by import relations, directory proximity,
@@ -154,9 +160,9 @@ impl<'a> SearchEngine<'a> {
         file_path: &str,
         budget: Budget,
     ) -> Result<Vec<SearchResult<FileEntry>>> {
-        let files = self.store.load_files()?;
-        let symbols = self.store.load_symbols()?;
-        let relations = self.store.load_relations()?;
+        let files = self.store.files_arc()?;
+        let symbols = self.store.symbols_arc()?;
+        let relations = self.store.relations_arc()?;
         let top_k = budget.top_k();
 
         // Normalize: find the file in the index
@@ -174,7 +180,7 @@ impl<'a> SearchEngine<'a> {
         // Collect import relations for the target file
         let mut relation_scores: std::collections::HashMap<String, f64> =
             std::collections::HashMap::new();
-        for rel in &relations {
+        for rel in relations.iter() {
             if rel.source_id == target.id {
                 match rel.kind {
                     RelationKind::Imports => {
@@ -226,7 +232,7 @@ impl<'a> SearchEngine<'a> {
         // Build symbol sets per file for cross-referencing
         let mut file_symbols: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
-        for sym in &symbols {
+        for sym in symbols.iter() {
             file_symbols
                 .entry(sym.file_id.clone())
                 .or_default()
@@ -313,8 +319,8 @@ impl<'a> SearchEngine<'a> {
     }
 
     pub fn get_symbols_for_file(&self, file_path: &str) -> Result<Vec<Symbol>> {
-        let symbols = self.store.load_symbols()?;
-        let files = self.store.load_files()?;
+        let symbols = self.store.symbols_arc()?;
+        let files = self.store.files_arc()?;
 
         let file_id = files
             .iter()
@@ -322,7 +328,11 @@ impl<'a> SearchEngine<'a> {
             .map(|f| f.id.clone());
 
         match file_id {
-            Some(fid) => Ok(symbols.into_iter().filter(|s| s.file_id == fid).collect()),
+            Some(fid) => Ok(symbols
+                .iter()
+                .filter(|s| s.file_id == fid)
+                .cloned()
+                .collect()),
             None => Ok(Vec::new()),
         }
     }

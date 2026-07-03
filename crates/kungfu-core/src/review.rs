@@ -80,7 +80,7 @@ impl KungfuService {
         self.ensure_fresh_index()?;
         let store = self.store();
         let files = store.load_files()?;
-        let relations = store.load_relations()?;
+        let relations = store.relations_arc()?;
         let all_symbols = self.search().get_all_symbols()?;
 
         // Find target symbol IDs
@@ -110,7 +110,7 @@ impl KungfuService {
         // Build reverse dependency graph: target_id → source_ids (Calls + Imports)
         // Only include high-confidence relations (weight >= 0.7) to avoid false positives
         let mut reverse_deps: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
-        for r in &relations {
+        for r in relations.iter() {
             match r.kind {
                 RelationKind::Calls if r.weight >= 0.7 => {
                     reverse_deps
@@ -188,7 +188,7 @@ impl KungfuService {
             .chain(target_paths.iter().copied())
             .collect();
         let mut test_files: Vec<String> = Vec::new();
-        for r in &relations {
+        for r in relations.iter() {
             if r.kind == RelationKind::TestFor {
                 let source_path = id_to_path.get(r.source_id.as_str()).copied().unwrap_or("");
                 let target_path = id_to_path.get(r.target_id.as_str()).copied().unwrap_or("");
@@ -226,7 +226,7 @@ impl KungfuService {
     pub fn test_subjects(&self, test_name: &str) -> Result<Vec<(Symbol, String)>> {
         self.ensure_fresh_index()?;
         let store = self.store();
-        let relations = store.load_relations()?;
+        let relations = store.relations_arc()?;
         let all_symbols = self.search().get_all_symbols()?;
 
         // Find test symbol candidates by exact name. There may be several if duplicated.
@@ -242,7 +242,7 @@ impl KungfuService {
 
         // 1-hop callees.
         let mut direct: HashSet<&str> = HashSet::new();
-        for r in &relations {
+        for r in relations.iter() {
             if r.kind == RelationKind::Calls && test_ids.contains(r.source_id.as_str()) {
                 direct.insert(r.target_id.as_str());
             }
@@ -251,7 +251,7 @@ impl KungfuService {
         // 2-hop callees via thin test helpers (other test/helper symbols that aren't production).
         // Keep set of "via" edges so we can label why a 2-hop target was included.
         let mut transitive: HashMap<&str, &str> = HashMap::new();
-        for r in &relations {
+        for r in relations.iter() {
             if r.kind == RelationKind::Calls && direct.contains(r.source_id.as_str()) {
                 let target = r.target_id.as_str();
                 if !direct.contains(target) && !test_ids.contains(target) {
@@ -388,7 +388,7 @@ impl KungfuService {
 
         let store = self.store();
         let all_symbols = store.load_symbols()?;
-        let relations = store.load_relations()?;
+        let relations = store.relations_arc()?;
 
         // Get changed line ranges
         let changed_lines = kungfu_git::diff_changed_lines(&self.project.root)?;
@@ -427,7 +427,7 @@ impl KungfuService {
 
         // Build reverse call graph
         let mut reverse_calls: HashMap<&str, Vec<&str>> = HashMap::new();
-        for r in &relations {
+        for r in relations.iter() {
             if r.kind == RelationKind::Calls {
                 reverse_calls
                     .entry(r.target_id.as_str())
@@ -440,7 +440,7 @@ impl KungfuService {
             all_symbols.iter().map(|s| (s.id.as_str(), s)).collect();
 
         // Direct: test_for relations pointing to changed files
-        for r in &relations {
+        for r in relations.iter() {
             if r.kind == RelationKind::TestFor {
                 if let Some(target_sym) = symbol_map.get(r.target_id.as_str()) {
                     if changed_file_paths.contains(&target_sym.path) {
@@ -522,7 +522,7 @@ impl KungfuService {
 
         let store = self.store();
         let all_symbols = store.load_symbols()?;
-        let relations = store.load_relations()?;
+        let relations = store.relations_arc()?;
 
         // Changed files
         let changed_files = kungfu_git::diff_files(&self.project.root)?;
@@ -575,7 +575,7 @@ impl KungfuService {
         let symbol_map: HashMap<&str, &Symbol> =
             all_symbols.iter().map(|s| (s.id.as_str(), s)).collect();
         let mut tested_paths: HashSet<&str> = HashSet::new();
-        for r in &relations {
+        for r in relations.iter() {
             if r.kind == RelationKind::TestFor {
                 if let Some(target) = symbol_map.get(r.target_id.as_str()) {
                     tested_paths.insert(&target.path);
@@ -634,7 +634,7 @@ impl KungfuService {
         self.ensure_fresh_index()?;
         let store = self.store();
         let files = store.load_files()?;
-        let relations = store.load_relations()?;
+        let relations = store.relations_arc()?;
 
         // Build ID → path maps for both files and symbols
         let all_symbols = store.load_symbols()?;
@@ -649,7 +649,7 @@ impl KungfuService {
         let mut fan_in: HashMap<String, usize> = HashMap::new();
         let mut fan_out: HashMap<String, usize> = HashMap::new();
 
-        for r in &relations {
+        for r in relations.iter() {
             // Only count high-confidence structural relations
             let dominated = matches!(
                 r.kind,
