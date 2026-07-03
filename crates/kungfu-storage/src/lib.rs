@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use kungfu_types::chunk::Chunk;
 use kungfu_types::file::FileEntry;
 use kungfu_types::memory::{MemoryEntry, ProjectMemoryEntry};
-use kungfu_types::relation::Relation;
+use kungfu_types::relation::{CallGraphMeta, Relation};
 use kungfu_types::symbol::Symbol;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -50,6 +50,8 @@ struct StoreMeta {
 }
 
 const STORE_META_FILE: &str = "store_meta.json";
+
+const CALL_GRAPH_META_FILE: &str = "call_graph_meta.json";
 
 pub struct JsonStore {
     base_dir: std::path::PathBuf,
@@ -201,6 +203,33 @@ impl JsonStore {
 
     pub fn load_relations(&self) -> Result<Vec<Relation>> {
         Ok(self.relations_arc()?.as_ref().clone())
+    }
+
+    /// Persist the call-graph filtering sidecar (`call_graph_meta.json`) so the
+    /// recorded dropped-callee names describe the relations currently on disk.
+    pub fn save_call_graph_meta(&self, meta: &CallGraphMeta) -> Result<()> {
+        let path = self.base_dir.join(CALL_GRAPH_META_FILE);
+        atomic_write(&path, &serde_json::to_string_pretty(meta)?)
+    }
+
+    /// Call-graph filtering sidecar. A missing or unreadable shard (index
+    /// written by an older binary) degrades to the empty default — empty-result
+    /// diagnostics then fall back to plain `no_edges` instead of failing.
+    pub fn load_call_graph_meta(&self) -> CallGraphMeta {
+        let path = self.base_dir.join(CALL_GRAPH_META_FILE);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    debug!("failed to read {}: {}", path.display(), e);
+                }
+                return CallGraphMeta::default();
+            }
+        };
+        serde_json::from_str(&content).unwrap_or_else(|e| {
+            debug!("failed to parse {}: {}", path.display(), e);
+            CallGraphMeta::default()
+        })
     }
 
     pub fn save_chunks(&self, chunks: &[Chunk]) -> Result<()> {

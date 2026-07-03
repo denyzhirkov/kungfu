@@ -1,5 +1,5 @@
 use anyhow::Result;
-use kungfu_core::KungfuService;
+use kungfu_core::{EmptyCallGraphCause, KungfuService};
 use kungfu_memory::project_search::MemoryFilter;
 use kungfu_project::agent_health::{self, CheckStatus};
 use kungfu_project::{find_project_root, init_project, KUNGFU_VERSION};
@@ -1474,6 +1474,15 @@ pub fn ask_context(task: &str, budget: Budget, json: bool) -> Result<()> {
         }
         println!("Budget: {}", packet.budget);
         println!("Items:  {}", packet.items.len());
+        if let Some(ref r) = packet.retrieval {
+            match &r.vector_skipped {
+                Some(reason) => println!("Layers: {} — {}", r.mode, reason),
+                None => println!(
+                    "Layers: {} ({} vector candidates)",
+                    r.mode, r.vector_candidates
+                ),
+            }
+        }
         println!();
         for item in &packet.items {
             println!(
@@ -1656,42 +1665,62 @@ pub fn symbol_history(name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Empty callers/callees: tell apart "disabled by config", "name is stop-listed
-/// by design", "no call graph built", and "no edges for this symbol" — and point
-/// at `search-text` whenever the graph cannot answer.
+/// Empty callers/callees: name the cause instead of a bare empty result —
+/// disabled by config, stop-listed by design, no call graph built, edges
+/// dropped by the frequency cutoff, an ambiguous multi-definition target, or
+/// genuinely no edges — and point at `search-text` whenever the graph cannot
+/// answer.
 fn report_empty_call_graph(
     service: &KungfuService,
     name: &str,
     direction: &str,
+    cause: EmptyCallGraphCause,
     json: bool,
 ) -> Result<()> {
-    let (status, hint) = if !service.call_graph_enabled() {
-        (
+    let (status, hint) = match &cause {
+        EmptyCallGraphCause::Disabled => (
             "call_graph_disabled",
             Some(format!(
                 "The call graph is disabled by config ([call_graph] enabled = false). Use `kungfu search-text {}` to find usages by name, or re-enable and reindex.",
                 name
             )),
-        )
-    } else if service.is_ubiquitous_callee(name) {
-        (
+        ),
+        EmptyCallGraphCause::FilteredUbiquitous => (
             "filtered_ubiquitous",
             Some(format!(
                 "'{}' is on the ubiquitous-callables stop-list (std/utility name), so call edges to it are never stored. Use `kungfu search-text {}` to find usages by name.",
                 name, name
             )),
-        )
-    } else if service.has_call_graph()? {
-        ("no_edges", None)
-    } else {
-        (
+        ),
+        EmptyCallGraphCause::NotIndexed => (
             "call_graph_not_indexed",
             Some(format!(
                 "No call relations are built for this project. Use `kungfu search-text {}` to find usages by name.",
                 name
             )),
-        )
+        ),
+        EmptyCallGraphCause::FrequencyFiltered { max_caller_files } => (
+            "frequency_filtered",
+            Some(format!(
+                "'{}' is called from more than {} distinct files, so its incoming call edges were dropped as utility-noise. Raise [call_graph] max_caller_files (currently {}) in .kungfu/config.toml and reindex, or use `kungfu search-text {}` to find call sites by name.",
+                name, max_caller_files, max_caller_files, name
+            )),
+        ),
+        EmptyCallGraphCause::AmbiguousTarget { definitions } => (
+            "ambiguous_target",
+            Some(format!(
+                "'{}' has {} same-name definitions — call edges are only stored for unambiguous callees, so none were stored for this name. Use `kungfu search-text {}` to find call sites and narrow by path.",
+                name, definitions, name
+            )),
+        ),
+        EmptyCallGraphCause::NoEdges => ("no_edges", None),
     };
+    let with_provenance = matches!(
+        cause,
+        EmptyCallGraphCause::NoEdges
+            | EmptyCallGraphCause::FrequencyFiltered { .. }
+            | EmptyCallGraphCause::AmbiguousTarget { .. }
+    );
     if json {
         let mut body = serde_json::json!({
             "status": status,
@@ -1701,7 +1730,16 @@ fn report_empty_call_graph(
         if let Some(h) = &hint {
             body["hint"] = serde_json::json!(h);
         }
-        if status == "no_edges" {
+        match &cause {
+            EmptyCallGraphCause::AmbiguousTarget { definitions } => {
+                body["definitions"] = serde_json::json!(definitions);
+            }
+            EmptyCallGraphCause::FrequencyFiltered { max_caller_files } => {
+                body["max_caller_files"] = serde_json::json!(max_caller_files);
+            }
+            _ => {}
+        }
+        if with_provenance {
             body["provenance"] = serde_json::json!(service.call_graph_provenance());
         }
         println!("{}", serde_json::to_string_pretty(&body)?);
@@ -1724,7 +1762,8 @@ pub fn callers(name: &str, budget: Budget, json: bool) -> Result<()> {
     let results = service.callers(name, budget)?;
 
     if results.is_empty() {
-        return report_empty_call_graph(&service, name, "callers", json);
+        let cause = service.diagnose_empty_callers(name)?;
+        return report_empty_call_graph(&service, name, "callers", cause, json);
     }
     if json {
         let items: Vec<_> = results
@@ -1798,7 +1837,8 @@ pub fn callees(name: &str, budget: Budget, json: bool) -> Result<()> {
     let results = service.callees(name, budget)?;
 
     if results.is_empty() {
-        return report_empty_call_graph(&service, name, "callees", json);
+        let cause = service.diagnose_empty_callees(name)?;
+        return report_empty_call_graph(&service, name, "callees", cause, json);
     }
     if json {
         let items: Vec<_> = results

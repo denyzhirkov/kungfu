@@ -10,6 +10,25 @@ use kungfu_types::relation::RelationKind;
 use kungfu_types::symbol::Symbol;
 use std::collections::{HashMap, HashSet};
 
+/// Strategy A2 caps: how many top-cosine rows to fetch from the vector store and
+/// how many may enter the candidate pool. Bounded so packet assembly cost stays
+/// flat no matter how large the embedding store is.
+const VECTOR_FETCH_K: usize = 20;
+const VECTOR_ACCEPT_MAX: usize = 10;
+/// At most this many *new* vector candidates per file. Vector recall exists to
+/// widen file/concept coverage; same-file siblings all embed similarly and would
+/// otherwise crowd out the keyword hit for the file's main symbol (sibling
+/// expansion is Strategy C's job, keyed to the query's keywords).
+const VECTOR_PER_FILE_MAX: usize = 1;
+/// Cosine at which a vector hit is trusted enough to outrank name-search hits.
+/// Below this (the 0.65–0.75 mid-band), a hit only backfills: its score is
+/// capped just under the best name-match score, so it never displaces a weak
+/// but exact keyword answer. Measured on the bench: mid-band displacement is
+/// where the vector layer loses points; ≥0.75 hits are consistently right.
+const VECTOR_TRUSTED_COS: f64 = 0.75;
+/// How far below the best name-match score a capped mid-band hit sits.
+const VECTOR_CAP_MARGIN: f64 = 0.02;
+
 /// Tunable weights for ask-context strategy scoring.
 /// All values are multipliers or bonuses applied during context selection.
 pub struct StrategyWeights {
@@ -39,12 +58,19 @@ pub struct StrategyWeights {
     pub changed_file_bonus: f64,
     /// Secondary code language penalty multiplier
     pub secondary_lang_penalty: f64,
-    /// Strategy A2: base score for vector (cosine) matches when an embedding store exists.
+    /// Strategy A2: score for a vector (cosine) hit at the minimum accepted cosine.
     /// Kept lower than direct symbol-name matches so vector results augment rather than displace.
     pub vector_score: f64,
     /// Strategy A2: minimum cosine to accept a vector hit. Below this, the model is essentially
-    /// guessing and a string match is more trustworthy.
+    /// guessing and a string match is more trustworthy. For bge-small, cosines under ~0.65
+    /// are an empirical noise band (measured on the 50-case bench): unrelated symbols cluster
+    /// at 0.60–0.68, genuine concept hits at 0.69+.
     pub vector_min_score: f64,
+    /// Strategy A2: score for a vector hit at cosine 1.0. Hits ramp linearly from
+    /// `vector_score` (at `vector_min_score`) up to this — a high-confidence semantic hit
+    /// must be able to outrank weak keyword noise, while still losing to an exact
+    /// phrase/name match (0.95+).
+    pub vector_strong_score: f64,
     /// File-level fallback: score for a symbol injected purely because its file path matched a
     /// keyword. A filename match is a weaker signal than a symbol-name match, so this sits below
     /// a typical name hit — it should backfill, not outrank genuine matches.
@@ -70,8 +96,9 @@ impl Default for StrategyWeights {
             path_match_bonus: 0.05,
             changed_file_bonus: 0.3,
             secondary_lang_penalty: 0.85,
-            vector_score: 0.55,
-            vector_min_score: 0.55,
+            vector_score: 0.6,
+            vector_min_score: 0.65,
+            vector_strong_score: 0.9,
             path_fallback_score: 0.3,
             test_penalty: 0.5,
         }
@@ -103,6 +130,7 @@ impl StrategyWeights {
         w.secondary_lang_penalty = env_f64("KUNGFU_W_LANG_PENALTY", w.secondary_lang_penalty);
         w.vector_score = env_f64("KUNGFU_W_VECTOR", w.vector_score);
         w.vector_min_score = env_f64("KUNGFU_W_VECTOR_MIN", w.vector_min_score);
+        w.vector_strong_score = env_f64("KUNGFU_W_VECTOR_STRONG", w.vector_strong_score);
         w.path_fallback_score = env_f64("KUNGFU_W_PATH_FALLBACK", w.path_fallback_score);
         w.test_penalty = env_f64("KUNGFU_W_TEST_PENALTY", w.test_penalty);
         w
@@ -160,58 +188,73 @@ impl KungfuService {
         let all_symbols = search.get_all_symbols()?;
 
         // Strategy A2: vector cosine match — augment with concept-level hits when an embedding
-        // store + a real engine are available. Skipped for very short queries (which look like
-        // direct symbol lookups, where vectors mostly add noise on top of Strategy A).
-        if keywords.len() >= 3 {
-            if let Ok(Some(emb_store)) =
-                kungfu_embed::EmbeddingStore::load(&self.project.index_dir())
-            {
-                let engine = kungfu_embed::shared_engine();
-                if engine.is_real() {
-                    if let Ok(qv) = engine.embed_batch(&[task]) {
-                        if let Some(q) = qv.first() {
-                            let raw = emb_store.top_k(q, 8);
-                            let symbols_by_id: HashMap<&str, &Symbol> =
-                                all_symbols.iter().map(|s| (s.id.as_str(), s)).collect();
-                            let mut added = 0usize;
-                            for (rank, (id, cos)) in raw.into_iter().enumerate() {
-                                if added >= 5 {
-                                    break;
-                                }
-                                let cos = cos as f64;
-                                if cos < w.vector_min_score {
-                                    continue;
-                                }
-                                let rank_decay = 1.0 - (rank as f64 * 0.08).min(0.4);
-                                let vector_score = w.vector_score * rank_decay;
-                                if seen_ids.contains(&id) {
-                                    // Already found by name search — a symbol must not
-                                    // rank *lower* just because two strategies found it.
-                                    // Keep the stronger of the two scores.
-                                    if let Some(existing) = scored_symbols
-                                        .iter_mut()
-                                        .find(|s| s.symbol.id == id && s.score < vector_score)
-                                    {
-                                        existing.score = vector_score;
-                                        existing.reason =
-                                            format!("vector match ({:.2} cosine)", cos);
-                                    }
-                                    continue;
-                                }
-                                let sym = match symbols_by_id.get(id.as_str()) {
-                                    Some(s) => *s,
-                                    None => continue,
-                                };
-                                seen_ids.insert(id);
-                                scored_symbols.push(ScoredSymbol {
-                                    symbol: sym.clone(),
-                                    score: vector_score,
-                                    reason: format!("vector match ({:.2} cosine)", cos),
-                                });
-                                added += 1;
+        // store + a real engine are available. Runs for every intent; only single-keyword
+        // queries skip it (those are direct symbol lookups, where vectors mostly add noise
+        // on top of Strategy A). Whatever happens here is declared in `packet.retrieval`.
+        let mut retrieval = kungfu_types::context::RetrievalInfo {
+            mode: "keyword_only".to_string(),
+            vector_candidates: 0,
+            vector_skipped: None,
+        };
+        let mut vector_added = 0usize;
+        if keywords.len() < 2 {
+            retrieval.vector_skipped = Some(
+                "single-keyword query — name search is authoritative, vector recall skipped"
+                    .to_string(),
+            );
+        } else {
+            match kungfu_embed::EmbeddingStore::load(&self.project.index_dir()) {
+                Ok(Some(emb_store)) => {
+                    let engine = kungfu_embed::shared_engine();
+                    if !engine.is_real() {
+                        retrieval.vector_skipped = Some(
+                            "embedding engine unavailable (weights or `semantic` feature \
+                             missing) — see `kungfu embeddings status`"
+                                .to_string(),
+                        );
+                    } else {
+                        match engine.embed_batch(&[task]) {
+                            Ok(qv) if !qv.is_empty() => {
+                                let raw = emb_store.top_k(&qv[0], VECTOR_FETCH_K);
+                                let symbols_by_id: HashMap<&str, &Symbol> =
+                                    all_symbols.iter().map(|s| (s.id.as_str(), s)).collect();
+                                // Best Strategy A (name search) score — the mid-band
+                                // trust cap in blend_vector_hits is relative to it.
+                                let best_name_score = scored_symbols
+                                    .iter()
+                                    .map(|s| s.score)
+                                    .fold(0.0f64, f64::max);
+                                retrieval.mode = "keyword+vector".to_string();
+                                let (contributed, added) = blend_vector_hits(
+                                    &raw,
+                                    &symbols_by_id,
+                                    best_name_score,
+                                    &mut seen_ids,
+                                    &mut scored_symbols,
+                                    w,
+                                );
+                                retrieval.vector_candidates = contributed;
+                                vector_added = added;
+                            }
+                            _ => {
+                                retrieval.vector_skipped = Some(
+                                    "query embedding failed — keyword strategies only".to_string(),
+                                );
                             }
                         }
                     }
+                }
+                Ok(None) => {
+                    retrieval.vector_skipped = Some(
+                        "no embedding store — run `kungfu embeddings build` to enable \
+                         vector recall"
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    retrieval.vector_skipped = Some(format!(
+                        "embedding store unreadable ({e}) — rebuild with `kungfu embeddings build`"
+                    ));
                 }
             }
         }
@@ -241,8 +284,10 @@ impl KungfuService {
             }
         }
 
-        // Strategy B2: content grep — search file bodies for keywords
-        if scored_symbols.len() < budget.top_k() {
+        // Strategy B2: content grep — search file bodies for keywords.
+        // Sparse-pool gate counts only keyword-sourced candidates: vector hits
+        // augment the pool but must not suppress keyword backfill.
+        if scored_symbols.len() - vector_added < budget.top_k() {
             let content_matches = self.grep_content(&keywords, &seen_ids, budget.top_k());
             for (sym, matched_line) in content_matches {
                 seen_ids.insert(sym.id.clone());
@@ -255,7 +300,8 @@ impl KungfuService {
         }
 
         // Strategy B3: semantic expansion — search with conceptually related terms
-        if scored_symbols.len() < budget.top_k() {
+        // (same keyword-only sparse-pool gate as B2)
+        if scored_symbols.len() - vector_added < budget.top_k() {
             let expanded = kungfu_search::expand_query(&keywords);
             // Only use new terms (not original keywords)
             let new_terms: Vec<&str> = expanded
@@ -457,9 +503,13 @@ impl KungfuService {
             }
         }
 
-        // File-level fallback: if best symbol score is weak, inject file-level results
+        // File-level fallback: if the best *keyword* symbol score is weak, inject
+        // file-level results. Vector hits are excluded from the gate: a cosine hit
+        // is a hypothesis, not a confirmation, so it must not switch off the
+        // path-match safety net the keyword pipeline relied on.
         let best_score = scored_symbols
             .iter()
+            .filter(|s| !s.reason.starts_with("vector match"))
             .map(|s| s.score)
             .fold(0.0f64, f64::max);
         if best_score < 0.6 {
@@ -532,6 +582,7 @@ impl KungfuService {
 
         // 5. Build packet
         let mut packet = build_context_packet_full(task, scored_symbols, budget, Some(intent));
+        packet.retrieval = Some(retrieval);
 
         // 6. Attach changed files list
         packet.changed_files = changed;
@@ -859,6 +910,84 @@ impl KungfuService {
     }
 }
 
+/// Blend raw vector top-K hits into the candidate pool.
+///
+/// - Hits below `vector_min_score` cosine are dropped (the model is guessing).
+/// - Accepted hits score on a linear ramp from `vector_score` (at the minimum
+///   cosine) to `vector_strong_score` (at cosine 1.0), so a high-confidence
+///   semantic hit can outrank weak keyword noise but never an exact name match.
+/// - Mid-band hits (below `VECTOR_TRUSTED_COS`) are additionally capped just
+///   under `best_name_score`: they widen coverage but must not displace the
+///   name search's best answer, however weak it scored.
+/// - A hit already found by a keyword strategy keeps the stronger of the two
+///   scores (a symbol must not rank lower because two strategies agree on it).
+/// - At most `VECTOR_ACCEPT_MAX` new symbols enter the pool.
+///
+/// Returns `(contributed, added_new)`: how many candidates the vector layer
+/// contributed in total (added or rescored) and how many were brand-new pool
+/// entries. The latter lets callers keep sparse-pool gates (Strategies B2/B3)
+/// keyed to the *keyword* pool size, so vector hits augment the pool without
+/// suppressing keyword backfill.
+fn blend_vector_hits(
+    raw: &[(String, f32)],
+    symbols_by_id: &HashMap<&str, &Symbol>,
+    best_name_score: f64,
+    seen_ids: &mut HashSet<String>,
+    scored_symbols: &mut Vec<ScoredSymbol>,
+    w: &StrategyWeights,
+) -> (usize, usize) {
+    let mut contributed = 0usize;
+    let mut added = 0usize;
+    let mut per_file: HashMap<&str, usize> = HashMap::new();
+    for (id, cos) in raw {
+        if added >= VECTOR_ACCEPT_MAX {
+            break;
+        }
+        let cos = *cos as f64;
+        if cos < w.vector_min_score {
+            continue;
+        }
+        let span = (1.0 - w.vector_min_score).max(f64::EPSILON);
+        let t = ((cos - w.vector_min_score) / span).clamp(0.0, 1.0);
+        let mut vector_score = w.vector_score + t * (w.vector_strong_score - w.vector_score);
+        if cos < VECTOR_TRUSTED_COS && best_name_score > 0.0 {
+            vector_score = vector_score.min(best_name_score - VECTOR_CAP_MARGIN);
+        }
+        if vector_score <= 0.0 {
+            continue;
+        }
+        let reason = format!("vector match ({:.2} cosine)", cos);
+        if seen_ids.contains(id) {
+            if let Some(existing) = scored_symbols
+                .iter_mut()
+                .find(|s| s.symbol.id == *id && s.score < vector_score)
+            {
+                existing.score = vector_score;
+                existing.reason = reason;
+                contributed += 1;
+            }
+            continue;
+        }
+        let Some(sym) = symbols_by_id.get(id.as_str()) else {
+            continue;
+        };
+        let file_count = per_file.entry(sym.path.as_str()).or_insert(0);
+        if *file_count >= VECTOR_PER_FILE_MAX {
+            continue;
+        }
+        *file_count += 1;
+        seen_ids.insert(id.clone());
+        scored_symbols.push(ScoredSymbol {
+            symbol: (*sym).clone(),
+            score: vector_score,
+            reason,
+        });
+        added += 1;
+        contributed += 1;
+    }
+    (contributed, added)
+}
+
 /// Permissive overlap between a memory's `related_*` path and a packet path:
 /// equal, equal basename, or one being a suffix of the other. Over-inclusive on
 /// purpose — the memory scorer makes the final call; this only widens recall.
@@ -972,6 +1101,211 @@ fn extract_keyword_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kungfu_types::symbol::{Span, SymbolKind};
+
+    fn sym(id: &str, name: &str) -> Symbol {
+        sym_at(id, name, "src/test.rs")
+    }
+
+    fn sym_at(id: &str, name: &str, path: &str) -> Symbol {
+        Symbol {
+            id: id.to_string(),
+            file_id: format!("f:{path}"),
+            name: name.to_string(),
+            kind: SymbolKind::Function,
+            language: "rust".to_string(),
+            path: path.to_string(),
+            signature: None,
+            span: Span {
+                start_line: 1,
+                end_line: 10,
+                start_col: 0,
+                end_col: 0,
+            },
+            parent_symbol_id: None,
+            exported: true,
+            visibility: None,
+            doc_summary: None,
+        }
+    }
+
+    fn blend(
+        raw: &[(String, f32)],
+        symbols: &[Symbol],
+        scored: &mut Vec<ScoredSymbol>,
+    ) -> (usize, usize) {
+        let by_id: HashMap<&str, &Symbol> = symbols.iter().map(|s| (s.id.as_str(), s)).collect();
+        let mut seen: HashSet<String> = scored.iter().map(|s| s.symbol.id.clone()).collect();
+        // Mirror the call site: the trust cap is relative to the best score
+        // already in the pool (Strategy A name matches).
+        let best = scored.iter().map(|s| s.score).fold(0.0f64, f64::max);
+        blend_vector_hits(
+            raw,
+            &by_id,
+            best,
+            &mut seen,
+            scored,
+            &StrategyWeights::default(),
+        )
+    }
+
+    #[test]
+    fn vector_hits_score_on_cosine_ramp_below_exact_name_matches() {
+        let symbols = vec![
+            sym_at("s:1", "handle_events", "src/events.rs"),
+            sym_at("s:2", "poll_loop", "src/poll.rs"),
+        ];
+        let raw = vec![("s:1".to_string(), 1.0f32), ("s:2".to_string(), 0.66f32)];
+        let mut scored = Vec::new();
+        let (contributed, added) = blend(&raw, &symbols, &mut scored);
+        assert_eq!((contributed, added), (2, 2));
+        // cosine 1.0 -> vector_strong_score, still below an exact name match (1.0)
+        // and below a phrase hit (0.95).
+        assert!((scored[0].score - 0.9).abs() < 1e-9);
+        assert!(scored[0].score < 0.95);
+        // cosine just above the minimum -> near the vector_score floor.
+        assert!(
+            scored[1].score > 0.6 && scored[1].score < 0.62,
+            "expected ~0.61 near the floor, got {}",
+            scored[1].score
+        );
+    }
+
+    #[test]
+    fn vector_hits_below_min_cosine_are_dropped() {
+        // 0.6 sits in the empirical bge noise band, below the 0.65 default minimum.
+        let symbols = vec![sym("s:1", "handle_events")];
+        let raw = vec![("s:1".to_string(), 0.6f32)];
+        let mut scored = Vec::new();
+        let (contributed, added) = blend(&raw, &symbols, &mut scored);
+        assert_eq!((contributed, added), (0, 0));
+        assert!(scored.is_empty());
+    }
+
+    #[test]
+    fn vector_dedup_keeps_stronger_score_either_way() {
+        let symbols = vec![sym("s:strong", "exact_hit"), sym("s:weak", "grep_hit")];
+        // s:strong already in the pool from a strong name match; s:weak from grep.
+        let mut scored = vec![
+            ScoredSymbol {
+                symbol: sym("s:strong", "exact_hit"),
+                score: 0.95,
+                reason: "symbol name match".to_string(),
+            },
+            ScoredSymbol {
+                symbol: sym("s:weak", "grep_hit"),
+                score: 0.45,
+                reason: "content match: x".to_string(),
+            },
+        ];
+        let raw = vec![
+            ("s:strong".to_string(), 0.7f32), // ramp score ~0.67 < 0.95 -> keep name score
+            ("s:weak".to_string(), 0.9f32),   // ramp score ~0.82 > 0.45 -> upgrade
+        ];
+        let (contributed, added) = blend(&raw, &symbols, &mut scored);
+        assert_eq!(added, 0, "dedup must not add duplicate pool entries");
+        assert_eq!(
+            contributed, 1,
+            "only the upgraded hit counts as contributed"
+        );
+        assert!((scored[0].score - 0.95).abs() < 1e-9);
+        assert_eq!(scored[0].reason, "symbol name match");
+        assert!(scored[1].score > 0.8, "weak grep hit must be upgraded");
+        assert!(scored[1].reason.starts_with("vector match"));
+    }
+
+    #[test]
+    fn vector_accept_is_bounded() {
+        let symbols: Vec<Symbol> = (0..VECTOR_FETCH_K)
+            .map(|i| {
+                sym_at(
+                    &format!("s:{i}"),
+                    &format!("fn_{i}"),
+                    &format!("src/f{i}.rs"),
+                )
+            })
+            .collect();
+        let raw: Vec<(String, f32)> = (0..VECTOR_FETCH_K)
+            .map(|i| (format!("s:{i}"), 0.9f32))
+            .collect();
+        let mut scored = Vec::new();
+        let (_, added) = blend(&raw, &symbols, &mut scored);
+        assert_eq!(added, VECTOR_ACCEPT_MAX);
+        assert_eq!(scored.len(), VECTOR_ACCEPT_MAX);
+    }
+
+    #[test]
+    fn mid_band_hits_backfill_below_best_name_match() {
+        // The name search found a weak but exact answer (0.42). A mid-band
+        // vector hit (cosine < 0.75) must slot in *below* it; a trusted hit
+        // (>= 0.75) keeps its full ramped score and may outrank it.
+        let symbols = vec![
+            sym_at("s:mid", "plausible_guess", "src/guess.rs"),
+            sym_at("s:hot", "true_concept", "src/concept.rs"),
+        ];
+        let mut scored = vec![ScoredSymbol {
+            symbol: sym_at("s:kw", "exact_but_weak", "src/answer.rs"),
+            score: 0.42,
+            reason: "symbol name match".to_string(),
+        }];
+        let raw = vec![
+            ("s:mid".to_string(), 0.70f32),
+            ("s:hot".to_string(), 0.80f32),
+        ];
+        blend(&raw, &symbols, &mut scored);
+        let get = |name: &str| {
+            scored
+                .iter()
+                .find(|s| s.symbol.name == name)
+                .map(|s| s.score)
+                .unwrap_or_default()
+        };
+        assert!(
+            get("plausible_guess") < 0.42,
+            "mid-band hit must not displace the best name match, got {}",
+            get("plausible_guess")
+        );
+        assert!(
+            get("true_concept") > 0.7,
+            "trusted hit keeps its ramped score, got {}",
+            get("true_concept")
+        );
+    }
+
+    #[test]
+    fn vector_admits_only_best_hit_per_file() {
+        // Same-file siblings embed similarly; only the best-cosine one may enter
+        // as a new candidate — the rest would crowd out keyword hits for the
+        // file's main symbol.
+        let symbols = vec![
+            sym_at("s:1", "SearchConfig", "src/config.rs"),
+            sym_at("s:2", "LanguagesConfig", "src/config.rs"),
+            sym_at("s:3", "load_index", "src/store.rs"),
+        ];
+        let raw = vec![
+            ("s:1".to_string(), 0.80f32),
+            ("s:2".to_string(), 0.79f32),
+            ("s:3".to_string(), 0.70f32),
+        ];
+        let mut scored = Vec::new();
+        let (contributed, added) = blend(&raw, &symbols, &mut scored);
+        assert_eq!((contributed, added), (2, 2));
+        let names: Vec<&str> = scored.iter().map(|s| s.symbol.name.as_str()).collect();
+        assert_eq!(names, vec!["SearchConfig", "load_index"]);
+    }
+
+    #[test]
+    fn vector_ids_missing_from_symbol_table_are_skipped() {
+        let symbols = vec![sym("s:1", "real")];
+        let raw = vec![
+            ("s:gone".to_string(), 0.99f32), // stale embedding row
+            ("s:1".to_string(), 0.8f32),
+        ];
+        let mut scored = Vec::new();
+        let (contributed, added) = blend(&raw, &symbols, &mut scored);
+        assert_eq!((contributed, added), (1, 1));
+        assert_eq!(scored[0].symbol.id, "s:1");
+    }
 
     #[test]
     fn keyword_lines_mark_matched_lines_and_keep_code_verbatim() {

@@ -48,6 +48,30 @@ pub struct ContextPacket {
     /// on the same topic. Surface, do not auto-resolve.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub memory_conflicts: Vec<MemoryConflictItem>,
+    /// Which retrieval layers produced the candidate pool (retrieval honesty).
+    /// `None` for packets built by paths that don't run layered retrieval
+    /// (e.g. diff_context).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub retrieval: Option<RetrievalInfo>,
+}
+
+/// Retrieval honesty for candidate generation: says whether the vector
+/// (embedding) layer contributed, so an agent can tell a keyword-only result
+/// from a keyword+vector one. Mirrors the `mode`/`coverage` pattern of
+/// `semantic_search`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalInfo {
+    /// `"keyword+vector"` when vector candidates entered the pool,
+    /// `"keyword_only"` otherwise.
+    pub mode: String,
+    /// How many candidates the vector layer contributed (added to the pool or
+    /// rescored an existing keyword hit). 0 when the layer ran but nothing
+    /// cleared the cosine threshold.
+    pub vector_candidates: usize,
+    /// Present iff the vector layer did not run: why, and the next action to
+    /// enable it (e.g. `kungfu embeddings build`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub vector_skipped: Option<String>,
 }
 
 /// A surfaced conflict between active memory entries — projected to the packet level.

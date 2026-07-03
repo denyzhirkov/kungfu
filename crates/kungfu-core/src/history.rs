@@ -317,6 +317,7 @@ impl KungfuService {
                 evidence: Vec::new(),
                 project_memory: Vec::new(),
                 memory_conflicts: Vec::new(),
+                retrieval: None,
             });
         }
 
