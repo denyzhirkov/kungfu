@@ -24,6 +24,7 @@ pub(crate) fn reindex(mcp: &KungfuMcp, params: ReindexParam) -> Result<String, S
         "removed_files": stats.removed_files,
         "symbols_extracted": stats.symbols_extracted,
         "total_files": stats.total_files,
+        "call_edges_filtered": stats.call_edges_filtered,
     }))
     .map_err(|e| e.to_string())
 }

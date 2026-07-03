@@ -125,6 +125,9 @@ pub struct IndexStats {
     pub changed_files: usize,
     pub removed_files: usize,
     pub symbols_extracted: usize,
+    /// Call edges dropped by the frequency cutoff (callee invoked from more than
+    /// `call_graph.max_caller_files` distinct files — utility-noise).
+    pub call_edges_filtered: usize,
 }
 
 impl<'a> Indexer<'a> {
@@ -171,7 +174,14 @@ impl<'a> Indexer<'a> {
         }
 
         let mut relations = Self::build_relations(&files, &all_imports);
-        relations.extend(Self::build_call_relations(&files, &all_symbols, &all_calls));
+        relations.extend(Self::build_call_relations(
+            &self.config.call_graph,
+            &files,
+            &all_symbols,
+            &all_calls,
+        ));
+        let call_edges_filtered =
+            Self::filter_call_graph_noise(&self.config.call_graph, &mut relations, &all_symbols);
         let mut memories = Self::build_memories(&all_comments);
         let doc_memories = self.scan_docs();
         memories.extend(doc_memories);
@@ -182,6 +192,7 @@ impl<'a> Indexer<'a> {
             changed_files: 0,
             removed_files: 0,
             symbols_extracted: all_symbols.len(),
+            call_edges_filtered,
         };
 
         self.store.save_files(&files)?;
@@ -189,6 +200,7 @@ impl<'a> Indexer<'a> {
         self.store.save_relations(&relations)?;
         self.store.save_fingerprints(&fingerprints)?;
         self.store.save_memories(&memories)?;
+        self.store.save_schema_version()?;
 
         info!(
             "indexed {} files, {} symbols, {} relations, {} memories",
@@ -228,6 +240,7 @@ impl<'a> Indexer<'a> {
             changed_files: 0,
             removed_files: 0,
             symbols_extracted: 0,
+            call_edges_filtered: 0,
         };
 
         // Build set of current paths
@@ -336,11 +349,16 @@ impl<'a> Indexer<'a> {
             .collect();
         let mut fresh = Self::build_relations(&new_files, &all_imports);
         fresh.extend(Self::build_call_relations(
+            &self.config.call_graph,
             &new_files,
             &new_symbols,
             &all_calls,
         ));
         relations.extend(fresh);
+        // Post-merge so the noise rules also govern edges kept from unchanged files
+        // (a config change takes effect without waiting for a full reindex).
+        stats.call_edges_filtered =
+            Self::filter_call_graph_noise(&self.config.call_graph, &mut relations, &new_symbols);
 
         // Merge memories the same way: keep entries from unchanged still-existing files,
         // rebuild from re-parsed ones. Changed doc files are re-parsed explicitly — doc
@@ -362,6 +380,7 @@ impl<'a> Indexer<'a> {
         self.store.save_relations(&relations)?;
         self.store.save_fingerprints(&new_fingerprints)?;
         self.store.save_memories(&memories)?;
+        self.store.save_schema_version()?;
 
         info!(
             "incremental index: {} total, {} new, {} changed, {} removed, {} symbols, {} relations",
@@ -396,6 +415,7 @@ impl<'a> Indexer<'a> {
             changed_files: 0,
             removed_files: 0,
             symbols_extracted: 0,
+            call_edges_filtered: 0,
         };
 
         // Keep unchanged files
@@ -476,11 +496,14 @@ impl<'a> Indexer<'a> {
             .collect();
         let mut new_relations = Self::build_relations(&new_files, &all_imports);
         new_relations.extend(Self::build_call_relations(
+            &self.config.call_graph,
             &new_files,
             &new_symbols,
             &all_calls,
         ));
         relations.extend(new_relations);
+        stats.call_edges_filtered =
+            Self::filter_call_graph_noise(&self.config.call_graph, &mut relations, &new_symbols);
 
         // Merge memories: keep old for unchanged, add new for changed
         let old_memories = self.store.load_memories().unwrap_or_default();
@@ -500,6 +523,7 @@ impl<'a> Indexer<'a> {
         self.store.save_relations(&relations)?;
         self.store.save_fingerprints(&new_fingerprints)?;
         self.store.save_memories(&memories)?;
+        self.store.save_schema_version()?;
 
         info!(
             "changed-only index: {} changed, {} new, {} removed",
@@ -775,15 +799,24 @@ impl<'a> Indexer<'a> {
     /// trustworthy. Method calls, whose receiver type we cannot infer, resolve only via a
     /// globally-unique name. Calls to unindexed symbols (std, external crates) produce no edge.
     fn build_call_relations(
+        cfg: &kungfu_config::CallGraphConfig,
         files: &[FileEntry],
         symbols: &[Symbol],
         file_calls: &[(String, Vec<RawCall>)],
     ) -> Vec<Relation> {
         use kungfu_types::symbol::SymbolKind;
 
+        if !cfg.enabled {
+            return Vec::new();
+        }
+
         let path_to_id: HashMap<&str, &str> = files
             .iter()
             .map(|f| (f.path.as_str(), f.id.as_str()))
+            .collect();
+        let path_to_lang: HashMap<&str, Option<&str>> = files
+            .iter()
+            .map(|f| (f.path.as_str(), f.language.as_deref()))
             .collect();
 
         let is_callable = |k: SymbolKind| matches!(k, SymbolKind::Function | SymbolKind::Method);
@@ -802,12 +835,13 @@ impl<'a> Indexer<'a> {
                 Some(id) => *id,
                 None => continue,
             };
+            let language = path_to_lang.get(path.as_str()).copied().flatten();
             for call in calls {
                 let caller = match by_file_line.get(&(file_id, call.caller_line)) {
                     Some(c) => *c,
                     None => continue,
                 };
-                if is_ubiquitous_callable(&call.callee) {
+                if crate::stoplist::is_ubiquitous_callable(&call.callee, language) {
                     continue;
                 }
                 let candidates = match by_name.get(call.callee.as_str()) {
@@ -847,6 +881,92 @@ impl<'a> Indexer<'a> {
             a.source_id == b.source_id && a.target_id == b.target_id && a.kind == b.kind
         });
         relations
+    }
+
+    /// Enforce the call-graph noise rules on the final (merged) relation set,
+    /// so they also govern edges carried over from unchanged files and a config
+    /// change takes effect on the next indexing run of any kind:
+    ///
+    /// - `enabled = false` → no `Calls` relations are persisted at all;
+    /// - `cross_file_only` → drop edges whose caller and callee share a file;
+    /// - `max_caller_files = N` → a callee invoked from more than N distinct
+    ///   files is utility-noise: drop its incoming edges.
+    ///
+    /// Returns how many edges the frequency cutoff dropped (surfaced in
+    /// `IndexStats::call_edges_filtered`).
+    fn filter_call_graph_noise(
+        cfg: &kungfu_config::CallGraphConfig,
+        relations: &mut Vec<Relation>,
+        symbols: &[Symbol],
+    ) -> usize {
+        if !cfg.enabled {
+            relations.retain(|r| r.kind != RelationKind::Calls);
+            return 0;
+        }
+
+        let file_of: HashMap<&str, &str> = symbols
+            .iter()
+            .map(|s| (s.id.as_str(), s.file_id.as_str()))
+            .collect();
+
+        if cfg.cross_file_only {
+            let before = relations.len();
+            relations.retain(|r| {
+                if r.kind != RelationKind::Calls {
+                    return true;
+                }
+                match (
+                    file_of.get(r.source_id.as_str()),
+                    file_of.get(r.target_id.as_str()),
+                ) {
+                    (Some(a), Some(b)) => a != b,
+                    // Endpoint not in the symbol table (stale edge) — keep;
+                    // the merge filters own stale-edge cleanup.
+                    _ => true,
+                }
+            });
+            debug!(
+                "call graph: dropped {} same-file edges (cross_file_only)",
+                before - relations.len()
+            );
+        }
+
+        if cfg.max_caller_files == 0 {
+            return 0;
+        }
+
+        let mut caller_files: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+        for r in relations.iter() {
+            if r.kind != RelationKind::Calls {
+                continue;
+            }
+            if let Some(&src_file) = file_of.get(r.source_id.as_str()) {
+                caller_files
+                    .entry(r.target_id.as_str())
+                    .or_default()
+                    .insert(src_file);
+            }
+        }
+        let noisy: std::collections::HashSet<String> = caller_files
+            .iter()
+            .filter(|(_, files)| files.len() > cfg.max_caller_files)
+            .map(|(id, _)| (*id).to_string())
+            .collect();
+        if noisy.is_empty() {
+            return 0;
+        }
+
+        let before = relations.len();
+        relations
+            .retain(|r| r.kind != RelationKind::Calls || !noisy.contains(r.target_id.as_str()));
+        let dropped = before - relations.len();
+        debug!(
+            "call graph: dropped {} edges to {} utility-noise callees (called from > {} files)",
+            dropped,
+            noisy.len(),
+            cfg.max_caller_files
+        );
+        dropped
     }
 
     /// Scan markdown documentation files and parse them into memories.
@@ -1091,185 +1211,6 @@ fn unique_global<'a>(candidates: &[&'a Symbol], caller: &Symbol) -> Option<&'a S
         [only] if only.id != caller.id => Some(only),
         _ => None,
     }
-}
-
-/// Names that std/core provide on countless types. Even if exactly one such symbol is indexed,
-/// a `.len()` / `Type::new()` call almost never targets *that* one — attributing it would forge a
-/// high-weight edge. Dropping these keeps the call graph precise at a small recall cost.
-fn is_ubiquitous_callable(name: &str) -> bool {
-    matches!(
-        name,
-        "new"
-            | "default"
-            | "clone"
-            | "len"
-            | "is_empty"
-            | "to_string"
-            | "to_owned"
-            | "to_vec"
-            | "from"
-            | "into"
-            | "try_from"
-            | "try_into"
-            | "as_str"
-            | "as_ref"
-            | "as_mut"
-            | "as_bytes"
-            | "as_deref"
-            | "iter"
-            | "iter_mut"
-            | "into_iter"
-            | "next"
-            | "unwrap"
-            | "unwrap_or"
-            | "unwrap_or_else"
-            | "unwrap_or_default"
-            | "expect"
-            | "map"
-            | "map_err"
-            | "and_then"
-            | "filter"
-            | "collect"
-            | "push"
-            | "pop"
-            | "insert"
-            | "remove"
-            | "get"
-            | "get_mut"
-            | "contains"
-            | "contains_key"
-            | "or_default"
-            | "or_insert"
-            | "or_insert_with"
-            | "entry"
-            | "cmp"
-            | "partial_cmp"
-            | "fmt"
-            | "parse"
-            | "extend"
-            | "take"
-            | "count"
-            | "find"
-            | "any"
-            | "all"
-            | "cloned"
-            | "copied"
-            | "starts_with"
-            | "ends_with"
-            | "trim"
-            | "split"
-            | "join"
-            | "replace"
-            // JS/TS std prototypes & console
-            | "forEach"
-            | "then"
-            | "reduce"
-            | "slice"
-            | "splice"
-            | "concat"
-            | "indexOf"
-            | "includes"
-            | "keys"
-            | "values"
-            | "entries"
-            | "stringify"
-            | "log"
-            | "error"
-            | "warn"
-            | "info"
-            | "bind"
-            | "apply"
-            | "toString"
-            | "require"
-            | "assign"
-            | "freeze"
-            | "shift"
-            | "unshift"
-            // Python builtins & common methods
-            | "append"
-            | "items"
-            | "format"
-            | "strip"
-            | "lower"
-            | "upper"
-            | "startswith"
-            | "endswith"
-            | "read"
-            | "write"
-            | "open"
-            | "close"
-            | "update"
-            | "copy"
-            | "isinstance"
-            | "print"
-            | "range"
-            | "sorted"
-            | "enumerate"
-            | "zip"
-            | "super"
-            | "getattr"
-            | "setattr"
-            | "hasattr"
-            | "str"
-            | "int"
-            | "list"
-            | "dict"
-            | "tuple"
-            // Go std method/constructor names (capitalized)
-            | "Error"
-            | "String"
-            | "Printf"
-            | "Println"
-            | "Sprintf"
-            | "Errorf"
-            | "Fprintf"
-            | "Fatal"
-            | "Fatalf"
-            | "Close"
-            | "Read"
-            | "Write"
-            | "New"
-            // Java/Kotlin std
-            | "println"
-            | "valueOf"
-            | "equals"
-            | "hashCode"
-            | "size"
-            | "add"
-            | "put"
-            | "of"
-            | "stream"
-            | "getClass"
-            | "let"
-            | "also"
-            | "run"
-            | "with"
-            | "listOf"
-            | "mapOf"
-            | "setOf"
-            | "toList"
-            | "toSet"
-            | "first"
-            // C/C++ libc classics
-            | "printf"
-            | "fprintf"
-            | "sprintf"
-            | "snprintf"
-            | "malloc"
-            | "calloc"
-            | "realloc"
-            | "free"
-            | "memcpy"
-            | "memset"
-            | "memmove"
-            | "strcmp"
-            | "strncmp"
-            | "strcpy"
-            | "strlen"
-            | "assert"
-            | "exit"
-            | "abort"
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1693,6 +1634,12 @@ mod tests {
         dir
     }
 
+    fn fresh_store(root: &Path) -> JsonStore {
+        let index_dir = root.join(".kungfu").join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        JsonStore::new(&index_dir)
+    }
+
     #[test]
     fn is_binary_extension_matches_assets_case_insensitively() {
         assert!(is_binary_extension(Path::new("a/b/photo.png")));
@@ -1760,15 +1707,12 @@ mod tests {
     #[test]
     fn full_index_builds_call_relations() {
         let root = temp_indexer_root();
-        std::fs::write(
-            root.join("lib.rs"),
-            "fn helper() {}\nfn run() { helper(); }\nfn shared() {} \n",
-        )
-        .unwrap();
+        // Caller and callee in different files: cross_file_only (the default)
+        // keeps exactly this kind of edge.
+        std::fs::write(root.join("lib.rs"), "fn helper() {}\nfn shared() {} \n").unwrap();
+        std::fs::write(root.join("main.rs"), "fn run() { helper(); }\n").unwrap();
 
-        let index_dir = root.join(".kungfu").join("index");
-        std::fs::create_dir_all(&index_dir).unwrap();
-        let store = JsonStore::new(&index_dir);
+        let store = fresh_store(&root);
         let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
         indexer.index_full().unwrap();
 
@@ -1783,7 +1727,7 @@ mod tests {
         let run = id("run").expect("run symbol");
         let helper = id("helper").expect("helper symbol");
 
-        // run() → helper() is a unique, same-file free call: must be linked.
+        // run() → helper() is a unique cross-file free call: must be linked.
         assert!(
             relations.iter().any(|r| r.kind == RelationKind::Calls
                 && r.source_id == run
@@ -1806,14 +1750,9 @@ mod tests {
     #[test]
     fn incremental_with_no_changes_preserves_relations() {
         let root = temp_indexer_root();
-        std::fs::write(
-            root.join("lib.rs"),
-            "fn helper() {}\nfn run() { helper(); }\n",
-        )
-        .unwrap();
-        let index_dir = root.join(".kungfu").join("index");
-        std::fs::create_dir_all(&index_dir).unwrap();
-        let store = JsonStore::new(&index_dir);
+        std::fs::write(root.join("lib.rs"), "fn helper() {}\n").unwrap();
+        std::fs::write(root.join("main.rs"), "fn run() { helper(); }\n").unwrap();
+        let store = fresh_store(&root);
         let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
 
         indexer.index_full().unwrap();
@@ -1877,15 +1816,10 @@ mod tests {
     #[test]
     fn index_only_touches_just_the_given_file() {
         let root = temp_indexer_root();
-        std::fs::write(
-            root.join("a.rs"),
-            "fn helper() {}\nfn run() { helper(); }\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("a.rs"), "fn helper() {}\n").unwrap();
+        std::fs::write(root.join("c.rs"), "fn run() { helper(); }\n").unwrap();
         std::fs::write(root.join("b.rs"), "fn unrelated() {}\n").unwrap();
-        let index_dir = root.join(".kungfu").join("index");
-        std::fs::create_dir_all(&index_dir).unwrap();
-        let store = JsonStore::new(&index_dir);
+        let store = fresh_store(&root);
         let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
 
         indexer.index_full().unwrap();
@@ -1924,14 +1858,9 @@ mod tests {
     #[test]
     fn full_index_builds_ts_call_relations() {
         let root = temp_indexer_root();
-        std::fs::write(
-            root.join("app.ts"),
-            "function helper() {}\nfunction run() { helper(); }\n",
-        )
-        .unwrap();
-        let index_dir = root.join(".kungfu").join("index");
-        std::fs::create_dir_all(&index_dir).unwrap();
-        let store = JsonStore::new(&index_dir);
+        std::fs::write(root.join("util.ts"), "function helper() {}\n").unwrap();
+        std::fs::write(root.join("app.ts"), "function run() { helper(); }\n").unwrap();
+        let store = fresh_store(&root);
         let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
         indexer.index_full().unwrap();
 
@@ -1960,11 +1889,160 @@ mod tests {
     }
 
     #[test]
-    fn ubiquitous_names_are_not_linked() {
-        assert!(is_ubiquitous_callable("len"));
-        assert!(is_ubiquitous_callable("new"));
-        assert!(is_ubiquitous_callable("clone"));
-        assert!(!is_ubiquitous_callable("ask_context"));
-        assert!(!is_ubiquitous_callable("fill_snippets"));
+    fn ubiquitous_callee_is_not_linked_even_when_unique() {
+        // A project defines exactly one `len`; a call to `len` in another file
+        // must still not be attributed to it — the name is stop-listed.
+        let root = temp_indexer_root();
+        std::fs::write(root.join("a.rs"), "fn len() -> usize { 0 }\n").unwrap();
+        std::fs::write(root.join("b.rs"), "fn run() { let _ = len(); }\n").unwrap();
+        let store = fresh_store(&root);
+        let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+        indexer.index_full().unwrap();
+
+        let relations = store.load_relations().unwrap();
+        assert!(
+            !relations.iter().any(|r| r.kind == RelationKind::Calls),
+            "stop-listed callee must produce no Calls edge"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn same_file_calls_are_dropped_by_default_kept_when_configured() {
+        let root = temp_indexer_root();
+        std::fs::write(
+            root.join("lib.rs"),
+            "fn helper() {}\nfn run() { helper(); }\n",
+        )
+        .unwrap();
+
+        // Default: cross_file_only = true → the same-file edge is not stored.
+        let store = fresh_store(&root);
+        let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+        indexer.index_full().unwrap();
+        assert!(
+            !store
+                .load_relations()
+                .unwrap()
+                .iter()
+                .any(|r| r.kind == RelationKind::Calls),
+            "same-file call must be dropped when cross_file_only is on (default)"
+        );
+
+        // Opt out: cross_file_only = false keeps the same-file edge.
+        let mut config = KungfuConfig::default();
+        config.call_graph.cross_file_only = false;
+        let mut indexer = Indexer::new(&root, config, &store);
+        indexer.index_full().unwrap();
+        assert_eq!(
+            store
+                .load_relations()
+                .unwrap()
+                .iter()
+                .filter(|r| r.kind == RelationKind::Calls)
+                .count(),
+            1,
+            "cross_file_only = false must keep the same-file edge"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn frequency_cutoff_drops_utility_noise_callees() {
+        let root = temp_indexer_root();
+        std::fs::write(root.join("util.rs"), "fn tiny_helper() {}\n").unwrap();
+        for i in 0..3 {
+            std::fs::write(
+                root.join(format!("caller{i}.rs")),
+                format!("fn run{i}() {{ tiny_helper(); }}\n"),
+            )
+            .unwrap();
+        }
+
+        // Cutoff above the fan-in: all 3 edges survive.
+        let store = fresh_store(&root);
+        let mut config = KungfuConfig::default();
+        config.call_graph.max_caller_files = 3;
+        let mut indexer = Indexer::new(&root, config, &store);
+        let stats = indexer.index_full().unwrap();
+        assert_eq!(
+            store
+                .load_relations()
+                .unwrap()
+                .iter()
+                .filter(|r| r.kind == RelationKind::Calls)
+                .count(),
+            3
+        );
+        assert_eq!(stats.call_edges_filtered, 0);
+
+        // Cutoff below the fan-in: the callee is utility-noise, edges dropped.
+        let mut config = KungfuConfig::default();
+        config.call_graph.max_caller_files = 2;
+        let mut indexer = Indexer::new(&root, config, &store);
+        let stats = indexer.index_full().unwrap();
+        assert!(
+            !store
+                .load_relations()
+                .unwrap()
+                .iter()
+                .any(|r| r.kind == RelationKind::Calls),
+            "callee invoked from more files than max_caller_files must lose its edges"
+        );
+        assert_eq!(stats.call_edges_filtered, 3);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn disabled_call_graph_persists_no_call_edges() {
+        let root = temp_indexer_root();
+        std::fs::write(root.join("a.rs"), "fn helper() {}\n").unwrap();
+        std::fs::write(root.join("b.rs"), "fn run() { helper(); }\n").unwrap();
+        let store = fresh_store(&root);
+
+        // Build with the graph on, then reindex with it off: even merged/old
+        // edges must disappear.
+        let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+        indexer.index_full().unwrap();
+        assert!(store
+            .load_relations()
+            .unwrap()
+            .iter()
+            .any(|r| r.kind == RelationKind::Calls));
+
+        let mut config = KungfuConfig::default();
+        config.call_graph.enabled = false;
+        let mut indexer = Indexer::new(&root, config, &store);
+        indexer.index_incremental().unwrap();
+        assert!(
+            !store
+                .load_relations()
+                .unwrap()
+                .iter()
+                .any(|r| r.kind == RelationKind::Calls),
+            "call_graph.enabled = false must strip Calls relations on any indexing run"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn index_writes_schema_version() {
+        let root = temp_indexer_root();
+        std::fs::write(root.join("lib.rs"), "fn solo() {}\n").unwrap();
+        let store = fresh_store(&root);
+        assert_eq!(store.load_schema_version(), None);
+
+        let mut indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+        indexer.index_full().unwrap();
+        assert_eq!(
+            store.load_schema_version(),
+            Some(kungfu_storage::INDEX_SCHEMA_VERSION)
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

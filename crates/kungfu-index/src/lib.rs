@@ -2,6 +2,8 @@
 
 pub mod indexer;
 pub mod scanner;
+pub mod stoplist;
 pub mod watcher;
 
 pub use indexer::{IndexStats, Indexer};
+pub use stoplist::{is_stoplisted_name, is_ubiquitous_callable};

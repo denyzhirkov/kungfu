@@ -405,6 +405,7 @@ pub fn index(full: bool, changed: bool, only: Vec<String>, json: bool) -> Result
             "changed_files": stats.changed_files,
             "removed_files": stats.removed_files,
             "symbols_extracted": stats.symbols_extracted,
+            "call_edges_filtered": stats.call_edges_filtered,
             "elapsed_ms": elapsed.as_millis(),
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -423,6 +424,12 @@ pub fn index(full: bool, changed: bool, only: Vec<String>, json: bool) -> Result
         }
         if stats.removed_files > 0 {
             println!("  removed: {}", stats.removed_files);
+        }
+        if stats.call_edges_filtered > 0 {
+            println!(
+                "  call edges filtered as utility-noise: {}",
+                stats.call_edges_filtered
+            );
         }
     }
     Ok(())
@@ -609,7 +616,10 @@ pub fn stats(json: bool) -> Result<()> {
                 .saturating_sub(stats.total_bytes_served)
                 / 4;
             println!("  Compression:        {:.1}x", ratio);
-            println!("  Est. tokens saved:  {} (vs reading referenced files)", saved);
+            println!(
+                "  Est. tokens saved:  {} (vs reading referenced files)",
+                saved
+            );
         }
         if let Some(ref first) = stats.first_used {
             println!("  First used:         {}", first);
@@ -1411,39 +1421,63 @@ pub fn symbol_history(name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Empty callers/callees: tell "no edges" apart from "no call graph built",
-/// and point at `search_text` when the graph is absent.
+/// Empty callers/callees: tell apart "disabled by config", "name is stop-listed
+/// by design", "no call graph built", and "no edges for this symbol" — and point
+/// at `search-text` whenever the graph cannot answer.
 fn report_empty_call_graph(
     service: &KungfuService,
     name: &str,
     direction: &str,
     json: bool,
 ) -> Result<()> {
-    let has_graph = service.has_call_graph()?;
+    let (status, hint) = if !service.call_graph_enabled() {
+        (
+            "call_graph_disabled",
+            Some(format!(
+                "The call graph is disabled by config ([call_graph] enabled = false). Use `kungfu search-text {}` to find usages by name, or re-enable and reindex.",
+                name
+            )),
+        )
+    } else if service.is_ubiquitous_callee(name) {
+        (
+            "filtered_ubiquitous",
+            Some(format!(
+                "'{}' is on the ubiquitous-callables stop-list (std/utility name), so call edges to it are never stored. Use `kungfu search-text {}` to find usages by name.",
+                name, name
+            )),
+        )
+    } else if service.has_call_graph()? {
+        ("no_edges", None)
+    } else {
+        (
+            "call_graph_not_indexed",
+            Some(format!(
+                "No call relations are built for this project. Use `kungfu search-text {}` to find usages by name.",
+                name
+            )),
+        )
+    };
     if json {
-        let status = if has_graph {
-            "no_edges"
-        } else {
-            "call_graph_not_indexed"
-        };
         let mut body = serde_json::json!({
             "status": status,
             "name": name,
             "results": [],
         });
-        if !has_graph {
-            body["hint"] = serde_json::json!(format!(
-                "No call relations are built for this project. Use `kungfu search-text {}` to find usages by name.",
-                name
-            ));
+        if let Some(h) = &hint {
+            body["hint"] = serde_json::json!(h);
+        }
+        if status == "no_edges" {
+            body["provenance"] = serde_json::json!(service.call_graph_provenance());
         }
         println!("{}", serde_json::to_string_pretty(&body)?);
-    } else if has_graph {
-        println!("No {} found for '{}'", direction, name);
+    } else if let Some(h) = hint {
+        println!("No {} found for '{}': {}", direction, name, h);
     } else {
         println!(
-            "Call graph not indexed for this project — {} unavailable.\nUse `kungfu search-text {}` to find usages by name.",
-            direction, name
+            "No {} found for '{}' (note: {})",
+            direction,
+            name,
+            service.call_graph_provenance()
         );
     }
     Ok(())
@@ -1471,7 +1505,13 @@ pub fn callers(name: &str, budget: Budget, json: bool) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&items)?);
+        let body = serde_json::json!({
+            "status": "ok",
+            "name": name,
+            "results": items,
+            "provenance": service.call_graph_provenance(),
+        });
+        println!("{}", serde_json::to_string_pretty(&body)?);
     } else {
         println!("Callers of '{}':", name);
         for (sym, _) in &results {
@@ -1481,6 +1521,7 @@ pub fn callers(name: &str, budget: Budget, json: bool) -> Result<()> {
                 sym.path, sym.span.start_line, sym.kind, sig
             );
         }
+        println!("  (note: {})", service.call_graph_provenance());
     }
     Ok(())
 }
@@ -1538,7 +1579,13 @@ pub fn callees(name: &str, budget: Budget, json: bool) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&items)?);
+        let body = serde_json::json!({
+            "status": "ok",
+            "name": name,
+            "results": items,
+            "provenance": service.call_graph_provenance(),
+        });
+        println!("{}", serde_json::to_string_pretty(&body)?);
     } else {
         println!("'{}' calls:", name);
         for (sym, _) in &results {
@@ -1548,6 +1595,7 @@ pub fn callees(name: &str, budget: Budget, json: bool) -> Result<()> {
                 sym.path, sym.span.start_line, sym.kind, sig
             );
         }
+        println!("  (note: {})", service.call_graph_provenance());
     }
     Ok(())
 }

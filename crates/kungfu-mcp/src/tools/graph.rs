@@ -25,33 +25,59 @@ pub(crate) fn callers(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Result<Stri
                 })
             })
             .collect();
-        graph_response(&name, items)
+        graph_response(&service, &name, items)
     })
 }
 
 /// Uniform call-graph response shape (the empty diagnostics already use objects,
-/// so non-empty results match), with provenance on how edges are derived.
-fn graph_response(name: &str, items: Vec<serde_json::Value>) -> Result<String, String> {
+/// so non-empty results match), with provenance on how edges are derived and
+/// which noise filters were active when the graph was built.
+fn graph_response(
+    service: &kungfu_core::KungfuService,
+    name: &str,
+    items: Vec<serde_json::Value>,
+) -> Result<String, String> {
     serde_json::to_string_pretty(&serde_json::json!({
         "status": "ok",
         "name": name,
         "results": items,
-        "provenance": "AST call graph; an edge exists only when the callee name resolves unambiguously — ambiguous names (several same-name definitions) are omitted, not guessed",
+        "provenance": service.call_graph_provenance(),
     }))
     .map_err(|e| e.to_string())
 }
 
-/// Distinguish "no edges for this symbol" from "no call graph built at all".
-/// The latter must steer the agent to `search_text` instead of trusting `[]`.
+/// Tell apart the empty-result cases so the agent is never left guessing:
+/// the graph is disabled by config, the queried name is stop-listed by design,
+/// the graph was never built, or it exists and this symbol simply has no edges.
 fn call_graph_diagnostic(
     service: &kungfu_core::KungfuService,
     name: &str,
 ) -> Result<String, String> {
-    let has_graph = service.has_call_graph().map_err(|e| e.to_string())?;
-    let body = if has_graph {
+    let body = if !service.call_graph_enabled() {
+        serde_json::json!({
+            "status": "call_graph_disabled",
+            "name": name,
+            "hint": format!(
+                "The call graph is disabled by config ([call_graph] enabled = false). Use search_text(\"{}\") to find usages by name, or re-enable and reindex.",
+                name
+            ),
+            "results": [],
+        })
+    } else if service.is_ubiquitous_callee(name) {
+        serde_json::json!({
+            "status": "filtered_ubiquitous",
+            "name": name,
+            "hint": format!(
+                "\"{}\" is on the ubiquitous-callables stop-list (std/utility name), so call edges to it are never stored. Use search_text(\"{}\") to find usages by name.",
+                name, name
+            ),
+            "results": [],
+        })
+    } else if service.has_call_graph().map_err(|e| e.to_string())? {
         serde_json::json!({
             "status": "no_edges",
             "name": name,
+            "provenance": service.call_graph_provenance(),
             "results": [],
         })
     } else {
@@ -92,6 +118,6 @@ pub(crate) fn callees(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Result<Stri
                 })
             })
             .collect();
-        graph_response(&name, items)
+        graph_response(&service, &name, items)
     })
 }

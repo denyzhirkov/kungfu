@@ -17,6 +17,46 @@ impl KungfuService {
         Ok(relations.iter().any(|r| r.kind == RelationKind::Calls))
     }
 
+    /// Is the call graph enabled by configuration at all?
+    pub fn call_graph_enabled(&self) -> bool {
+        self.project.config.call_graph.enabled
+    }
+
+    /// Is this name on the ubiquitous-callables stop-list (in any language)?
+    /// Such names never get call edges by design — adapters must say so instead
+    /// of returning a silent empty result.
+    pub fn is_ubiquitous_callee(&self, name: &str) -> bool {
+        kungfu_index::is_stoplisted_name(name)
+    }
+
+    /// Config-aware description of how call-graph edges are derived and
+    /// filtered. Attached as `provenance` to callers/callees/affected responses
+    /// so a filtered result never masquerades as an exhaustive one.
+    pub fn call_graph_provenance(&self) -> String {
+        let cfg = &self.project.config.call_graph;
+        if !cfg.enabled {
+            return "call graph disabled by config ([call_graph] enabled = false) — no Calls \
+                    relations are stored"
+                .to_string();
+        }
+        let mut parts = vec![
+            "AST call graph; an edge exists only when the callee name resolves unambiguously — \
+             ambiguous names (several same-name definitions) are omitted, not guessed"
+                .to_string(),
+            "ubiquitous std/utility callee names are filtered per language".to_string(),
+        ];
+        if cfg.cross_file_only {
+            parts.push("cross-file edges only (same-file calls are not stored)".to_string());
+        }
+        if cfg.max_caller_files > 0 {
+            parts.push(format!(
+                "callees invoked from more than {} distinct files are dropped as utility-noise",
+                cfg.max_caller_files
+            ));
+        }
+        parts.join("; ")
+    }
+
     /// Find all symbols that call the given symbol (callers / "who calls this?").
     pub fn callers(&self, name: &str, budget: Budget) -> Result<Vec<(Symbol, String)>> {
         let budget = self.resolve_budget(budget);

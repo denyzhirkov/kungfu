@@ -67,6 +67,9 @@ pub struct AffectedResult {
     pub entries: Vec<AffectedEntry>,
     pub test_files: Vec<String>,
     pub risk: String,
+    /// How the dependency edges were derived and what was filtered out —
+    /// a bounded result must never look exhaustive (retrieval honesty).
+    pub provenance: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

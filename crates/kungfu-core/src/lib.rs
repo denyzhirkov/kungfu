@@ -68,6 +68,13 @@ impl KungfuService {
         budget.resolve(file_count)
     }
 
+    /// Whether the on-disk index was written by the current schema. A mismatch
+    /// (or a pre-versioning index) means the persisted semantics changed —
+    /// the migration path is a full re-index.
+    fn index_schema_current(&self) -> bool {
+        self.store.load_schema_version() == Some(kungfu_storage::INDEX_SCHEMA_VERSION)
+    }
+
     /// Check if index is stale and auto-reindex if needed.
     /// Compares fingerprints.json mtime with project files.
     pub fn ensure_fresh_index(&self) -> Result<bool> {
@@ -75,6 +82,12 @@ impl KungfuService {
         if !fp_path.exists() {
             // No index at all — full index needed
             info!("no index found, running full index");
+            self.index_full()?;
+            return Ok(true);
+        }
+
+        if !self.index_schema_current() {
+            info!("index schema is outdated, running full reindex");
             self.index_full()?;
             return Ok(true);
         }
@@ -170,6 +183,12 @@ impl KungfuService {
     }
 
     pub fn index_incremental(&self) -> Result<kungfu_index::indexer::IndexStats> {
+        // An incremental run merges into the existing index; if that index was
+        // written under an older schema, merging would mix semantics — rebuild.
+        if !self.index_schema_current() {
+            info!("index schema is outdated, upgrading via full reindex");
+            return self.index_full();
+        }
         self.store.invalidate();
         let mut indexer =
             Indexer::new(&self.project.root, self.project.config.clone(), &self.store);
@@ -182,6 +201,10 @@ impl KungfuService {
     pub fn index_paths(&self, paths: &[String]) -> Result<kungfu_index::indexer::IndexStats> {
         if paths.is_empty() {
             bail!("no paths given — pass the files you changed, or run a full/incremental index");
+        }
+        if !self.index_schema_current() {
+            info!("index schema is outdated, upgrading via full reindex");
+            return self.index_full();
         }
         let root = &self.project.root;
         let rels: Vec<String> = paths
@@ -210,7 +233,12 @@ impl KungfuService {
                 changed_files: 0,
                 removed_files: 0,
                 symbols_extracted: 0,
+                call_edges_filtered: 0,
             });
+        }
+        if !self.index_schema_current() {
+            info!("index schema is outdated, upgrading via full reindex");
+            return self.index_full();
         }
         self.store.invalidate();
         let mut indexer =
