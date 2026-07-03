@@ -1,0 +1,18 @@
+{
+  "id": "case-015",
+  "category": "debug",
+  "project": "kungfu",
+  "task": "Find where search scoring and relevance matching happens",
+  "input": {
+    "query": "search scoring relevance score match",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["kungfu-search/src/lib.rs"],
+    "should_include": ["kungfu-rank/src/lib.rs"],
+    "should_not_include": ["Cargo.lock", "README.md"],
+    "max_files": 8,
+    "max_bytes": 8000
+  }
+}

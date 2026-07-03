@@ -1,0 +1,21 @@
+{
+  "id": "case-004",
+  "category": "debug",
+  "project": "kungfu",
+  "task": "Find where intent detection happens in ask-context (moved to helpers.rs in the core split)",
+  "input": {
+    "query": "intent detection ask context",
+    "command": "search-text",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "kungfu-core/src/helpers.rs"
+    ],
+    "should_not_include": [
+      "Cargo.lock",
+      "README.md"
+    ],
+    "max_files": 8
+  }
+}

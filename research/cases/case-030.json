@@ -1,0 +1,24 @@
+{
+  "id": "case-030",
+  "category": "concept-recall",
+  "project": "deno",
+  "task": "Find runtime permission checks from an enforcement question",
+  "input": {
+    "query": "where are file system permission checks enforced",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "runtime/permissions"
+    ],
+    "should_include": [
+      "ops/permissions.rs"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

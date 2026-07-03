@@ -1,0 +1,18 @@
+{
+  "id": "case-018",
+  "category": "orientation",
+  "project": "kungfu",
+  "task": "Understand the full indexing pipeline from scan to storage",
+  "input": {
+    "query": "index scan files symbols storage save",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["kungfu-index"],
+    "should_include": ["index", "scan"],
+    "should_not_include": ["README.md"],
+    "max_files": 10,
+    "max_bytes": 5000
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "id": "case-047",
+  "category": "cross-file",
+  "project": "redis",
+  "task": "Socket read -> command dispatch spans networking.c and server.c",
+  "input": {
+    "query": "how does a client command travel from socket read to the command handler",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "src/networking.c",
+      "src/server.c"
+    ],
+    "should_include": [
+      "processCommand"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 6000
+  }
+}

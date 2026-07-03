@@ -1,0 +1,18 @@
+{
+  "id": "case-008",
+  "category": "feature-understanding",
+  "project": "ktor",
+  "task": "Find where HTTP routing is configured in Ktor",
+  "input": {
+    "query": "HTTP routing route get post",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["Routing"],
+    "should_include": ["Route"],
+    "should_not_include": ["README.md"],
+    "max_files": 12,
+    "max_bytes": 10000
+  }
+}

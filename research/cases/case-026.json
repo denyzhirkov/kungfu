@@ -1,0 +1,24 @@
+{
+  "id": "case-026",
+  "category": "concept-recall",
+  "project": "django",
+  "task": "Find the migration executor from an apply-migrations question",
+  "input": {
+    "query": "how are pending database migrations applied to the database",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "db/migrations/executor.py"
+    ],
+    "should_include": [
+      "db/migrations/loader.py"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

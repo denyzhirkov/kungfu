@@ -1,0 +1,24 @@
+{
+  "id": "case-021",
+  "category": "concept-recall",
+  "project": "redis",
+  "task": "Find where key expiration (TTL) is implemented",
+  "input": {
+    "query": "where is key expiration handled",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "src/expire.c"
+    ],
+    "should_include": [
+      "src/db.c"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

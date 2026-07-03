@@ -1,0 +1,25 @@
+{
+  "id": "case-045",
+  "category": "over-selection",
+  "project": "kungfu",
+  "task": "Packet assembly and budget trim with a tight 4-file limit",
+  "input": {
+    "query": "how are context packets assembled and trimmed to fit the budget",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "kungfu-rank/src/lib.rs"
+    ],
+    "should_include": [
+      "build_context_packet"
+    ],
+    "should_not_include": [
+      "Cargo.lock",
+      "README.md"
+    ],
+    "max_files": 4,
+    "max_bytes": 3000
+  }
+}

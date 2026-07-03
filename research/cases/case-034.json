@@ -1,0 +1,16 @@
+{
+  "id": "case-034",
+  "category": "identifier-mismatch",
+  "project": "next.js",
+  "task": "find-symbol \"get server side props\" vs camelCase getServerSideProps",
+  "input": {
+    "query": "get server side props",
+    "command": "find-symbol"
+  },
+  "expected": {
+    "must_include": [
+      "getServerSideProps"
+    ],
+    "max_files": 10
+  }
+}

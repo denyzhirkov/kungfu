@@ -1,0 +1,18 @@
+{
+  "id": "case-017",
+  "category": "debug",
+  "project": "kungfu",
+  "task": "Find where MCP tools are registered and dispatched",
+  "input": {
+    "query": "MCP tool register dispatch handler",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["kungfu-mcp/src/lib.rs"],
+    "should_include": ["KungfuMcp"],
+    "should_not_include": ["README.md", "Cargo.lock"],
+    "max_files": 8,
+    "max_bytes": 4000
+  }
+}

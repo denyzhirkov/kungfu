@@ -1,0 +1,18 @@
+{
+  "id": "case-001",
+  "category": "feature-understanding",
+  "project": "kungfu",
+  "task": "Find where context ranking and budget allocation is implemented",
+  "input": {
+    "query": "context ranking budget allocation",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["kungfu-rank/src/lib.rs"],
+    "should_include": ["build_context_packet"],
+    "should_not_include": ["README.md", "Cargo.lock"],
+    "max_files": 10,
+    "max_bytes": 5000
+  }
+}

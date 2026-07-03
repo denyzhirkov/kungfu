@@ -1,0 +1,25 @@
+{
+  "id": "case-049",
+  "category": "cross-file",
+  "project": "axum",
+  "task": "Router match -> handler call spans routing/mod.rs and path_router.rs",
+  "input": {
+    "query": "how does the router match a request path and invoke the handler",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "src/routing/mod.rs",
+      "src/routing/path_router.rs"
+    ],
+    "should_include": [
+      "call_with_state"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 6000
+  }
+}

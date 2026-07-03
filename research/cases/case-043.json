@@ -1,0 +1,21 @@
+{
+  "id": "case-043",
+  "category": "over-selection",
+  "project": "langchain",
+  "task": "Retriever interface with a tight 4-file limit",
+  "input": {
+    "query": "how do retrievers fetch relevant documents for a query",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "langchain_core/retrievers.py"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 4,
+    "max_bytes": 4000
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "id": "case-038",
+  "category": "identifier-mismatch",
+  "project": "spring-boot",
+  "task": "find-symbol \"rest template builder\" vs CamelCase RestTemplateBuilder",
+  "input": {
+    "query": "rest template builder",
+    "command": "find-symbol"
+  },
+  "expected": {
+    "must_include": [
+      "RestTemplateBuilder"
+    ],
+    "max_files": 10
+  }
+}

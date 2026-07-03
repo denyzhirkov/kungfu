@@ -1,0 +1,24 @@
+{
+  "id": "case-037",
+  "category": "identifier-mismatch",
+  "project": "gin",
+  "task": "NL \"serve static files\" vs Static/StaticFS methods in routergroup.go",
+  "input": {
+    "query": "serve static files from a directory",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "routergroup.go"
+    ],
+    "should_include": [
+      "Static"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

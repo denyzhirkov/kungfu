@@ -1,0 +1,16 @@
+{
+  "id": "case-012",
+  "category": "file-discovery",
+  "project": "aspnetcore",
+  "task": "Find WebApplication class",
+  "input": {
+    "query": "WebApplication",
+    "command": "find-symbol",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["WebApplication"],
+    "should_not_include": [],
+    "max_files": 15
+  }
+}

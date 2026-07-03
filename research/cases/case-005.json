@@ -1,0 +1,18 @@
+{
+  "id": "case-005",
+  "category": "feature-understanding",
+  "project": "spring-boot",
+  "task": "Find where Spring dependency injection container is initialized",
+  "input": {
+    "query": "dependency injection container initialization ApplicationContext",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["ApplicationContext"],
+    "should_include": ["Context"],
+    "should_not_include": ["README.md"],
+    "max_files": 12,
+    "max_bytes": 5000
+  }
+}

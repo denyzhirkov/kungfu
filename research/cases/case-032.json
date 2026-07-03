@@ -1,0 +1,16 @@
+{
+  "id": "case-032",
+  "category": "identifier-mismatch",
+  "project": "ktor",
+  "task": "find-symbol with space-separated words vs CamelCase WebSocketSession",
+  "input": {
+    "query": "web socket session",
+    "command": "find-symbol"
+  },
+  "expected": {
+    "must_include": [
+      "WebSocketSession"
+    ],
+    "max_files": 10
+  }
+}

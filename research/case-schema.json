@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kungfu Benchmark Case",
+  "type": "object",
+  "required": [
+    "id",
+    "category",
+    "project",
+    "task",
+    "input",
+    "expected"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^case-[0-9]{3}$",
+      "description": "Unique case identifier"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "file-discovery",
+        "feature-understanding",
+        "refactor-prep",
+        "debug",
+        "orientation",
+        "concept-recall",
+        "identifier-mismatch",
+        "over-selection",
+        "cross-file"
+      ],
+      "description": "Task category"
+    },
+    "project": {
+      "type": "string",
+      "description": "Target project directory name under kungfu-bench/ or 'kungfu' for self"
+    },
+    "task": {
+      "type": "string",
+      "description": "Human-readable task description"
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Query to pass to kungfu command"
+        },
+        "command": {
+          "type": "string",
+          "enum": [
+            "ask-context",
+            "find-symbol",
+            "search-text",
+            "context"
+          ],
+          "default": "ask-context",
+          "description": "Kungfu CLI command to run"
+        },
+        "budget": {
+          "type": "string",
+          "enum": [
+            "tiny",
+            "small",
+            "medium",
+            "full"
+          ],
+          "default": "small"
+        }
+      }
+    },
+    "expected": {
+      "type": "object",
+      "properties": {
+        "must_include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "File path substrings that MUST appear in output"
+        },
+        "should_include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "File path substrings that SHOULD appear (bonus points)"
+        },
+        "should_not_include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "File path substrings that should NOT appear"
+        },
+        "max_files": {
+          "type": "integer",
+          "description": "Maximum acceptable number of selected files"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "description": "Maximum acceptable output size in bytes"
+        }
+      }
+    }
+  }
+}

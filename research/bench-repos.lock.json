@@ -1,0 +1,77 @@
+{
+  "_comment": "Pinned benchmark target repos. Clone each url into kungfu-bench/<name>, checkout the exact commit, then run `kungfu init && kungfu index` inside it. Working trees must stay clean except the untracked .kungfu/ index dir.",
+  "repos": {
+    "aspnetcore": {
+      "url": "https://github.com/dotnet/aspnetcore.git",
+      "commit": "41822eeedb4a240e411a6b54d50585f9b7674d28"
+    },
+    "axum": {
+      "url": "https://github.com/tokio-rs/axum.git",
+      "commit": "da26db264f811e73485f1db1c134d374e8f99464"
+    },
+    "cargo": {
+      "url": "https://github.com/rust-lang/cargo.git",
+      "commit": "592bc40115849f2f16855f4adb6cc795c208765b"
+    },
+    "datagrok": {
+      "url": "https://github.com/datagrok-ai/public.git",
+      "commit": "f282e3c83e9bdcea2f99f93fe5cadef7109cd714"
+    },
+    "deno": {
+      "url": "https://github.com/denoland/deno.git",
+      "commit": "4a19007d8164dafbb1ee9b8db9767260619728d3"
+    },
+    "django": {
+      "url": "https://github.com/django/django.git",
+      "commit": "ad5ea292748246b2f07f3e379a250985c1ebcba5"
+    },
+    "express": {
+      "url": "https://github.com/expressjs/express.git",
+      "commit": "6c4249feec8ab40631817c8e7001baf2ed022224"
+    },
+    "flask": {
+      "url": "https://github.com/pallets/flask.git",
+      "commit": "4cae5d8e411b1e69949d8fae669afeacbd3e5908"
+    },
+    "gin": {
+      "url": "https://github.com/gin-gonic/gin.git",
+      "commit": "ecd26c8835574b47acdc9cb6a5dddcc6fe922140"
+    },
+    "go": {
+      "url": "https://github.com/golang/go.git",
+      "commit": "6614616b7576a8011053c4b50fbb5e64d469837b"
+    },
+    "home-assistant": {
+      "url": "https://github.com/home-assistant/core.git",
+      "commit": "e35fc8267e39e31eeb10c08e0ffc7ab89ed702dc"
+    },
+    "ktor": {
+      "url": "https://github.com/ktorio/ktor.git",
+      "commit": "5710ef96df59def98cfa5558780dc9d6bcc9dd4b"
+    },
+    "langchain": {
+      "url": "https://github.com/langchain-ai/langchain.git",
+      "commit": "5c6fa28192505ad1caf5126520f2a0dc218d0c75"
+    },
+    "next.js": {
+      "url": "https://github.com/vercel/next.js.git",
+      "commit": "2e4f08ca0aa4a7f6fb1fc04bbc72e17713edfac4"
+    },
+    "react": {
+      "url": "https://github.com/facebook/react.git",
+      "commit": "c80a07509582daadf275f36ffe7a88c3b12e9db4"
+    },
+    "redis": {
+      "url": "https://github.com/redis/redis.git",
+      "commit": "63d841c3ae8760668a33c41acd2255f61669fe85"
+    },
+    "ruff": {
+      "url": "https://github.com/astral-sh/ruff.git",
+      "commit": "c48370cb55e6f77a1aced076a7629cbe604483ea"
+    },
+    "spring-boot": {
+      "url": "https://github.com/spring-projects/spring-boot.git",
+      "commit": "d10f1b8399067634220763968a798ae6a239e243"
+    }
+  }
+}

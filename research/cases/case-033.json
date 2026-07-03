@@ -1,0 +1,16 @@
+{
+  "id": "case-033",
+  "category": "identifier-mismatch",
+  "project": "react",
+  "task": "find-symbol \"use effect\" vs camelCase useEffect",
+  "input": {
+    "query": "use effect",
+    "command": "find-symbol"
+  },
+  "expected": {
+    "must_include": [
+      "ReactHooks.js"
+    ],
+    "max_files": 10
+  }
+}
