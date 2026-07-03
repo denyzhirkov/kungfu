@@ -323,19 +323,20 @@ max_caller_files = 25   # callee invoked from more distinct files is utility-noi
 
 ## Benchmarks
 
-Indexing and query latency across popular projects (Apple Silicon):
+Indexing and query latency across popular projects (Apple Silicon, v2.6.0):
 
-| Project | Language | Files | Symbols | Index | ask-context |
-|---------|----------|------:|--------:|------:|------------:|
-| express | JS       |   201 |   1,948 |  0.5s |       227ms |
-| gin     | Go       |   118 |   1,487 |  0.7s |       217ms |
-| axum    | Rust     |   474 |   2,771 |  1.3s |       269ms |
-| cargo   | Rust     | 2,718 |  12,009 | 17.4s |       783ms |
-| django  | Python   | 6,907 |  42,917 | 37.9s |     2,125ms |
-| ruff    | Rust     | 9,702 |  42,239 | 67.2s |     2,300ms |
-| go      | Go       |14,022 | 105,497 |186.8s |     4,661ms |
+| Project | Language | Files | Symbols | Index | ask-context | callers |
+|---------|----------|------:|--------:|------:|------------:|--------:|
+| express | JS       |   201 |   1,948 |  0.2s |        66ms |    11ms |
+| gin     | Go       |   118 |   1,487 |  0.2s |       174ms |    11ms |
+| axum    | Rust     |   474 |   3,137 |  0.3s |        92ms |    12ms |
+| cargo   | Rust     | 2,718 |  12,422 |  2.6s |       287ms |    23ms |
+| django  | Python   | 6,907 |  42,917 |  4.9s |       613ms |    53ms |
+| ruff    | Rust     | 9,702 |  46,195 |  5.7s |       618ms |    55ms |
+| go      | Go       |13,869 | 105,485 | 16.9s |     1,461ms |   113ms |
 
-See [BENCHMARKS.md](BENCHMARKS.md) for full results.
+See [BENCHMARKS.md](BENCHMARKS.md) for full results, methodology, and v2.5 → v2.6 deltas
+(`callers` on go: 25.4s → 0.11s).
 
 ## License
 
