@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod agent_health;
 pub mod agent_init;
 pub mod templates;
 

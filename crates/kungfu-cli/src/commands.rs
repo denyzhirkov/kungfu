@@ -1,6 +1,7 @@
 use anyhow::Result;
 use kungfu_core::KungfuService;
 use kungfu_memory::project_search::MemoryFilter;
+use kungfu_project::agent_health::{self, CheckStatus};
 use kungfu_project::{find_project_root, init_project, KUNGFU_VERSION};
 use kungfu_types::memory::ProjectMemoryKind;
 use kungfu_types::Budget;
@@ -156,19 +157,31 @@ pub fn status(json: bool) -> Result<()> {
 
 pub fn doctor(json: bool, fix: bool) -> Result<()> {
     let cwd = env::current_dir()?;
-    let mut checks: Vec<(&str, bool, String)> = Vec::new();
+    let mut checks: Vec<(&str, CheckStatus, String)> = Vec::new();
+    // Binary pass/fail checks: true → ok, false → problem.
+    let st = |ok: bool| {
+        if ok {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Problem
+        }
+    };
 
     // Check version
-    checks.push(("version", true, KUNGFU_VERSION.to_string()));
+    checks.push(("version", CheckStatus::Ok, KUNGFU_VERSION.to_string()));
 
     // Check project root
     match find_project_root(&cwd) {
         Ok(root) => {
             let kungfu_dir = root.join(".kungfu");
-            checks.push(("project_root", true, root.to_string_lossy().to_string()));
+            checks.push((
+                "project_root",
+                CheckStatus::Ok,
+                root.to_string_lossy().to_string(),
+            ));
             checks.push((
                 "kungfu_dir",
-                kungfu_dir.exists(),
+                st(kungfu_dir.exists()),
                 if kungfu_dir.exists() {
                     ".kungfu exists".into()
                 } else {
@@ -190,7 +203,7 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
                 };
                 checks.push((
                     "config",
-                    config_ok && !config_detail.starts_with("parse"),
+                    st(config_ok && !config_detail.starts_with("parse")),
                     config_detail,
                 ));
 
@@ -199,7 +212,7 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
                 let project_ok = project_path.exists();
                 checks.push((
                     "project_meta",
-                    project_ok,
+                    st(project_ok),
                     if project_ok {
                         "project.json exists".into()
                     } else {
@@ -226,11 +239,15 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
                                 .map(|v| v.len())
                         })
                         .unwrap_or(0);
-                    checks.push(("index_files", true, format!("{} files indexed", file_count)));
+                    checks.push((
+                        "index_files",
+                        CheckStatus::Ok,
+                        format!("{} files indexed", file_count),
+                    ));
                 } else {
                     checks.push((
                         "index_files",
-                        false,
+                        CheckStatus::Problem,
                         "not indexed — run 'kungfu index'".into(),
                     ));
                 }
@@ -246,16 +263,16 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
                         .unwrap_or(0);
                     checks.push((
                         "index_symbols",
-                        true,
+                        CheckStatus::Ok,
                         format!("{} symbols extracted", sym_count),
                     ));
                 } else {
-                    checks.push(("index_symbols", false, "no symbols".into()));
+                    checks.push(("index_symbols", CheckStatus::Problem, "no symbols".into()));
                 }
 
                 checks.push((
                     "index_fingerprints",
-                    has_fp,
+                    st(has_fp),
                     if has_fp {
                         "fingerprints tracked".into()
                     } else {
@@ -276,13 +293,13 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
                         .unwrap_or(0);
                     checks.push((
                         "index_relations",
-                        rel_count > 0,
+                        st(rel_count > 0),
                         format!("{} relations (imports, tests, configs)", rel_count),
                     ));
                 } else {
                     checks.push((
                         "index_relations",
-                        false,
+                        CheckStatus::Problem,
                         "no relations — reindex with 'kungfu index --full'".into(),
                     ));
                 }
@@ -348,7 +365,7 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
 
                     checks.push((
                         "symbol_coverage",
-                        pct >= 50,
+                        st(pct >= 50),
                         format!("{}/{}  code files have symbols ({}%)", covered, total, pct),
                     ));
                 }
@@ -359,7 +376,7 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
                     let d = kungfu_dir.join(dir);
                     checks.push((
                         dir,
-                        d.exists(),
+                        st(d.exists()),
                         if d.exists() {
                             "ok".into()
                         } else {
@@ -368,53 +385,164 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
                     ));
                 }
 
-                // Manual memory store (.kungfu/memory). With --fix, absorb a stray
-                // legacy project_memory.json left by an outdated binary.
-                match KungfuService::open(&cwd).and_then(|s| s.memory_doctor(fix)) {
-                    Ok(d) => {
-                        checks.push((
-                            "memory_store",
-                            true,
-                            format!(
-                                "{} entries ({} active, {} archived)",
-                                d.total, d.active, d.archived
-                            ),
-                        ));
-                        if let Some(rep) = &d.absorbed {
-                            checks.push((
-                                "memory_absorbed",
-                                true,
+                let service = KungfuService::open(&cwd);
+
+                // Version coherence: which binary wrote the index? A running MCP
+                // server does not pick up a replaced binary, so a mismatch usually
+                // means a stale server (or a stale index) is in play.
+                if has_files {
+                    if let Ok(s) = &service {
+                        match s.index_store_version() {
+                            Some(v) if v == KUNGFU_VERSION => checks.push((
+                                "index_version",
+                                CheckStatus::Ok,
+                                format!("index written by this version (v{})", v),
+                            )),
+                            Some(v) => checks.push((
+                                "index_version",
+                                CheckStatus::Warning,
                                 format!(
-                                    "absorbed {} legacy entr{} ({} duplicate(s) skipped, {} renumbered)",
-                                    rep.added.len(),
-                                    if rep.added.len() == 1 { "y" } else { "ies" },
-                                    rep.skipped_duplicates,
-                                    rep.renumbered.len()
+                                    "index written by kungfu v{}, this binary is v{} — \
+                                     run 'kungfu index --full', and restart the MCP server if one is running",
+                                    v, KUNGFU_VERSION
                                 ),
-                            ));
-                        } else if d.legacy_present {
-                            checks.push((
-                                "memory_legacy",
-                                false,
-                                "stray legacy project_memory.json present (outdated binary?) — \
-                                 restart the MCP server, then run 'kungfu doctor --fix' to absorb it"
+                            )),
+                            None => checks.push((
+                                "index_version",
+                                CheckStatus::Warning,
+                                "index has no version stamp (written by an older kungfu) — \
+                                 run 'kungfu index --full', and restart the MCP server if one is running"
                                     .into(),
-                            ));
+                            )),
                         }
                     }
-                    Err(e) => checks.push(("memory_store", false, format!("error: {}", e))),
+                }
+
+                // Manual memory store (.kungfu/memory). With --fix, absorb a stray
+                // legacy project_memory.json left by an outdated binary.
+                match &service {
+                    Ok(s) => match s.memory_doctor(fix) {
+                        Ok(d) => {
+                            checks.push((
+                                "memory_store",
+                                CheckStatus::Ok,
+                                format!(
+                                    "{} entries ({} active, {} archived)",
+                                    d.total, d.active, d.archived
+                                ),
+                            ));
+                            if let Some(rep) = &d.absorbed {
+                                checks.push((
+                                    "memory_absorbed",
+                                    CheckStatus::Ok,
+                                    format!(
+                                        "absorbed {} legacy entr{} ({} duplicate(s) skipped, {} renumbered)",
+                                        rep.added.len(),
+                                        if rep.added.len() == 1 { "y" } else { "ies" },
+                                        rep.skipped_duplicates,
+                                        rep.renumbered.len()
+                                    ),
+                                ));
+                            } else if d.legacy_present {
+                                checks.push((
+                                    "memory_legacy",
+                                    CheckStatus::Warning,
+                                    "stray legacy project_memory.json present (outdated binary?) — \
+                                     restart the MCP server, then run 'kungfu doctor --fix' to absorb it"
+                                        .into(),
+                                ));
+                            }
+                        }
+                        Err(e) => checks.push((
+                            "memory_store",
+                            CheckStatus::Problem,
+                            format!("error: {}", e),
+                        )),
+                    },
+                    Err(e) => checks.push((
+                        "memory_store",
+                        CheckStatus::Problem,
+                        format!("error: {}", e),
+                    )),
+                }
+
+                // Embeddings staleness: only meaningful when the user opted in
+                // (a manifest exists). Never auto-builds — building downloads
+                // models and stays an explicit `kungfu embeddings build`.
+                if let Ok(s) = &service {
+                    if let Ok(es) = s.embeddings_status() {
+                        if es.index_present {
+                            if es.indexed_vectors < es.indexed_symbols {
+                                checks.push((
+                                    "embeddings",
+                                    CheckStatus::Warning,
+                                    format!("vectors lag the index — {}", es.hint),
+                                ));
+                            } else {
+                                checks.push((
+                                    "embeddings",
+                                    CheckStatus::Ok,
+                                    format!(
+                                        "{} vectors in sync with {} symbols",
+                                        es.indexed_vectors, es.indexed_symbols
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                 }
             }
+
+            // Claude Code integration (.mcp.json / CLAUDE.md rules block /
+            // auto-reindex hook). Absence of the whole integration is only an
+            // info line; --fix re-runs the same idempotent sync as
+            // `kungfu init --agent claude`.
+            let mut health = agent_health::check_claude_integration(&root);
+            if fix && health.needs_sync {
+                use kungfu_project::agent_init::{init_claude_integration, ActionStatus};
+                match init_claude_integration(&root, false) {
+                    Ok(actions) => {
+                        for a in actions
+                            .iter()
+                            .filter(|a| a.status != ActionStatus::AlreadyCurrent)
+                        {
+                            checks.push((
+                                "claude_fixed",
+                                CheckStatus::Ok,
+                                format!("{}: {}", a.path, a.detail),
+                            ));
+                        }
+                        health = agent_health::check_claude_integration(&root);
+                    }
+                    Err(e) => checks.push((
+                        "claude_fix",
+                        CheckStatus::Problem,
+                        format!("--fix could not repair the Claude integration: {}", e),
+                    )),
+                }
+            }
+            for c in health.checks {
+                checks.push((c.name, c.status, c.detail));
+            }
+
+            // Binary/version coherence: agents launch the MCP server via the
+            // PATH binary; doctor may be running from a different build.
+            let bin = agent_health::path_binary_check(health.configured);
+            checks.push((bin.name, bin.status, bin.detail));
         }
         Err(e) => {
-            checks.push(("project_root", false, e.to_string()));
+            checks.push(("project_root", CheckStatus::Problem, e.to_string()));
         }
     }
 
     // Git
     checks.push((
         "git",
-        kungfu_git::is_git_repo(&cwd),
+        if kungfu_git::is_git_repo(&cwd) {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warning
+        },
         if kungfu_git::is_git_repo(&cwd) {
             "git repository detected".into()
         } else {
@@ -425,34 +553,49 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
     // Parser support
     checks.push((
         "parsers",
-        true,
+        CheckStatus::Ok,
         "rust, typescript, javascript, python, go, java, csharp, kotlin, c, cpp".into(),
     ));
 
     if json {
         let items: Vec<_> = checks
             .iter()
-            .map(|(name, ok, detail)| {
+            .map(|(name, status, detail)| {
                 serde_json::json!({
                     "check": name,
-                    "ok": ok,
+                    "ok": !status.needs_attention(),
+                    "status": status.as_str(),
                     "detail": detail,
                 })
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
     } else {
-        let all_ok = checks.iter().all(|(_, ok, _)| *ok);
-        for (name, ok, detail) in &checks {
-            let icon = if *ok { "OK" } else { "!!" };
+        for (name, status, detail) in &checks {
+            let icon = match status {
+                CheckStatus::Ok => "OK",
+                CheckStatus::Info => "--",
+                CheckStatus::Warning => "!?",
+                CheckStatus::Problem => "!!",
+            };
             println!("  [{}] {}: {}", icon, name, detail);
         }
         println!();
-        if all_ok {
+        let problems = checks
+            .iter()
+            .filter(|(_, s, _)| *s == CheckStatus::Problem)
+            .count();
+        let warnings = checks
+            .iter()
+            .filter(|(_, s, _)| *s == CheckStatus::Warning)
+            .count();
+        if problems == 0 && warnings == 0 {
             println!("All checks passed.");
         } else {
-            let failed = checks.iter().filter(|(_, ok, _)| !ok).count();
-            println!("{} check(s) need attention.", failed);
+            println!(
+                "{} problem(s), {} warning(s) need attention.",
+                problems, warnings
+            );
         }
     }
     Ok(())

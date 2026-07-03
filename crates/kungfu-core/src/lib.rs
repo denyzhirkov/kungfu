@@ -140,6 +140,12 @@ impl KungfuService {
         }
     }
 
+    /// Version of the binary that last wrote the index (`store_meta.json`
+    /// stamp), if any. Used by `kungfu doctor` for version-coherence checks.
+    pub fn index_store_version(&self) -> Option<String> {
+        self.store().load_store_version()
+    }
+
     pub fn status(&self) -> Result<StatusInfo> {
         let store = self.store();
         let files = store.load_files()?;

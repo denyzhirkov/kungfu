@@ -36,9 +36,10 @@ enum Commands {
     /// Show project status and index health
     Status,
 
-    /// Validate installation, config, and index integrity
+    /// Validate installation, config, index integrity, and agent integration
     Doctor {
-        /// Repair what is safely fixable (e.g. absorb a stray legacy memory file)
+        /// Repair what is safely fixable (absorb a stray legacy memory file,
+        /// re-sync the Claude Code integration files)
         #[arg(long)]
         fix: bool,
     },

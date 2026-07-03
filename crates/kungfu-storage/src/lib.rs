@@ -29,6 +29,16 @@ pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Sidecar stamp naming the binary version that last wrote the index.
+/// Additive: older binaries ignore it; its absence means the index was
+/// written by a version that predates the stamp.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoreMeta {
+    written_by: String,
+}
+
+const STORE_META_FILE: &str = "store_meta.json";
+
 pub struct JsonStore {
     base_dir: std::path::PathBuf,
     // In-memory caches: loaded once per JsonStore instance
@@ -70,7 +80,41 @@ impl JsonStore {
         atomic_write(&path, &json)?;
         debug!("saved {} files to index", files.len());
         *self.files_cache.borrow_mut() = Some(files.to_vec());
+        self.stamp_store_version()?;
         Ok(())
+    }
+
+    /// Record which binary version wrote the index (every index run saves
+    /// `files.json`, so stamping here cannot be forgotten). Workspace crates
+    /// share one version, so `CARGO_PKG_VERSION` equals the binary version.
+    fn stamp_store_version(&self) -> Result<()> {
+        let meta = StoreMeta {
+            written_by: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let path = self.base_dir.join(STORE_META_FILE);
+        atomic_write(&path, &serde_json::to_string(&meta)?)
+    }
+
+    /// Version of the binary that last wrote the index, if stamped.
+    /// `None` means no index yet, a pre-stamp binary wrote it, or the stamp is
+    /// unreadable (logged at debug) — callers treat all three as "unknown".
+    pub fn load_store_version(&self) -> Option<String> {
+        let path = self.base_dir.join(STORE_META_FILE);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                debug!("failed to read {}: {}", path.display(), e);
+                return None;
+            }
+        };
+        match serde_json::from_str::<StoreMeta>(&content) {
+            Ok(meta) => Some(meta.written_by),
+            Err(e) => {
+                debug!("failed to parse {}: {}", path.display(), e);
+                None
+            }
+        }
     }
 
     pub fn load_files(&self) -> Result<Vec<FileEntry>> {
@@ -312,6 +356,27 @@ mod tests {
             "tmp file left behind: {:?}",
             leftovers
         );
+    }
+
+    #[test]
+    fn save_files_stamps_store_version() {
+        let dir = temp_dir("stamp");
+        let store = JsonStore::new(&dir);
+        assert_eq!(store.load_store_version(), None);
+
+        store.save_files(&[]).unwrap();
+        assert_eq!(
+            store.load_store_version().as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn corrupt_store_stamp_reads_as_unknown() {
+        let dir = temp_dir("stamp-corrupt");
+        let store = JsonStore::new(&dir);
+        std::fs::write(dir.join("store_meta.json"), "{ broken").unwrap();
+        assert_eq!(store.load_store_version(), None);
     }
 
     #[test]

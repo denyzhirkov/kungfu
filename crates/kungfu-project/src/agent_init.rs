@@ -260,7 +260,7 @@ fn sync_settings_json(root: &Path, dry_run: bool) -> Result<AgentInitAction, Age
     })
 }
 
-fn has_kungfu_reindex_hook(post: &[Value]) -> bool {
+pub(crate) fn has_kungfu_reindex_hook(post: &[Value]) -> bool {
     post.iter().any(|entry| {
         entry
             .get("hooks")
