@@ -1,6 +1,6 @@
 {
   "name": "kungfu",
-  "version": "2.5.25",
+  "version": "2.6.0",
   "description": "Context retrieval and distillation engine for coding agents. Indexes your codebase, finds symbols, traces imports, and delivers minimal context packets — saving tokens and speeding up agent workflows.",
   "author": {
     "name": "Denis Zhirkov",
