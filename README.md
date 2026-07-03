@@ -186,6 +186,16 @@ Writes the rules block into the project `CLAUDE.md` (versioned markers — a re-
 
 Pick one path; enabling both is harmless but duplicates the rules in context.
 
+### Keeping it healthy: `kungfu doctor`
+
+`kungfu doctor` validates the whole setup — install, config, index integrity, and the agent integration:
+
+- MCP registration, rules block (including an outdated block version), and the auto-reindex hook — all repairable with `kungfu doctor --fix`;
+- **binary/version coherence**: warns when `kungfu` on `PATH` differs from the binary you ran, or when the index was written by another version (a running MCP server keeps its old binary until restarted — the classic "I upgraded but nothing changed");
+- embeddings staleness (vectors lagging the index) with the exact command to catch up.
+
+A project with no Claude integration gets an info line, not a failure. `--fix` only performs safe, idempotent repairs and prints everything it changed.
+
 ### Manual setup (advanced / other agents)
 
 Add the block below to `CLAUDE.md` or the system prompt. Keep it about *policy and routing* — the agent already sees tool descriptions from MCP. It is a working minimum and the source template for both turnkey paths above; copy it verbatim.
