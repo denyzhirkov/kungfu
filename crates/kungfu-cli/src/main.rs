@@ -22,7 +22,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize kungfu in the current project
-    Init,
+    Init {
+        /// Also set up coding-agent integration (supported: "claude").
+        /// Writes .mcp.json, a CLAUDE.md rules block, and the auto-reindex hook.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// With --agent: show what would be written without touching anything
+        #[arg(long, requires = "agent")]
+        dry_run: bool,
+    },
 
     /// Show project status and index health
     Status,
@@ -471,7 +480,7 @@ fn main() {
     let json = cli.json;
 
     let result = match cli.command {
-        Commands::Init => commands::init(json),
+        Commands::Init { agent, dry_run } => commands::init(agent.as_deref(), dry_run, json),
         Commands::Status => commands::status(json),
         Commands::Doctor { fix } => commands::doctor(json, fix),
         Commands::Config => commands::config_show(json),

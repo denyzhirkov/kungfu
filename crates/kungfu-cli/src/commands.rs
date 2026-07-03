@@ -8,23 +8,115 @@ use std::env;
 
 use crate::{EmbeddingsCommands, MemoryCommands};
 
-pub fn init(json: bool) -> Result<()> {
+pub fn init(agent: Option<&str>, dry_run: bool, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let root = find_project_root(&cwd)?;
-    let project = init_project(&root)?;
+
+    match agent {
+        None => {
+            let project = init_project(&root)?;
+            if json {
+                let info = serde_json::json!({
+                    "status": "initialized",
+                    "root": project.root.to_string_lossy(),
+                    "project_name": project.meta.name,
+                });
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                println!("Initialized kungfu in {}", project.root.display());
+                println!("  project: {}", project.meta.name);
+                println!("  config:  .kungfu/config.toml");
+                println!("\nRun 'kungfu index' to build the project index.");
+            }
+            Ok(())
+        }
+        Some("claude") => init_agent_claude(&root, dry_run, json),
+        Some(other) => anyhow::bail!("unsupported agent '{}' (supported: claude)", other),
+    }
+}
+
+fn init_agent_claude(root: &std::path::Path, dry_run: bool, json: bool) -> Result<()> {
+    use kungfu_project::agent_init::{init_claude_integration, ActionStatus};
+
+    // Ensure the kungfu project itself exists; don't fail if it already does.
+    let kungfu_status = if root.join(kungfu_project::KUNGFU_DIR).exists() {
+        "already current"
+    } else if dry_run {
+        "created"
+    } else {
+        init_project(root)?;
+        "created"
+    };
+
+    let actions = init_claude_integration(root, dry_run)?;
 
     if json {
-        let info = serde_json::json!({
-            "status": "initialized",
-            "root": project.root.to_string_lossy(),
-            "project_name": project.meta.name,
+        let out = serde_json::json!({
+            "status": "ok",
+            "agent": "claude",
+            "dry_run": dry_run,
+            "root": root.to_string_lossy(),
+            "actions": std::iter::once(serde_json::json!({
+                "path": ".kungfu/",
+                "status": kungfu_status,
+                "detail": "kungfu project directory",
+            }))
+            .chain(actions.iter().map(|a| {
+                serde_json::json!({
+                    "path": a.path,
+                    "status": a.status.as_str(),
+                    "detail": a.detail,
+                })
+            }))
+            .collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&info)?);
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let verb = |status: &str| -> String {
+        if dry_run && status != "already current" {
+            format!("would be {status}")
+        } else {
+            status.to_string()
+        }
+    };
+
+    println!(
+        "Claude Code integration in {}{}:",
+        root.display(),
+        if dry_run {
+            " (dry run — nothing written)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  {:<22} {} — kungfu project directory",
+        ".kungfu/",
+        verb(kungfu_status)
+    );
+    for a in &actions {
+        println!(
+            "  {:<22} {} — {}",
+            a.path,
+            verb(a.status.as_str()),
+            a.detail
+        );
+    }
+
+    if dry_run {
+        println!("\nRe-run without --dry-run to apply.");
+    } else if actions
+        .iter()
+        .all(|a| a.status == ActionStatus::AlreadyCurrent)
+    {
+        println!("\nEverything already current — nothing to do.");
     } else {
-        println!("Initialized kungfu in {}", project.root.display());
-        println!("  project: {}", project.meta.name);
-        println!("  config:  .kungfu/config.toml");
-        println!("\nRun 'kungfu index' to build the project index.");
+        println!(
+            "\nNext: restart Claude Code (or reconnect MCP via /mcp) to pick up the kungfu server."
+        );
+        println!("Then run 'kungfu index' if the project is not indexed yet.");
     }
     Ok(())
 }
@@ -609,7 +701,10 @@ pub fn stats(json: bool) -> Result<()> {
                 .saturating_sub(stats.total_bytes_served)
                 / 4;
             println!("  Compression:        {:.1}x", ratio);
-            println!("  Est. tokens saved:  {} (vs reading referenced files)", saved);
+            println!(
+                "  Est. tokens saved:  {} (vs reading referenced files)",
+                saved
+            );
         }
         if let Some(ref first) = stats.first_used {
             println!("  First used:         {}", first);
