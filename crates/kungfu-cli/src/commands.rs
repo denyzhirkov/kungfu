@@ -1474,6 +1474,15 @@ pub fn ask_context(task: &str, budget: Budget, json: bool) -> Result<()> {
         }
         println!("Budget: {}", packet.budget);
         println!("Items:  {}", packet.items.len());
+        if let Some(ref r) = packet.retrieval {
+            match &r.vector_skipped {
+                Some(reason) => println!("Layers: {} — {}", r.mode, reason),
+                None => println!(
+                    "Layers: {} ({} vector candidates)",
+                    r.mode, r.vector_candidates
+                ),
+            }
+        }
         println!();
         for item in &packet.items {
             println!(

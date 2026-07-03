@@ -266,6 +266,7 @@ impl KungfuService {
             "query": packet.query,
             "intent": packet.intent.map(|i| format!("{:?}", i)),
             "budget": format!("{:?}", packet.budget),
+            "retrieval": packet.retrieval,
             "items": items,
         });
 

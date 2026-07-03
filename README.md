@@ -127,7 +127,7 @@ kungfu embeddings build   # downloads BAAI/bge-small-en-v1.5 (~130MB, once), the
 
 From then on vectors maintain themselves — the MCP server re-embeds changed symbols in the background after each reindex and prunes deleted ones. Slim builds (`cargo build --no-default-features`) skip inference and always use keyword mode. The output labels which mode ran (`"mode": "vector"` vs `"keyword_fallback"`) with a `hint` for the next step; `embeddings status` reports readiness and whether a background build is in flight.
 
-`ask_context` also uses vectors when available, adding cosine top-K hits alongside its lexical strategies — so it catches concepts the lexical passes miss without displacing them.
+`ask_context` also uses vectors when available, for every intent: cosine top-K hits join the candidate pool alongside the lexical strategies, weighted below exact name matches — so it catches concepts the lexical passes miss without displacing them. Every packet declares what ran in a `retrieval` block (`"mode": "keyword+vector"` vs `"keyword_only"` plus the skip reason), so a keyword-only answer is never mistaken for a semantic one.
 
 ## MCP server
 
