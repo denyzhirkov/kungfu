@@ -9,8 +9,10 @@ use kungfu_types::symbol::Symbol;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use tracing::debug;
 
+mod process_cache;
 mod project_memory;
 pub use project_memory::{AbsorbReport, MemoryMeta, ProjectMemoryStore};
 
@@ -31,12 +33,14 @@ pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
 
 pub struct JsonStore {
     base_dir: std::path::PathBuf,
-    // In-memory caches: loaded once per JsonStore instance
-    files_cache: RefCell<Option<Vec<FileEntry>>>,
-    symbols_cache: RefCell<Option<Vec<Symbol>>>,
-    relations_cache: RefCell<Option<Vec<Relation>>>,
-    fingerprints_cache: RefCell<Option<HashMap<String, String>>>,
-    memories_cache: RefCell<Option<Vec<MemoryEntry>>>,
+    // Per-instance snapshots: pinned on first load so one service call sees a
+    // consistent view. The process-scope cache behind them (`process_cache`)
+    // survives across instances and stamp-checks the files on each access.
+    files_cache: RefCell<Option<Arc<Vec<FileEntry>>>>,
+    symbols_cache: RefCell<Option<Arc<Vec<Symbol>>>>,
+    relations_cache: RefCell<Option<Arc<Vec<Relation>>>>,
+    fingerprints_cache: RefCell<Option<Arc<HashMap<String, String>>>>,
+    memories_cache: RefCell<Option<Arc<Vec<MemoryEntry>>>>,
     pmem: ProjectMemoryStore,
 }
 
@@ -69,22 +73,25 @@ impl JsonStore {
         let json = serde_json::to_string_pretty(files)?;
         atomic_write(&path, &json)?;
         debug!("saved {} files to index", files.len());
-        *self.files_cache.borrow_mut() = Some(files.to_vec());
+        process_cache::FILES.clear();
+        *self.files_cache.borrow_mut() = Some(Arc::new(files.to_vec()));
         Ok(())
     }
 
-    pub fn load_files(&self) -> Result<Vec<FileEntry>> {
+    /// Shared snapshot of the files shard — no per-call clone.
+    pub fn files_arc(&self) -> Result<Arc<Vec<FileEntry>>> {
         if let Some(cached) = self.files_cache.borrow().as_ref() {
-            return Ok(cached.clone());
+            return Ok(Arc::clone(cached));
         }
-        let path = self.base_dir.join("files.json");
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(&path)?;
-        let files: Vec<FileEntry> = serde_json::from_str(&content)?;
-        *self.files_cache.borrow_mut() = Some(files.clone());
-        Ok(files)
+        let data = process_cache::FILES.get_or_load(&self.base_dir.join("files.json"), |s| {
+            Ok(serde_json::from_str(s)?)
+        })?;
+        *self.files_cache.borrow_mut() = Some(Arc::clone(&data));
+        Ok(data)
+    }
+
+    pub fn load_files(&self) -> Result<Vec<FileEntry>> {
+        Ok(self.files_arc()?.as_ref().clone())
     }
 
     pub fn save_symbols(&self, symbols: &[Symbol]) -> Result<()> {
@@ -92,44 +99,54 @@ impl JsonStore {
         let json = serde_json::to_string(symbols)?;
         atomic_write(&path, &json)?;
         debug!("saved {} symbols to index", symbols.len());
-        *self.symbols_cache.borrow_mut() = Some(symbols.to_vec());
+        process_cache::SYMBOLS.clear();
+        *self.symbols_cache.borrow_mut() = Some(Arc::new(symbols.to_vec()));
         Ok(())
     }
 
-    pub fn load_symbols(&self) -> Result<Vec<Symbol>> {
+    /// Shared snapshot of the symbols shard — no per-call clone.
+    pub fn symbols_arc(&self) -> Result<Arc<Vec<Symbol>>> {
         if let Some(cached) = self.symbols_cache.borrow().as_ref() {
-            return Ok(cached.clone());
+            return Ok(Arc::clone(cached));
         }
-        let path = self.base_dir.join("symbols.json");
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(&path)?;
-        let symbols: Vec<Symbol> = serde_json::from_str(&content)?;
-        *self.symbols_cache.borrow_mut() = Some(symbols.clone());
-        Ok(symbols)
+        let data = process_cache::SYMBOLS
+            .get_or_load(&self.base_dir.join("symbols.json"), |s| {
+                Ok(serde_json::from_str(s)?)
+            })?;
+        *self.symbols_cache.borrow_mut() = Some(Arc::clone(&data));
+        Ok(data)
+    }
+
+    pub fn load_symbols(&self) -> Result<Vec<Symbol>> {
+        Ok(self.symbols_arc()?.as_ref().clone())
     }
 
     pub fn save_relations(&self, relations: &[Relation]) -> Result<()> {
         let path = self.base_dir.join("relations.json");
         let json = serde_json::to_string(relations)?;
         atomic_write(&path, &json)?;
-        *self.relations_cache.borrow_mut() = Some(relations.to_vec());
+        process_cache::RELATIONS.clear();
+        *self.relations_cache.borrow_mut() = Some(Arc::new(relations.to_vec()));
         Ok(())
     }
 
-    pub fn load_relations(&self) -> Result<Vec<Relation>> {
+    /// Shared snapshot of the relations shard — no per-call clone. On large
+    /// projects this is the biggest shard (call graph), so hot paths should
+    /// prefer this over `load_relations`.
+    pub fn relations_arc(&self) -> Result<Arc<Vec<Relation>>> {
         if let Some(cached) = self.relations_cache.borrow().as_ref() {
-            return Ok(cached.clone());
+            return Ok(Arc::clone(cached));
         }
-        let path = self.base_dir.join("relations.json");
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(&path)?;
-        let relations: Vec<Relation> = serde_json::from_str(&content)?;
-        *self.relations_cache.borrow_mut() = Some(relations.clone());
-        Ok(relations)
+        let data = process_cache::RELATIONS
+            .get_or_load(&self.base_dir.join("relations.json"), |s| {
+                Ok(serde_json::from_str(s)?)
+            })?;
+        *self.relations_cache.borrow_mut() = Some(Arc::clone(&data));
+        Ok(data)
+    }
+
+    pub fn load_relations(&self) -> Result<Vec<Relation>> {
+        Ok(self.relations_arc()?.as_ref().clone())
     }
 
     pub fn save_chunks(&self, chunks: &[Chunk]) -> Result<()> {
@@ -152,22 +169,21 @@ impl JsonStore {
         let path = self.base_dir.join("fingerprints.json");
         let json = serde_json::to_string(fingerprints)?;
         atomic_write(&path, &json)?;
-        *self.fingerprints_cache.borrow_mut() = Some(fingerprints.clone());
+        process_cache::FINGERPRINTS.clear();
+        *self.fingerprints_cache.borrow_mut() = Some(Arc::new(fingerprints.clone()));
         Ok(())
     }
 
     pub fn load_fingerprints(&self) -> Result<HashMap<String, String>> {
         if let Some(cached) = self.fingerprints_cache.borrow().as_ref() {
-            return Ok(cached.clone());
+            return Ok(cached.as_ref().clone());
         }
-        let path = self.base_dir.join("fingerprints.json");
-        if !path.exists() {
-            return Ok(HashMap::new());
-        }
-        let content = std::fs::read_to_string(&path)?;
-        let fp: HashMap<String, String> = serde_json::from_str(&content)?;
-        *self.fingerprints_cache.borrow_mut() = Some(fp.clone());
-        Ok(fp)
+        let data = process_cache::FINGERPRINTS
+            .get_or_load(&self.base_dir.join("fingerprints.json"), |s| {
+                Ok(serde_json::from_str(s)?)
+            })?;
+        *self.fingerprints_cache.borrow_mut() = Some(Arc::clone(&data));
+        Ok(data.as_ref().clone())
     }
 
     pub fn save_memories(&self, memories: &[MemoryEntry]) -> Result<()> {
@@ -175,22 +191,26 @@ impl JsonStore {
         let json = serde_json::to_string(memories)?;
         atomic_write(&path, &json)?;
         debug!("saved {} memories to index", memories.len());
-        *self.memories_cache.borrow_mut() = Some(memories.to_vec());
+        process_cache::MEMORIES.clear();
+        *self.memories_cache.borrow_mut() = Some(Arc::new(memories.to_vec()));
         Ok(())
     }
 
-    pub fn load_memories(&self) -> Result<Vec<MemoryEntry>> {
+    /// Shared snapshot of the code-memories shard — no per-call clone.
+    pub fn memories_arc(&self) -> Result<Arc<Vec<MemoryEntry>>> {
         if let Some(cached) = self.memories_cache.borrow().as_ref() {
-            return Ok(cached.clone());
+            return Ok(Arc::clone(cached));
         }
-        let path = self.base_dir.join("memories.json");
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(&path)?;
-        let memories: Vec<MemoryEntry> = serde_json::from_str(&content)?;
-        *self.memories_cache.borrow_mut() = Some(memories.clone());
-        Ok(memories)
+        let data = process_cache::MEMORIES
+            .get_or_load(&self.base_dir.join("memories.json"), |s| {
+                Ok(serde_json::from_str(s)?)
+            })?;
+        *self.memories_cache.borrow_mut() = Some(Arc::clone(&data));
+        Ok(data)
+    }
+
+    pub fn load_memories(&self) -> Result<Vec<MemoryEntry>> {
+        Ok(self.memories_arc()?.as_ref().clone())
     }
 
     // --- Project memory (explicit, user/agent managed) ---
@@ -311,6 +331,107 @@ mod tests {
             leftovers.is_empty(),
             "tmp file left behind: {:?}",
             leftovers
+        );
+    }
+
+    // The process cache holds one snapshot per shard; tests touching the same
+    // shard from different dirs would thrash each other under the parallel test
+    // runner, so they serialize on this lock.
+    static PROCESS_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn relation(source: &str, target: &str) -> Relation {
+        Relation {
+            source_id: source.to_string(),
+            target_id: target.to_string(),
+            kind: kungfu_types::relation::RelationKind::Calls,
+            weight: 1.0,
+        }
+    }
+
+    #[test]
+    fn process_cache_shares_one_parse_across_store_instances() {
+        let _guard = PROCESS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("proc-cache-hit");
+        JsonStore::new(&dir)
+            .save_relations(&[relation("a", "b")])
+            .unwrap();
+
+        // Two fresh instances (the MCP per-call pattern): the second must get
+        // the exact snapshot the first parse produced, not a re-parse.
+        let first = JsonStore::new(&dir).relations_arc().unwrap();
+        let second = JsonStore::new(&dir).relations_arc().unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "unchanged store file must be served from the process cache"
+        );
+    }
+
+    #[test]
+    fn process_cache_detects_rewrite_behind_it() {
+        let _guard = PROCESS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("proc-cache-stale");
+        JsonStore::new(&dir)
+            .save_relations(&[relation("a", "b")])
+            .unwrap();
+        let before = JsonStore::new(&dir).relations_arc().unwrap();
+        assert_eq!(before.len(), 1);
+
+        // Rewrite the file directly (simulates another process / external tool
+        // touching the index — no save_* invalidation involved).
+        let rewritten = serde_json::to_string(&[relation("a", "b"), relation("c", "d")]).unwrap();
+        std::fs::write(dir.join("relations.json"), rewritten).unwrap();
+
+        let after = JsonStore::new(&dir).relations_arc().unwrap();
+        assert_eq!(
+            after.len(),
+            2,
+            "stamp check on read must pick up the rewrite"
+        );
+        // The pre-rewrite snapshot stays intact for readers already holding it.
+        assert_eq!(before.len(), 1);
+    }
+
+    #[test]
+    fn process_cache_refreshes_after_save_from_another_instance() {
+        let _guard = PROCESS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("proc-cache-save");
+        JsonStore::new(&dir)
+            .save_relations(&[relation("a", "b")])
+            .unwrap();
+        assert_eq!(JsonStore::new(&dir).relations_arc().unwrap().len(), 1);
+
+        JsonStore::new(&dir)
+            .save_relations(&[relation("a", "b"), relation("b", "c"), relation("c", "d")])
+            .unwrap();
+        assert_eq!(
+            JsonStore::new(&dir).relations_arc().unwrap().len(),
+            3,
+            "a save must invalidate the process cache for later readers"
+        );
+    }
+
+    #[test]
+    fn process_cache_handles_missing_and_appearing_file() {
+        let _guard = PROCESS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("proc-cache-missing");
+        assert!(JsonStore::new(&dir).relations_arc().unwrap().is_empty());
+
+        JsonStore::new(&dir)
+            .save_relations(&[relation("x", "y")])
+            .unwrap();
+        assert_eq!(
+            JsonStore::new(&dir).relations_arc().unwrap().len(),
+            1,
+            "a file appearing after a cached 'missing' must be picked up"
         );
     }
 

@@ -366,11 +366,11 @@ impl KungfuService {
 
         // Strategy D: import chain (for impact intent)
         if intent == Intent::Impact {
-            let relations = store.load_relations()?;
+            let relations = store.relations_arc()?;
             let file_ids: HashSet<String> =
                 file_results.iter().map(|r| r.item.id.clone()).collect();
 
-            for rel in &relations {
+            for rel in relations.iter() {
                 if rel.kind == RelationKind::Imports && file_ids.contains(&rel.target_id) {
                     let importer_syms: Vec<_> = all_symbols
                         .iter()

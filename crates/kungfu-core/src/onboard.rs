@@ -14,7 +14,7 @@ impl KungfuService {
         let store = self.store();
         let files = store.load_files()?;
         let symbols = store.load_symbols()?;
-        let relations = store.load_relations()?;
+        let relations = store.relations_arc()?;
 
         // Languages
         let mut lang_counts: HashMap<String, usize> = HashMap::new();
@@ -68,7 +68,7 @@ impl KungfuService {
 
         // Key symbols (most connected)
         let mut symbol_connections: HashMap<String, usize> = HashMap::new();
-        for r in &relations {
+        for r in relations.iter() {
             *symbol_connections.entry(r.source_id.clone()).or_default() += 1;
             *symbol_connections.entry(r.target_id.clone()).or_default() += 1;
         }

@@ -609,7 +609,10 @@ pub fn stats(json: bool) -> Result<()> {
                 .saturating_sub(stats.total_bytes_served)
                 / 4;
             println!("  Compression:        {:.1}x", ratio);
-            println!("  Est. tokens saved:  {} (vs reading referenced files)", saved);
+            println!(
+                "  Est. tokens saved:  {} (vs reading referenced files)",
+                saved
+            );
         }
         if let Some(ref first) = stats.first_used {
             println!("  First used:         {}", first);

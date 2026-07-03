@@ -198,7 +198,7 @@ impl KungfuService {
         let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for (file_path, ranges) in &changed_lines {
-            for sym in &all_symbols {
+            for sym in all_symbols.iter() {
                 if sym.path != *file_path {
                     continue;
                 }
@@ -271,7 +271,7 @@ impl KungfuService {
             let cl = kungfu_git::commit_changed_lines(&self.project.root, hash).unwrap_or_default();
             for (file_path, ranges) in &cl {
                 changed_files.insert(file_path.clone());
-                for sym in &all_symbols {
+                for sym in all_symbols.iter() {
                     if sym.path != *file_path {
                         continue;
                     }
@@ -326,13 +326,13 @@ impl KungfuService {
         let all_symbols = search.get_all_symbols()?;
 
         let scored: Vec<(Symbol, f64)> = all_symbols
-            .into_iter()
+            .iter()
             .filter_map(|s| {
                 let is_changed = changed
                     .iter()
                     .any(|c| s.path.ends_with(c) || c.ends_with(&s.path));
                 if is_changed {
-                    Some((s, 0.9))
+                    Some((s.clone(), 0.9))
                 } else {
                     None
                 }
