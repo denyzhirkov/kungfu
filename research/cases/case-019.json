@@ -1,0 +1,16 @@
+{
+  "id": "case-019",
+  "category": "file-discovery",
+  "project": "ktor",
+  "task": "Find where WebSocket support is implemented",
+  "input": {
+    "query": "WebSocket",
+    "command": "find-symbol",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["WebSocket"],
+    "should_not_include": [],
+    "max_files": 15
+  }
+}

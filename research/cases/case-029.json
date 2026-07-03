@@ -1,0 +1,24 @@
+{
+  "id": "case-029",
+  "category": "concept-recall",
+  "project": "cargo",
+  "task": "Find the dependency resolver from a version-selection question",
+  "input": {
+    "query": "how does cargo choose which version of a dependency to use",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "core/resolver/mod.rs"
+    ],
+    "should_include": [
+      "version_prefs.rs"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

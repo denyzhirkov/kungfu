@@ -1,0 +1,24 @@
+{
+  "id": "case-040",
+  "category": "over-selection",
+  "project": "spring-boot",
+  "task": "Auto-configuration selection with a tight 4-file limit",
+  "input": {
+    "query": "how does auto configuration decide which beans to enable",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "AutoConfigurationImportSelector"
+    ],
+    "should_include": [
+      "Conditional"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 4,
+    "max_bytes": 4000
+  }
+}

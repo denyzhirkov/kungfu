@@ -1,0 +1,24 @@
+{
+  "id": "case-025",
+  "category": "concept-recall",
+  "project": "django",
+  "task": "Find the password hashers module from a hashing/verification question",
+  "input": {
+    "query": "where are user passwords hashed and verified",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "contrib/auth/hashers.py"
+    ],
+    "should_include": [
+      "check_password"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

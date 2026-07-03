@@ -1,0 +1,18 @@
+{
+  "id": "case-009",
+  "category": "feature-understanding",
+  "project": "ktor",
+  "task": "Understand how Ktor plugin installation works",
+  "input": {
+    "query": "plugin install application feature",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["Plugin"],
+    "should_include": ["Application"],
+    "should_not_include": ["README.md", "build.gradle"],
+    "max_files": 12,
+    "max_bytes": 10000
+  }
+}

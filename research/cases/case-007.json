@@ -1,0 +1,18 @@
+{
+  "id": "case-007",
+  "category": "refactor-prep",
+  "project": "spring-boot",
+  "task": "Gather context for understanding auto-configuration mechanism",
+  "input": {
+    "query": "auto configuration EnableAutoConfiguration conditional",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["AutoConfiguration"],
+    "should_include": ["Conditional"],
+    "should_not_include": ["README.md"],
+    "max_files": 12,
+    "max_bytes": 10000
+  }
+}

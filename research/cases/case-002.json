@@ -1,0 +1,18 @@
+{
+  "id": "case-002",
+  "category": "feature-understanding",
+  "project": "kungfu",
+  "task": "Understand how import resolution works",
+  "input": {
+    "query": "import resolution resolve_import",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["kungfu-index/src/indexer.rs"],
+    "should_include": ["resolve_import"],
+    "should_not_include": ["budget.rs", "README.md"],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

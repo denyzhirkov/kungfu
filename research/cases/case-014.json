@@ -1,0 +1,18 @@
+{
+  "id": "case-014",
+  "category": "refactor-prep",
+  "project": "aspnetcore",
+  "task": "Gather context for understanding dependency injection in ASP.NET Core",
+  "input": {
+    "query": "dependency injection service provider IServiceCollection",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["DependencyInjection"],
+    "should_include": ["ServiceProvider", "Service"],
+    "should_not_include": ["README.md"],
+    "max_files": 12,
+    "max_bytes": 5000
+  }
+}

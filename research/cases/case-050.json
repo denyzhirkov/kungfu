@@ -1,0 +1,25 @@
+{
+  "id": "case-050",
+  "category": "cross-file",
+  "project": "gin",
+  "task": "Context.Next middleware chain spans context.go and gin.go",
+  "input": {
+    "query": "how does calling next in middleware continue the handler chain",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "context.go",
+      "gin.go"
+    ],
+    "should_include": [
+      "handleHTTPRequest"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 6000
+  }
+}

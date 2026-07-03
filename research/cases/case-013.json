@@ -1,0 +1,18 @@
+{
+  "id": "case-013",
+  "category": "orientation",
+  "project": "kungfu",
+  "task": "List files needed to understand configuration loading",
+  "input": {
+    "query": "configuration loading config toml",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["kungfu-config/src/lib.rs"],
+    "should_include": ["KungfuConfig", "load"],
+    "should_not_include": ["Cargo.lock"],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "id": "case-046",
+  "category": "cross-file",
+  "project": "kungfu",
+  "task": "CLI -> core ask_context -> rank packet flow (3 files required)",
+  "input": {
+    "query": "how does an ask-context request flow from the cli command into the ranked context packet",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "kungfu-cli/src/commands.rs",
+      "kungfu-core/src/ask.rs",
+      "kungfu-rank/src/lib.rs"
+    ],
+    "should_not_include": [
+      "Cargo.lock"
+    ],
+    "max_files": 8,
+    "max_bytes": 6000
+  }
+}

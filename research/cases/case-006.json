@@ -1,0 +1,16 @@
+{
+  "id": "case-006",
+  "category": "file-discovery",
+  "project": "spring-boot",
+  "task": "Find SpringApplication class",
+  "input": {
+    "query": "SpringApplication",
+    "command": "find-symbol",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["SpringApplication.java"],
+    "should_not_include": [],
+    "max_files": 10
+  }
+}

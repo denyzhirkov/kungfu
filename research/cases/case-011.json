@@ -1,0 +1,18 @@
+{
+  "id": "case-011",
+  "category": "feature-understanding",
+  "project": "aspnetcore",
+  "task": "Find where middleware pipeline is built in ASP.NET Core",
+  "input": {
+    "query": "middleware pipeline build request delegate",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["Middleware"],
+    "should_include": ["ApplicationBuilder", "RequestDelegate"],
+    "should_not_include": ["README.md"],
+    "max_files": 12,
+    "max_bytes": 10000
+  }
+}

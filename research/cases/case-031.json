@@ -1,0 +1,24 @@
+{
+  "id": "case-031",
+  "category": "concept-recall",
+  "project": "home-assistant",
+  "task": "Find trigger attachment/evaluation for automations",
+  "input": {
+    "query": "where are automation triggers attached and evaluated",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "helpers/trigger.py"
+    ],
+    "should_include": [
+      "components/automation/"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

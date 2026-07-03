@@ -1,0 +1,24 @@
+{
+  "id": "case-035",
+  "category": "identifier-mismatch",
+  "project": "aspnetcore",
+  "task": "Abbreviation: \"ws\" middleware should surface WebSocketMiddleware",
+  "input": {
+    "query": "ws connection middleware",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "WebSocketMiddleware.cs"
+    ],
+    "should_include": [
+      "WebSocketOptions"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 5000
+  }
+}

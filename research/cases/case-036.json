@@ -1,0 +1,16 @@
+{
+  "id": "case-036",
+  "category": "identifier-mismatch",
+  "project": "django",
+  "task": "find-symbol \"get or create\" vs snake_case get_or_create",
+  "input": {
+    "query": "get or create",
+    "command": "find-symbol"
+  },
+  "expected": {
+    "must_include": [
+      "get_or_create"
+    ],
+    "max_files": 10
+  }
+}

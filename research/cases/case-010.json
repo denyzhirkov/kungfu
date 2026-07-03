@@ -1,0 +1,16 @@
+{
+  "id": "case-010",
+  "category": "file-discovery",
+  "project": "ktor",
+  "task": "Find Application class in Ktor",
+  "input": {
+    "query": "Application",
+    "command": "find-symbol",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["Application"],
+    "should_not_include": [],
+    "max_files": 15
+  }
+}

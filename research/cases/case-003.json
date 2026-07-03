@@ -1,0 +1,16 @@
+{
+  "id": "case-003",
+  "category": "file-discovery",
+  "project": "kungfu",
+  "task": "Find the KungfuService struct",
+  "input": {
+    "query": "KungfuService",
+    "command": "find-symbol",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["kungfu-core/src/lib.rs"],
+    "should_not_include": [],
+    "max_files": 5
+  }
+}

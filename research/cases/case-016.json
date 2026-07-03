@@ -1,0 +1,18 @@
+{
+  "id": "case-016",
+  "category": "file-discovery",
+  "project": "kungfu",
+  "task": "Find the tree-sitter parsing dispatch (which parser handles which language)",
+  "input": {
+    "query": "tree sitter parse language dispatch",
+    "command": "ask-context",
+    "budget": "tiny"
+  },
+  "expected": {
+    "must_include": ["kungfu-parse/src/lib.rs"],
+    "should_include": ["parse"],
+    "should_not_include": ["Cargo.lock", "README.md"],
+    "max_files": 5,
+    "max_bytes": 2000
+  }
+}

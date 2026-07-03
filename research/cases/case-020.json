@@ -1,0 +1,18 @@
+{
+  "id": "case-020",
+  "category": "refactor-prep",
+  "project": "kungfu",
+  "task": "Gather context for changing how Budget resolves for different project sizes",
+  "input": {
+    "query": "Budget resolve auto project size",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": ["budget.rs"],
+    "should_include": ["Budget", "resolve"],
+    "should_not_include": ["README.md", "Cargo.lock"],
+    "max_files": 8,
+    "max_bytes": 4000
+  }
+}

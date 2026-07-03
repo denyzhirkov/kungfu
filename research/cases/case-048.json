@@ -1,0 +1,25 @@
+{
+  "id": "case-048",
+  "category": "cross-file",
+  "project": "flask",
+  "task": "url_for free function delegates to app.url_for (2 files required)",
+  "input": {
+    "query": "how does url_for resolve an endpoint name into a url",
+    "command": "ask-context",
+    "budget": "small"
+  },
+  "expected": {
+    "must_include": [
+      "src/flask/helpers.py",
+      "src/flask/app.py"
+    ],
+    "should_include": [
+      "url_for"
+    ],
+    "should_not_include": [
+      "README.md"
+    ],
+    "max_files": 8,
+    "max_bytes": 6000
+  }
+}
