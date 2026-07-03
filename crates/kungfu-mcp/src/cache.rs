@@ -233,7 +233,7 @@ impl KungfuMcp {
             cache.raw_bytes_baseline += baseline;
         }
         if let Ok(svc) = self.service_untracked() {
-            svc.track_call(tool, result.len());
+            svc.track_call(tool, result.len(), baseline as usize);
         }
     }
 

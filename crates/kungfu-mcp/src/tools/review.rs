@@ -27,6 +27,16 @@ pub(crate) fn usage_stats(mcp: &KungfuMcp) -> Result<String, String> {
         .and_then(|svc| svc.usage_stats().map_err(|e| e.to_string()))
         .unwrap_or_default();
 
+    // Same savings math as the session block, but over the persisted cumulative counters.
+    let life_raw = persistent.total_raw_bytes_baseline;
+    let life_served = persistent.total_bytes_served;
+    let life_ratio = if life_served > 0 {
+        life_raw as f64 / life_served as f64
+    } else {
+        0.0
+    };
+    let life_tokens_saved = life_raw.saturating_sub(life_served) / 4;
+
     serde_json::to_string_pretty(&serde_json::json!({
         "session": {
             "calls_served": cache.calls_served,
@@ -43,7 +53,17 @@ pub(crate) fn usage_stats(mcp: &KungfuMcp) -> Result<String, String> {
                 "hit_rate_pct": format!("{:.1}", hit_rate),
             }
         },
-        "lifetime": persistent,
+        "lifetime": {
+            "total_calls": persistent.total_calls,
+            "total_bytes_served": life_served,
+            "total_raw_bytes_baseline": life_raw,
+            "compression_ratio": format!("{:.1}x", life_ratio),
+            "estimated_tokens_saved": life_tokens_saved,
+            "baseline_method": "cumulative across MCP-served results; CLI-served bytes don't accrue a baseline",
+            "per_command": persistent.per_command,
+            "first_used": persistent.first_used,
+            "last_used": persistent.last_used,
+        },
     }))
     .map_err(|e| e.to_string())
 }

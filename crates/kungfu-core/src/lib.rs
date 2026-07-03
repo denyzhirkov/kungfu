@@ -241,10 +241,11 @@ impl KungfuService {
         self.search().find_related(file_path, budget)
     }
 
-    /// Record a tool/command call for persistent usage stats.
-    pub fn track_call(&self, command: &str, bytes: usize) {
+    /// Record a tool/command call for persistent usage stats. `raw_baseline` is the on-disk size
+    /// of the source files the result referenced (0 when the caller doesn't compute a baseline).
+    pub fn track_call(&self, command: &str, bytes: usize, raw_baseline: usize) {
         let mut stats = kungfu_types::stats::UsageStats::load(&self.project.kungfu_dir);
-        stats.record(command, bytes as u64);
+        stats.record(command, bytes as u64, raw_baseline as u64);
         let _ = stats.save(&self.project.kungfu_dir);
     }
 

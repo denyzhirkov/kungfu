@@ -601,6 +601,16 @@ pub fn stats(json: bool) -> Result<()> {
         );
         let tokens = stats.total_bytes_served / 4;
         println!("  Est. tokens served: {}", tokens);
+        if stats.total_raw_bytes_baseline > 0 {
+            let ratio =
+                stats.total_raw_bytes_baseline as f64 / stats.total_bytes_served.max(1) as f64;
+            let saved = stats
+                .total_raw_bytes_baseline
+                .saturating_sub(stats.total_bytes_served)
+                / 4;
+            println!("  Compression:        {:.1}x", ratio);
+            println!("  Est. tokens saved:  {} (vs reading referenced files)", saved);
+        }
         if let Some(ref first) = stats.first_used {
             println!("  First used:         {}", first);
         }
@@ -1208,7 +1218,7 @@ pub fn ask_context(task: &str, budget: Budget, json: bool) -> Result<()> {
     let service = KungfuService::open(&cwd)?;
     let packet = service.ask_context(task, budget)?;
     let output = serde_json::to_string_pretty(&packet)?;
-    service.track_call("ask_context", output.len());
+    service.track_call("ask_context", output.len(), 0);
 
     if json {
         println!("{}", output);
@@ -1257,7 +1267,7 @@ pub fn diff_context(budget: Budget, json: bool) -> Result<()> {
     let service = KungfuService::open(&cwd)?;
     let packet = service.diff_context(budget)?;
     let output = serde_json::to_string_pretty(&packet)?;
-    service.track_call("diff_context", output.len());
+    service.track_call("diff_context", output.len(), 0);
 
     if json {
         println!("{}", output);
@@ -1889,7 +1899,7 @@ pub fn change_timeline(name: &str, budget: Budget, json: bool) -> Result<()> {
     let service = KungfuService::open(&cwd)?;
     let events = service.change_timeline(name, budget)?;
     let output = serde_json::to_string_pretty(&events)?;
-    service.track_call("change_timeline", output.len());
+    service.track_call("change_timeline", output.len(), 0);
 
     if json {
         println!("{}", output);
@@ -1923,7 +1933,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
             let kind: ProjectMemoryKind = kind.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let entry =
                 service.memory_add(kind, &content, title.as_deref(), tags, files, symbols, pin)?;
-            service.track_call("memory_add", 0);
+            service.track_call("memory_add", 0, 0);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -1944,7 +1954,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 ..Default::default()
             };
             let entries = service.memory_list(&filter)?;
-            service.track_call("memory_list", 0);
+            service.track_call("memory_list", 0, 0);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else if entries.is_empty() {
@@ -1961,7 +1971,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
         }
         MemoryCommands::Show { id } => {
             let entry = service.memory_show(&id)?;
-            service.track_call("memory_show", 0);
+            service.track_call("memory_show", 0, 0);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -2000,7 +2010,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 ..Default::default()
             };
             let results = service.memory_search(&query, &filter)?;
-            service.track_call("memory_search", 0);
+            service.track_call("memory_search", 0, 0);
             if json {
                 // Mirror the MCP tool: full entry only for confident hits; below the
                 // threshold emit a stub + excerpt so weak matches don't flood context.
@@ -2050,7 +2060,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
             let tags_opt = if tags.is_empty() { None } else { Some(tags) };
             let entry =
                 service.memory_update(&id, content.as_deref(), title.as_deref(), tags_opt, pin)?;
-            service.track_call("memory_update", 0);
+            service.track_call("memory_update", 0, 0);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -2059,7 +2069,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
         }
         MemoryCommands::Archive { id } => {
             let entry = service.memory_archive(&id)?;
-            service.track_call("memory_archive", 0);
+            service.track_call("memory_archive", 0, 0);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -2072,7 +2082,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 std::process::exit(1);
             }
             service.memory_remove(&id)?;
-            service.track_call("memory_remove", 0);
+            service.track_call("memory_remove", 0, 0);
             if json {
                 println!("{}", serde_json::json!({"removed": id}));
             } else {
@@ -2081,7 +2091,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
         }
         MemoryCommands::Pin { id } => {
             let entry = service.memory_pin(&id)?;
-            service.track_call("memory_pin", 0);
+            service.track_call("memory_pin", 0, 0);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -2090,7 +2100,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
         }
         MemoryCommands::Unpin { id } => {
             let entry = service.memory_unpin(&id)?;
-            service.track_call("memory_unpin", 0);
+            service.track_call("memory_unpin", 0, 0);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
