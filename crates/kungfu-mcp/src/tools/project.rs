@@ -92,6 +92,7 @@ pub(crate) fn file_outline(mcp: &KungfuMcp, params: FilePathParam) -> Result<Str
     let out = serde_json::to_string_pretty(&serde_json::json!({
         "path": outline.path,
         "language": outline.language,
+        "purpose": outline.purpose,
         "symbols": symbols,
     }))
     .map_err(|e| e.to_string())?;

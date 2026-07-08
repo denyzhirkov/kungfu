@@ -606,6 +606,7 @@ impl<'a> Indexer<'a> {
             hash: format!("skip:{size}"),
             indexed_at: Utc::now(),
             tags: Vec::new(),
+            purpose: None,
         }
     }
 
@@ -628,7 +629,7 @@ impl<'a> Indexer<'a> {
         let size = content.len() as u64;
         let file_id = format!("f:{}", &hash[..12]);
 
-        let entry = FileEntry {
+        let mut entry = FileEntry {
             id: file_id.clone(),
             path: rel_path.clone(),
             extension: if ext.is_empty() { None } else { Some(ext) },
@@ -637,6 +638,7 @@ impl<'a> Indexer<'a> {
             hash,
             indexed_at: Utc::now(),
             tags: Vec::new(),
+            purpose: None,
         };
 
         let (symbols, imports, comments, calls) = if language.is_code() {
@@ -654,6 +656,7 @@ impl<'a> Indexer<'a> {
                         result.calls.len(),
                         rel_path
                     );
+                    entry.purpose = result.module_doc;
                     (
                         result.symbols,
                         result.imports,

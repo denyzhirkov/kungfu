@@ -26,6 +26,7 @@ pub struct DirEntry {
 pub struct FileOutline {
     pub path: String,
     pub language: Option<String>,
+    pub purpose: Option<String>,
     pub symbols: Vec<SymbolOutline>,
 }
 

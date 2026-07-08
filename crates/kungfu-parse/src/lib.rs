@@ -67,6 +67,8 @@ pub struct ParseResult {
     pub comments: Vec<RawComment>,
     /// Call sites within this file, for all supported code languages.
     pub calls: Vec<RawCall>,
+    /// One-line file purpose from the module-level doc comment, if the file has one.
+    pub module_doc: Option<String>,
 }
 
 /// Classify a comment's text into a CommentKind.
@@ -244,6 +246,199 @@ fn fill_doc_summaries(symbols: &mut [Symbol], comments: &[RawComment]) {
     }
 }
 
+/// Extract the module-level doc comment from the head of a source file.
+///
+/// Works on raw lines rather than the AST: Python docstrings and Go package
+/// comments are not comment nodes tree-sitter's comment walk would surface,
+/// and Rust `//!` is indistinguishable from `///` after `clean_comment_text`.
+/// Returns the first sentence, or None when the file has no module doc.
+fn extract_module_doc(source: &str, language: Language) -> Option<String> {
+    let doc = match language {
+        Language::Rust => leading_line_doc(source, "//!"),
+        Language::Python => python_module_docstring(source),
+        Language::Go => go_package_doc(source),
+        Language::TypeScript
+        | Language::JavaScript
+        | Language::Java
+        | Language::CSharp
+        | Language::Kotlin
+        | Language::C
+        | Language::Cpp => detached_header_block_doc(source),
+        _ => None,
+    }?;
+    let doc = doc.trim();
+    if doc.is_empty() {
+        return None;
+    }
+    let sentence = first_sentence(doc.trim_start_matches(['#', ' ']), 160);
+    // A header that opens with a doc tag / compiler pragma (`@flow`,
+    // `@jsxImportSource`, `@module`) is tooling metadata, not a description.
+    if sentence.starts_with('@') || looks_like_license_header(&sentence) {
+        return None;
+    }
+    Some(sentence)
+}
+
+/// License/copyright file headers are boilerplate, not a file purpose — storing
+/// them as one would be a confidently wrong label. Better no purpose than noise.
+fn looks_like_license_header(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    [
+        "copyright",
+        "spdx-license",
+        "all rights reserved",
+        "public domain",
+        "licensed under",
+        "licensed to",
+        "mit licensed",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// Consecutive `prefix` lines at the top of the file (blank lines before them allowed).
+fn leading_line_doc(source: &str, prefix: &str) -> Option<String> {
+    let mut collected: Vec<&str> = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            collected.push(rest.trim());
+        } else if trimmed.is_empty() && collected.is_empty() {
+            continue;
+        } else {
+            break;
+        }
+    }
+    join_doc_lines(&collected)
+}
+
+/// Module docstring: first statement after optional shebang/encoding comments.
+fn python_module_docstring(source: &str) -> Option<String> {
+    let mut lines = source.lines().peekable();
+    // Skip shebang, encoding/comment lines, and blanks before the first statement.
+    while let Some(line) = lines.peek() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            lines.next();
+        } else {
+            break;
+        }
+    }
+    let first = lines.next()?.trim_start();
+    let delim = if first.starts_with("\"\"\"") {
+        "\"\"\""
+    } else if first.starts_with("'''") {
+        "'''"
+    } else {
+        return None;
+    };
+    let after_open = &first[delim.len()..];
+    if let Some(end) = after_open.find(delim) {
+        return Some(after_open[..end].trim().to_string());
+    }
+    let mut collected: Vec<&str> = vec![after_open.trim()];
+    for line in lines {
+        if let Some(end) = line.find(delim) {
+            collected.push(line[..end].trim());
+            return join_doc_lines(&collected);
+        }
+        collected.push(line.trim());
+    }
+    None // unterminated docstring
+}
+
+/// Go doc convention: `//` comment block directly above the `package` clause.
+fn go_package_doc(source: &str) -> Option<String> {
+    let mut block: Vec<&str> = Vec::new();
+    for line in source.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("//") {
+            block.push(rest.trim());
+        } else if t.starts_with("package ") {
+            return join_doc_lines(&block);
+        } else if t.is_empty() {
+            // Blank line detaches the block from the package clause.
+            block.clear();
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
+/// `/** … */` (or `/*! … */`) block at the top of the file that is NOT attached
+/// to the following declaration: it counts as a file header only when followed
+/// by a blank line or an import/package/preprocessor line. A block directly
+/// above a declaration is that declaration's doc, not the file's.
+fn detached_header_block_doc(source: &str) -> Option<String> {
+    let mut lines = source.lines().peekable();
+    while let Some(line) = lines.peek() {
+        if line.trim().is_empty() {
+            lines.next();
+        } else {
+            break;
+        }
+    }
+    let first = lines.peek()?.trim_start();
+    if !(first.starts_with("/**") || first.starts_with("/*!")) {
+        return None;
+    }
+
+    let mut block: Vec<&str> = Vec::new();
+    let mut closed = false;
+    for line in lines.by_ref() {
+        block.push(line);
+        if line.contains("*/") {
+            closed = true;
+            break;
+        }
+    }
+    if !closed {
+        return None;
+    }
+
+    let detached = match lines.next() {
+        None => true,
+        Some(next) => {
+            let t = next.trim();
+            t.is_empty()
+                || t.starts_with("import ")
+                || t.starts_with("package ")
+                || t.starts_with("using ")
+                || t.starts_with("#include")
+                || t.starts_with("#pragma")
+                || t.starts_with("'use ")
+                || t.starts_with("\"use ")
+        }
+    };
+    if !detached {
+        return None;
+    }
+
+    let cleaned = clean_comment_text(&block.join("\n"));
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn join_doc_lines(lines: &[&str]) -> Option<String> {
+    let joined = lines
+        .iter()
+        // Drop blank lines and punctuation-only rulers (`~~~~`, `====`, `****`)
+        // used as section underlines in RST/plain-text docs.
+        .filter(|l| !l.is_empty() && l.chars().any(|c| c.is_alphanumeric()))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
 /// Extract the first sentence from text, truncated to max_len.
 fn first_sentence(text: &str, max_len: usize) -> String {
     // Take first line or up to first period
@@ -388,6 +583,7 @@ impl Parser {
             imports,
             comments,
             calls,
+            module_doc: extract_module_doc(source, language),
         })
     }
 }
@@ -405,6 +601,104 @@ mod tests {
         assert!(summary.ends_with("..."));
         // Must not panic and must be valid UTF-8 (guaranteed by String).
         assert!(summary.len() <= 119 + 3);
+    }
+
+    #[test]
+    fn module_doc_rust_inner_line_comments() {
+        let src = "//! Context retrieval engine. Second sentence.\n//! More detail.\n\nuse std::fmt;\n\npub fn f() {}\n";
+        assert_eq!(
+            extract_module_doc(src, Language::Rust),
+            Some("Context retrieval engine.".to_string())
+        );
+        // `///` on the first item is symbol doc, not module doc.
+        let src = "/// Doc for f.\npub fn f() {}\n";
+        assert_eq!(extract_module_doc(src, Language::Rust), None);
+    }
+
+    #[test]
+    fn module_doc_python_docstring() {
+        let src = "#!/usr/bin/env python\n\"\"\"Routing helpers for the API.\n\nDetails.\n\"\"\"\nimport os\n";
+        assert_eq!(
+            extract_module_doc(src, Language::Python),
+            Some("Routing helpers for the API.".to_string())
+        );
+        let src = "'''Single-line doc.'''\nimport os\n";
+        assert_eq!(
+            extract_module_doc(src, Language::Python),
+            Some("Single-line doc.".to_string())
+        );
+        assert_eq!(extract_module_doc("import os\n", Language::Python), None);
+    }
+
+    #[test]
+    fn module_doc_go_package_comment() {
+        let src = "// Package router dispatches HTTP requests.\n// More detail.\npackage router\n";
+        assert_eq!(
+            extract_module_doc(src, Language::Go),
+            Some("Package router dispatches HTTP requests.".to_string())
+        );
+        // Blank line detaches the comment from the package clause.
+        let src = "// Copyright notice.\n\npackage router\n";
+        assert_eq!(extract_module_doc(src, Language::Go), None);
+    }
+
+    #[test]
+    fn module_doc_header_block_detached_only() {
+        // Header block followed by a blank line — file doc.
+        let src = "/**\n * Database connection pool setup.\n */\n\nexport class Pool {}\n";
+        assert_eq!(
+            extract_module_doc(src, Language::TypeScript),
+            Some("Database connection pool setup.".to_string())
+        );
+        // Header block followed by imports — file doc.
+        let src = "/** Auth middleware. */\nimport express from 'express';\n";
+        assert_eq!(
+            extract_module_doc(src, Language::TypeScript),
+            Some("Auth middleware.".to_string())
+        );
+        // Block directly above a declaration belongs to the declaration.
+        let src = "/** Doc for Pool. */\nexport class Pool {}\n";
+        assert_eq!(extract_module_doc(src, Language::TypeScript), None);
+    }
+
+    #[test]
+    fn module_doc_license_headers_rejected() {
+        // react-style file header
+        let src = "/**\n * Copyright (c) Meta Platforms, Inc. and affiliates.\n *\n * This source code is licensed under the MIT license.\n */\n\nexport function f() {}\n";
+        assert_eq!(extract_module_doc(src, Language::JavaScript), None);
+        // express-style /*! banner
+        let src = "/*!\n * express\n * Copyright(c) 2009-2013 TJ Holowaychuk\n * MIT Licensed\n */\n\nmodule.exports = {};\n";
+        assert_eq!(extract_module_doc(src, Language::JavaScript), None);
+        // public-domain C header
+        let src = "/**\n * hdr_histogram.h\n * Written by Michael Barker and released to the public domain.\n */\n\n#include <stdint.h>\n";
+        assert_eq!(extract_module_doc(src, Language::C), None);
+        // pragma-only header (react-style @flow)
+        let src = "/**\n * @flow\n */\n\nexport function f() {}\n";
+        assert_eq!(extract_module_doc(src, Language::JavaScript), None);
+    }
+
+    #[test]
+    fn module_doc_rulers_and_heading_marks_stripped() {
+        // RST-style underline ruler inside a docstring is dropped.
+        let src = "\"\"\"Tagged JSON\n~~~~~~~~~~~\n\nA compact representation for serialization.\n\"\"\"\nimport os\n";
+        assert_eq!(
+            extract_module_doc(src, Language::Python),
+            Some("Tagged JSON A compact representation for serialization.".to_string())
+        );
+        // Leading markdown heading marks are stripped.
+        let src = "//! # Cargo test macro.\n\npub fn f() {}\n";
+        assert_eq!(
+            extract_module_doc(src, Language::Rust),
+            Some("Cargo test macro.".to_string())
+        );
+    }
+
+    #[test]
+    fn module_doc_populated_by_parse() {
+        let mut parser = Parser::new();
+        let src = "//! Shared domain types.\n\npub struct Budget;\n";
+        let result = parser.parse(src, Language::Rust, "f:1", "lib.rs").unwrap();
+        assert_eq!(result.module_doc, Some("Shared domain types.".to_string()));
     }
 
     #[test]

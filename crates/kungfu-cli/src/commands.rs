@@ -1292,6 +1292,7 @@ pub fn file_outline(path: &str, json: bool) -> Result<()> {
         let out = serde_json::json!({
             "path": outline.path,
             "language": outline.language,
+            "purpose": outline.purpose,
             "symbols": symbols,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -1301,6 +1302,9 @@ pub fn file_outline(path: &str, json: bool) -> Result<()> {
             outline.path,
             outline.language.as_deref().unwrap_or("unknown")
         );
+        if let Some(ref purpose) = outline.purpose {
+            println!("Purpose: {purpose}");
+        }
         println!();
         for s in &outline.symbols {
             let exported = if s.exported { " [pub]" } else { "" };

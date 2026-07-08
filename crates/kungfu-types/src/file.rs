@@ -12,6 +12,10 @@ pub struct FileEntry {
     pub indexed_at: DateTime<Utc>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// One-line file purpose extracted from the module-level doc comment
+    /// (Rust `//!`, Python module docstring, Go package comment, `/**` file header).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

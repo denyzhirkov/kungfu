@@ -60,7 +60,10 @@ impl KungfuService {
                     || p == "go.mod"
                     || p == "pyproject.toml"
             })
-            .map(|f| f.path.clone())
+            .map(|f| match f.purpose {
+                Some(ref purpose) => format!("{} — {}", f.path, purpose),
+                None => f.path.clone(),
+            })
             .collect();
 
         // Architecture detection
@@ -257,6 +260,7 @@ mod tests {
             hash: "h1".into(),
             indexed_at: Default::default(),
             tags: vec![],
+            purpose: None,
         }];
         let result = detect_architecture(&files, &[]);
         assert!(result.contains("Workspace"), "got: {}", result);
@@ -274,6 +278,7 @@ mod tests {
                 hash: "h1".into(),
                 indexed_at: Default::default(),
                 tags: vec![],
+                purpose: None,
             },
             FileEntry {
                 id: "2".into(),
@@ -284,6 +289,7 @@ mod tests {
                 hash: "h2".into(),
                 indexed_at: Default::default(),
                 tags: vec![],
+                purpose: None,
             },
             FileEntry {
                 id: "3".into(),
@@ -294,6 +300,7 @@ mod tests {
                 hash: "h3".into(),
                 indexed_at: Default::default(),
                 tags: vec![],
+                purpose: None,
             },
         ];
         let result = detect_architecture(&files, &[]);
@@ -410,6 +417,7 @@ mod tests {
                 hash: "h1".into(),
                 indexed_at: Default::default(),
                 tags: vec![],
+                purpose: None,
             },
             FileEntry {
                 id: "2".into(),
@@ -420,6 +428,7 @@ mod tests {
                 hash: "h2".into(),
                 indexed_at: Default::default(),
                 tags: vec![],
+                purpose: None,
             },
         ];
         let result = detect_test_pattern(&files);

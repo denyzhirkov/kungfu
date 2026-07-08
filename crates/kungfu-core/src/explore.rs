@@ -55,7 +55,10 @@ impl KungfuService {
                     || p == "go.mod"
                     || p == "pyproject.toml"
             })
-            .map(|f| f.path.clone())
+            .map(|f| match f.purpose {
+                Some(ref purpose) => format!("{} — {}", f.path, purpose),
+                None => f.path.clone(),
+            })
             .collect();
 
         Ok(RepoOutline {
@@ -93,6 +96,7 @@ impl KungfuService {
         Ok(FileOutline {
             path: file.path.clone(),
             language: file.language.clone(),
+            purpose: file.purpose.clone(),
             symbols: outlines,
         })
     }
@@ -207,6 +211,7 @@ impl KungfuService {
         Ok(serde_json::json!({
             "path": outline.path,
             "language": outline.language,
+            "purpose": outline.purpose,
             "total_symbols": outline.symbols.len(),
             "key_symbols": key_symbols,
             "related_files": related_files,
