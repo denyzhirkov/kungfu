@@ -597,6 +597,7 @@ impl<'a> Indexer<'a> {
             .to_string();
         let language = Language::from_extension(&ext);
         let id = format!("f:{}", &blake3::hash(rel_path.as_bytes()).to_hex()[..12]);
+        let tags = crate::file_tags::derive_tags(&rel_path, &[], &[]);
         FileEntry {
             id,
             path: rel_path,
@@ -605,7 +606,7 @@ impl<'a> Indexer<'a> {
             size,
             hash: format!("skip:{size}"),
             indexed_at: Utc::now(),
-            tags: Vec::new(),
+            tags,
             purpose: None,
         }
     }
@@ -672,6 +673,8 @@ impl<'a> Indexer<'a> {
         } else {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         };
+
+        entry.tags = crate::file_tags::derive_tags(&rel_path, &imports, &symbols);
 
         Ok((entry, symbols, imports, comments, calls))
     }

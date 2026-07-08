@@ -267,7 +267,7 @@ kungfu vs. naive grep + read, tokens to answer the same query:
 
 ## How it works
 
-**Indexing** — scans files respecting `.gitignore`; parses with [tree-sitter](https://tree-sitter.github.io/) (Rust, TypeScript, JavaScript, Python, Go, Java, C#, Kotlin, C, C++); extracts symbols, imports (resolved to real files), a function call graph, structured comments (TODO/FIXME/NOTE/doc), and a one-line file purpose from module-level doc comments (Rust `//!`, Python module docstrings, Go package comments, `/** */` file headers) — surfaced in `file_outline`, `explore_file`, and entrypoint lists. Incremental via blake3 fingerprints; oversized and binary files are recorded by name only.
+**Indexing** — scans files respecting `.gitignore`; parses with [tree-sitter](https://tree-sitter.github.io/) (Rust, TypeScript, JavaScript, Python, Go, Java, C#, Kotlin, C, C++); extracts symbols, imports (resolved to real files), a function call graph, structured comments (TODO/FIXME/NOTE/doc), and a one-line file purpose from module-level doc comments (Rust `//!`, Python module docstrings, Go package comments, `/** */` file headers) — surfaced in `file_outline`, `explore_file`, and entrypoint lists. Heuristic file tags (`tests`, `entrypoint`, `config`, `database`, `http`, `cli`, `auth`, `types`) are derived from path conventions, import targets, and symbol composition — high-precision rules only; the authored purpose is the trusted layer. Incremental via blake3 fingerprints; oversized and binary files are recorded by name only.
 
 **Search & ranking** — exact (1.0) → prefix (0.9) → contains (0.7) → stem (0.6) → fuzzy (0.4), plus `snake_case`/`camelCase` phrase matching and light English stemming.
 

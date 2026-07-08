@@ -1293,6 +1293,7 @@ pub fn file_outline(path: &str, json: bool) -> Result<()> {
             "path": outline.path,
             "language": outline.language,
             "purpose": outline.purpose,
+            "tags": outline.tags,
             "symbols": symbols,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -1304,6 +1305,9 @@ pub fn file_outline(path: &str, json: bool) -> Result<()> {
         );
         if let Some(ref purpose) = outline.purpose {
             println!("Purpose: {purpose}");
+        }
+        if !outline.tags.is_empty() {
+            println!("Tags: {}", outline.tags.join(", "));
         }
         println!();
         for s in &outline.symbols {

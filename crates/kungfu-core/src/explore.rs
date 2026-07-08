@@ -97,6 +97,7 @@ impl KungfuService {
             path: file.path.clone(),
             language: file.language.clone(),
             purpose: file.purpose.clone(),
+            tags: file.tags.clone(),
             symbols: outlines,
         })
     }
@@ -212,6 +213,7 @@ impl KungfuService {
             "path": outline.path,
             "language": outline.language,
             "purpose": outline.purpose,
+            "tags": outline.tags,
             "total_symbols": outline.symbols.len(),
             "key_symbols": key_symbols,
             "related_files": related_files,

@@ -93,6 +93,7 @@ pub(crate) fn file_outline(mcp: &KungfuMcp, params: FilePathParam) -> Result<Str
         "path": outline.path,
         "language": outline.language,
         "purpose": outline.purpose,
+        "tags": outline.tags,
         "symbols": symbols,
     }))
     .map_err(|e| e.to_string())?;

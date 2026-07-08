@@ -26,7 +26,9 @@ pub use project_memory::{AbsorbReport, MemoryMeta, ProjectMemoryStore};
 ///   ubiquitous-callee stop-list, frequency cutoff (v2.5.25).
 /// - 3: FileEntry.purpose — one-line file purpose from module-level doc
 ///   comments; full reindex populates it uniformly.
-pub const INDEX_SCHEMA_VERSION: u32 = 3;
+/// - 4: FileEntry.tags — heuristic tags from path/import/symbol signals
+///   (tests, entrypoint, config, database, http, cli, auth, types).
+pub const INDEX_SCHEMA_VERSION: u32 = 4;
 
 /// Atomically replace `path` with `contents`: write a sibling temp file, then
 /// rename it over the target. Rename is atomic on the same filesystem, so a
