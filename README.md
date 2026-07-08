@@ -66,8 +66,8 @@ kungfu search "auth logic" --semantic       # concept search (see Semantic searc
 
 # Structure & analysis
 kungfu repo-outline                         # compact repo map
-kungfu file-outline src/auth/service.ts     # symbols in a file
-kungfu onboard                              # architecture, patterns, key symbols
+kungfu file-outline src/auth/service.ts     # symbols in a file (+ purpose, tags)
+kungfu onboard                              # architecture, patterns, key symbols, glossary
 kungfu callers AuthService / callees ...    # call graph in either direction
 kungfu affected AuthService --depth 3       # blast radius (--staged for the current diff)
 kungfu verify-change                        # post-edit: changed symbols + blast radius + tests
@@ -80,9 +80,11 @@ kungfu commit-context <hash> --budget small
 kungfu pr-context 42 --budget small         # requires the `gh` CLI
 kungfu change-timeline AuthService          # how a symbol evolved: introduced, churn, decisions
 
-# Project memory
+# Project memory & annotations
 kungfu memory add "Use zod for all new validation" --kind decision --tag validation --pin
 kungfu memory search "validation" / list / show <id> / pin <id> / archive <id>
+kungfu annotate src/db.ts --purpose "Connection pooling" --term "pool=reused client set"
+kungfu annotation-queue                     # files most worth annotating
 
 # Maintenance
 kungfu index --full | --changed | --only src/foo.rs
