@@ -254,20 +254,49 @@ impl KungfuService {
                         let all = self.search().get_all_symbols()?;
                         let by_id: std::collections::HashMap<&str, &kungfu_types::symbol::Symbol> =
                             all.iter().map(|s| (s.id.as_str(), s)).collect();
+                        let files = self.search().get_all_files()?;
+                        let file_by_id: std::collections::HashMap<
+                            &str,
+                            &kungfu_types::file::FileEntry,
+                        > = files.iter().map(|f| (f.id.as_str(), f)).collect();
                         // Tests often describe the implementation in their names, so
                         // cosine loves them. Milder demotion than the keyword path —
                         // a strong semantic hit on a test can still surface.
                         let test_ids = crate::helpers::test_symbol_ids(&all);
-                        let mut scored: Vec<(&kungfu_types::symbol::Symbol, f64)> = hits
+                        // The store holds symbol vectors (s:) and file vectors (f:,
+                        // path + purpose + tags) side by side; both rank in one list.
+                        let mut scored: Vec<(serde_json::Value, f64)> = hits
                             .iter()
                             .filter_map(|(id, score)| {
-                                by_id.get(id.as_str()).map(|s| {
+                                if let Some(s) = by_id.get(id.as_str()) {
                                     let mut score = *score as f64;
                                     if test_ids.contains(id) {
                                         score *= 0.7;
                                     }
-                                    (*s, score)
-                                })
+                                    Some((
+                                        serde_json::json!({
+                                            "name": s.name,
+                                            "kind": s.kind.to_string(),
+                                            "path": s.path,
+                                            "line": s.span.start_line,
+                                            "match_type": "vector",
+                                        }),
+                                        score,
+                                    ))
+                                } else {
+                                    file_by_id.get(id.as_str()).map(|f| {
+                                        (
+                                            serde_json::json!({
+                                                "kind": "file",
+                                                "path": f.path,
+                                                "purpose": f.purpose,
+                                                "tags": f.tags,
+                                                "match_type": "vector-file",
+                                            }),
+                                            *score as f64,
+                                        )
+                                    })
+                                }
                             })
                             .collect();
                         scored.sort_by(|a, b| {
@@ -275,19 +304,18 @@ impl KungfuService {
                         });
                         scored.truncate(budget.top_k());
                         let items: Vec<serde_json::Value> = scored
-                            .iter()
-                            .map(|(s, score)| {
-                                serde_json::json!({
-                                    "name": s.name,
-                                    "kind": s.kind.to_string(),
-                                    "path": s.path,
-                                    "line": s.span.start_line,
-                                    "score": score,
-                                    "match_type": "vector",
-                                })
+                            .into_iter()
+                            .map(|(mut item, score)| {
+                                item["score"] = serde_json::json!(score);
+                                item
                             })
                             .collect();
-                        let embedded = store.len();
+                        let embedded = store
+                            .manifest()
+                            .offsets
+                            .keys()
+                            .filter(|id| id.starts_with("s:"))
+                            .count();
                         let total = all.len();
                         let mut out = serde_json::json!({
                             "query": query,

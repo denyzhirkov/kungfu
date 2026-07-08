@@ -747,8 +747,8 @@ pub fn embeddings(action: EmbeddingsCommands, json: bool) -> Result<()> {
                 println!("inference feature:   {}", status.inference_compiled);
                 println!("weights installed:   {}", status.weights_installed);
                 println!(
-                    "vectors built:       {} / {} symbols",
-                    status.indexed_vectors, status.indexed_symbols
+                    "vectors built:       {} / {} symbols (+{} file vectors)",
+                    status.indexed_vectors, status.indexed_symbols, status.indexed_file_vectors
                 );
                 println!("weights dir:         {}", status.models_dir);
                 println!();

@@ -14,6 +14,8 @@ pub struct EmbeddingsStatus {
     pub weights_installed: bool,
     pub index_present: bool,
     pub indexed_vectors: usize,
+    /// File-level vectors (path + purpose + tags) alongside symbol vectors.
+    pub indexed_file_vectors: usize,
     pub indexed_symbols: usize,
     pub models_dir: String,
     /// One-line hint for the agent on what to do next, if anything.
@@ -51,6 +53,44 @@ fn symbol_embed_text(s: &kungfu_types::symbol::Symbol) -> String {
     t
 }
 
+/// The text a file is embedded as: path + authored purpose + heuristic tags.
+/// Files with neither purpose nor tags carry no semantic text beyond the path
+/// (already reachable via find_files) and are not embedded.
+fn file_embed_text(f: &kungfu_types::file::FileEntry) -> Option<String> {
+    if f.purpose.is_none() && f.tags.is_empty() {
+        return None;
+    }
+    let mut t = f.path.clone();
+    if let Some(ref purpose) = f.purpose {
+        t.push(' ');
+        t.push_str(purpose);
+    }
+    if !f.tags.is_empty() {
+        t.push(' ');
+        t.push_str(&f.tags.join(" "));
+    }
+    Some(t)
+}
+
+/// (id, text) pairs for everything embeddable: all symbols plus files that
+/// have a purpose or tags. Id prefixes (`s:` / `f:`) keep the spaces distinct
+/// in the shared vector store.
+fn embeddable_texts(
+    symbols: &[kungfu_types::symbol::Symbol],
+    files: &[kungfu_types::file::FileEntry],
+) -> Vec<(String, String)> {
+    let mut texts: Vec<(String, String)> = symbols
+        .iter()
+        .map(|s| (s.id.clone(), symbol_embed_text(s)))
+        .collect();
+    texts.extend(
+        files
+            .iter()
+            .filter_map(|f| file_embed_text(f).map(|t| (f.id.clone(), t))),
+    );
+    texts
+}
+
 impl KungfuService {
     /// Report whether semantic vector search is wired up end-to-end and, if not, which
     /// step is missing. Always succeeds — designed so agents can ask "are we ready?"
@@ -66,7 +106,16 @@ impl KungfuService {
         let index_dir = self.project.index_dir();
         let manifest = EmbeddingManifest::load(&index_dir).ok().flatten();
         let index_present = manifest.is_some();
-        let indexed_vectors = manifest.as_ref().map(|m| m.offsets.len()).unwrap_or(0);
+        // Symbol and file vectors share the store; count them separately so
+        // the symbol-coverage hint below stays truthful.
+        let indexed_vectors = manifest
+            .as_ref()
+            .map(|m| m.offsets.keys().filter(|id| id.starts_with("s:")).count())
+            .unwrap_or(0);
+        let indexed_file_vectors = manifest
+            .as_ref()
+            .map(|m| m.offsets.keys().filter(|id| id.starts_with("f:")).count())
+            .unwrap_or(0);
 
         let indexed_symbols = self.store.load_symbols().map(|s| s.len()).unwrap_or(0);
 
@@ -93,6 +142,7 @@ impl KungfuService {
             weights_installed,
             index_present,
             indexed_vectors,
+            indexed_file_vectors,
             indexed_symbols,
             models_dir: models_dir.to_string_lossy().to_string(),
             hint,
@@ -124,6 +174,7 @@ impl KungfuService {
             !symbols.is_empty(),
             "no symbols indexed — run `kungfu index` first"
         );
+        let files = self.store.load_files()?;
 
         let index_dir = self.project.index_dir();
         let mut manifest = EmbeddingManifest::load(&index_dir)?
@@ -135,10 +186,7 @@ impl KungfuService {
             engine.dim()
         );
 
-        let texts: Vec<(String, String)> = symbols
-            .iter()
-            .map(|s| (s.id.clone(), symbol_embed_text(s)))
-            .collect();
+        let texts = embeddable_texts(&symbols, &files);
 
         let total_known = texts.len();
         let live_ids: std::collections::HashSet<String> =
@@ -189,10 +237,8 @@ impl KungfuService {
         };
 
         let symbols = self.store.load_symbols()?;
-        let texts: Vec<(String, String)> = symbols
-            .iter()
-            .map(|s| (s.id.clone(), symbol_embed_text(s)))
-            .collect();
+        let files = self.store.load_files()?;
+        let texts = embeddable_texts(&symbols, &files);
         let live_ids: std::collections::HashSet<String> =
             texts.iter().map(|(id, _)| id.clone()).collect();
         let pending: Vec<(String, String)> = texts
