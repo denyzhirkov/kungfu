@@ -3,8 +3,17 @@
 /dist
 /tmp
 
-# Kungfu project state
-.kungfu
+# Kungfu project state — derived/local parts only; annotations.json and
+# memory/*.md are durable team knowledge and stay tracked
+.kungfu/index/
+.kungfu/cache/
+.kungfu/logs/
+.kungfu/state/
+.kungfu/config.toml
+.kungfu/project.json
+.kungfu/stats.json
+.kungfu/memory/manifest.json
+.kungfu/*.bak
 
 # Editor
 *.swp

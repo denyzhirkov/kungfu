@@ -1,0 +1,97 @@
+{
+  "crates/kungfu-cli/src/main.rs": {
+    "purpose": "clap CLI entrypoint: command enum, argument parsing, dispatch into commands.rs",
+    "content_hash": "60ae004b690c730ef2879f44497673bd38860d9f1db3e4b3ca1f3683c6c22a8e",
+    "annotated_at": "2026-07-08T15:53:05.954010+00:00"
+  },
+  "crates/kungfu-config/src/lib.rs": {
+    "purpose": "KungfuConfig: the single validated entry point for TOML config loading and merging ([index], [call_graph], watch)",
+    "content_hash": "2f0821c7cc8d1a312842a14cbcb9db398ae7bfb05b13c6f28e40b044f2a76b17",
+    "annotated_at": "2026-07-08T15:53:05.973702+00:00"
+  },
+  "crates/kungfu-core/src/helpers.rs": {
+    "purpose": "Shared retrieval helpers: test-symbol detection, primary-language detection, symbol lookup utilities",
+    "content_hash": "5d78ada3f710f4787d51563e6b0b801549b7d4d993fec35d5fe8bdd9d382459c",
+    "annotated_at": "2026-07-08T15:53:05.982713+00:00"
+  },
+  "crates/kungfu-core/src/lib.rs": {
+    "purpose": "KungfuService slim facade: constructor, accessors, budget resolution, ensure_fresh_index; use cases live in the sibling modules",
+    "content_hash": "801f3de53c7a1bda419073b6e3c4fae3782c87b60a8a7d00ad62c9385dc892d6",
+    "annotated_at": "2026-07-08T15:53:05.964582+00:00"
+  },
+  "crates/kungfu-core/src/types.rs": {
+    "purpose": "Response DTOs for core use cases: StatusInfo, RepoOutline, FileOutline, OnboardInfo and friends",
+    "content_hash": "720874a5e207e30158a36f0f38f9b9aa335e9e570c0e9aacf3337dba287570c1",
+    "annotated_at": "2026-07-08T15:53:06.001501+00:00"
+  },
+  "crates/kungfu-mcp/src/params.rs": {
+    "purpose": "Input parameter structs for every MCP tool; schemars derives the tool JSON schemas from these",
+    "content_hash": "f249a78ab10ee6d35dfe6e639cc9d96527f41e09696429aaed7060fd96dd938b",
+    "annotated_at": "2026-07-08T15:53:05.906194+00:00"
+  },
+  "crates/kungfu-project/src/lib.rs": {
+    "purpose": "Project root detection and .kungfu directory management: init, meta, config paths, Claude Code integration entry",
+    "content_hash": "fa911dfcd8644be2bab7f198e5b7558bf938762d9b3e15c4a4965d3454e7b79a",
+    "annotated_at": "2026-07-08T15:53:06.010970+00:00"
+  },
+  "crates/kungfu-rank/src/lib.rs": {
+    "purpose": "Context packet assembly: greedy marginal-relevance selection (MMR), same-file decay, dedup, budget trim",
+    "terms": {
+      "mmr": "greedy marginal-relevance pass replacing pure top-K so one file cannot flood the packet"
+    },
+    "content_hash": "c9014a5cdc17222bd1479ccaee9b4d71b16b5bab1557d6a0798c8c9ade7e529e",
+    "annotated_at": "2026-07-08T15:53:06.020110+00:00"
+  },
+  "crates/kungfu-storage/src/lib.rs": {
+    "purpose": "JsonStore: atomic JSON persistence of index shards (files/symbols/relations/memories), schema versioning, process-cache glue",
+    "content_hash": "5df9761ff55019eef10901c83e66e044e308f50a699254808b9525a12d55fdbd",
+    "annotated_at": "2026-07-08T15:53:05.991400+00:00"
+  },
+  "crates/kungfu-types/src/budget.rs": {
+    "purpose": "Budget levels (tiny/small/medium/full) that cap every retrieval path end-to-end",
+    "terms": {
+      "budget": "hard cap on packet size threaded through all retrieval"
+    },
+    "content_hash": "40d0ee7f4f34a449acf44fbcc3d2e6dd654fb077865c30e2e1f1525480896034",
+    "annotated_at": "2026-07-08T13:13:17.953529+00:00"
+  },
+  "crates/kungfu-types/src/context.rs": {
+    "purpose": "ContextPacket response shape: scored items, rationale, evidence, retrieval honesty fields — what every retrieval use case returns",
+    "terms": {
+      "packet": "assembled, budget-trimmed retrieval response"
+    },
+    "content_hash": "e6048cad35e6bd6721f81d190806f839e996e237a83505c179540224af638762",
+    "annotated_at": "2026-07-08T15:53:05.945139+00:00"
+  },
+  "crates/kungfu-types/src/file.rs": {
+    "purpose": "FileEntry domain type (hash, language, tags, purpose with provenance) and the Language enum with extension mapping",
+    "content_hash": "4fffef32008d182c1d9f28e22a531ec19d2a0861a4aabb5f00dd57d930ba450a",
+    "annotated_at": "2026-07-08T15:53:05.936013+00:00"
+  },
+  "crates/kungfu-types/src/lib.rs": {
+    "purpose": "Root of the shared domain-types crate: re-exports Budget, FileEntry, Symbol, Relation, ContextPacket — the contract every other crate builds on",
+    "content_hash": "24a9a38b49f13e702d85d9dc807085d3bf0313a8d659d93c790a25a3b14a0c6a",
+    "annotated_at": "2026-07-08T15:53:05.883730+00:00"
+  },
+  "crates/kungfu-types/src/memory.rs": {
+    "purpose": "Memory domain types: auto-extracted MemoryEntry (comments/docs) and manual ProjectMemoryEntry with kind/status/pinning",
+    "content_hash": "0b2b38801fab6eb31a64f312a28006d521f5fcc05da85695932222897da19215",
+    "annotated_at": "2026-07-08T15:53:05.915561+00:00"
+  },
+  "crates/kungfu-types/src/relation.rs": {
+    "purpose": "Relation edge type (imports and calls graphs) plus CallGraphMeta describing build-time noise filtering",
+    "terms": {
+      "relation": "one edge in the import or call graph between files/symbols"
+    },
+    "content_hash": "bf6da231ef46d0185a4727d9afec57269a23f3897178f29f245b888c5832e4eb",
+    "annotated_at": "2026-07-08T15:53:05.925785+00:00"
+  },
+  "crates/kungfu-types/src/symbol.rs": {
+    "purpose": "Symbol domain type: SymbolKind taxonomy, Span coordinates, doc_summary — the unit every search and ranking path operates on",
+    "terms": {
+      "symbol": "one named code entity (fn/struct/class/...) extracted by tree-sitter"
+    },
+    "content_hash": "88001e8b80211cd78277fc4bbb24a81fd0cec7d04c905605ee6da5bdf516b92b",
+    "annotated_at": "2026-07-08T15:53:05.896621+00:00"
+  }
+}
