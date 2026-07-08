@@ -284,6 +284,26 @@ impl KungfuMcp {
     }
 
     #[tool(
+        description = "Record a one-line purpose (and optional glossary terms) for a file you now understand. Stored durably, merged into the index with purpose_source=agent (an authored module doc keeps precedence), and picked up by the file's search vector"
+    )]
+    fn annotate_file(
+        &self,
+        Parameters(params): Parameters<AnnotateFileParam>,
+    ) -> Result<String, String> {
+        tools::annotate::annotate_file(self, params)
+    }
+
+    #[tool(
+        description = "Files most worth annotating: no purpose from any source, ranked by how much of the project imports them. Returns items + the expected workflow (understand via file_outline, then annotate_file)"
+    )]
+    fn annotation_queue(
+        &self,
+        Parameters(params): Parameters<AnnotationQueueParam>,
+    ) -> Result<String, String> {
+        tools::annotate::annotation_queue(self, params)
+    }
+
+    #[tool(
         description = "Add a project memory entry. Kinds: fact, decision, warning, session_summary. Use to preserve important project knowledge for future sessions"
     )]
     fn memory_add(&self, Parameters(params): Parameters<MemoryAddParam>) -> Result<String, String> {

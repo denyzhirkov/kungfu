@@ -145,7 +145,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 }
 ```
 
-### Tools (38)
+### Tools (40)
 
 **Retrieval** — `ask_context` (intent + multi-strategy search + rationale + memory), `edit_context` (full verbatim body + contracts, edit-ready), `explore_symbol`, `explore_file`, `investigate`, `debug_trace`, `commit_context`, `pr_context`.
 
@@ -158,6 +158,8 @@ Add to your agent config (Claude Code, Cursor, etc.):
 **History** — `file_history`, `symbol_history`, `change_timeline`.
 
 **Memory** — `memory_add`, `memory_search`, `memory_list`, `memory_get`, `memory_update`, `memory_archive`.
+
+**Annotations** — `annotate_file` (record a one-line file purpose + glossary terms; durable in `.kungfu/annotations.json`, merged with `purpose_source: agent`, authored module docs keep precedence), `annotation_queue` (files most worth annotating, ranked by import degree).
 
 **Freshness & stats** — `reindex` (targeted reindex right after an edit), `usage_stats`.
 

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::info;
 
+mod annotate;
 mod ask;
 mod debug;
 mod edit;
@@ -27,6 +28,7 @@ mod search_ops;
 mod types;
 mod verify;
 
+pub use annotate::{AnnotateResult, AnnotationQueue, AnnotationQueueItem};
 pub use debug::{DebugTraceResult, TraceFrame};
 pub use embeddings::{EmbeddingsBuildResult, EmbeddingsStatus};
 pub use export::ExportStats;

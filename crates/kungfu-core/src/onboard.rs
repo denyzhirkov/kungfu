@@ -261,6 +261,7 @@ mod tests {
             indexed_at: Default::default(),
             tags: vec![],
             purpose: None,
+            purpose_source: None,
         }];
         let result = detect_architecture(&files, &[]);
         assert!(result.contains("Workspace"), "got: {}", result);
@@ -279,6 +280,7 @@ mod tests {
                 indexed_at: Default::default(),
                 tags: vec![],
                 purpose: None,
+                purpose_source: None,
             },
             FileEntry {
                 id: "2".into(),
@@ -290,6 +292,7 @@ mod tests {
                 indexed_at: Default::default(),
                 tags: vec![],
                 purpose: None,
+                purpose_source: None,
             },
             FileEntry {
                 id: "3".into(),
@@ -301,6 +304,7 @@ mod tests {
                 indexed_at: Default::default(),
                 tags: vec![],
                 purpose: None,
+                purpose_source: None,
             },
         ];
         let result = detect_architecture(&files, &[]);
@@ -418,6 +422,7 @@ mod tests {
                 indexed_at: Default::default(),
                 tags: vec![],
                 purpose: None,
+                purpose_source: None,
             },
             FileEntry {
                 id: "2".into(),
@@ -429,6 +434,7 @@ mod tests {
                 indexed_at: Default::default(),
                 tags: vec![],
                 purpose: None,
+                purpose_source: None,
             },
         ];
         let result = detect_test_pattern(&files);

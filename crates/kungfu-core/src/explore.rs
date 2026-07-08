@@ -97,6 +97,7 @@ impl KungfuService {
             path: file.path.clone(),
             language: file.language.clone(),
             purpose: file.purpose.clone(),
+            purpose_source: file.purpose_source.clone(),
             tags: file.tags.clone(),
             symbols: outlines,
         })
@@ -209,15 +210,25 @@ impl KungfuService {
             })
             .collect();
 
-        Ok(serde_json::json!({
+        let mut out = serde_json::json!({
             "path": outline.path,
             "language": outline.language,
             "purpose": outline.purpose,
+            "purpose_source": outline.purpose_source,
             "tags": outline.tags,
             "total_symbols": outline.symbols.len(),
             "key_symbols": key_symbols,
             "related_files": related_files,
-        }))
+        });
+        // Drip annotation: the agent that just explored this file is the best
+        // moment to capture what it is for. One short field, only when absent.
+        if outline.purpose.is_none() && !outline.tags.iter().any(|t| t == "tests") {
+            out["annotation_hint"] = serde_json::json!(
+                "no purpose recorded for this file — if you now understand it, \
+                 call annotate_file with a one-line purpose"
+            );
+        }
+        Ok(out)
     }
 
     /// Composite: investigate a query — ask_context + diff boost in one call.

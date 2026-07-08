@@ -195,3 +195,19 @@ pub struct MemoryUpdateParam {
 pub(crate) fn parse_budget(s: Option<&str>) -> Budget {
     s.and_then(|s| s.parse().ok()).unwrap_or(Budget::Auto)
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AnnotateFileParam {
+    /// Path to the file (relative to project root)
+    pub path: String,
+    /// One-line description of what the file is for (max 300 chars)
+    pub purpose: String,
+    /// Project-jargon glossary entries this file defines: term -> meaning
+    pub terms: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AnnotationQueueParam {
+    /// Max files to return (default 10, max 50)
+    pub limit: Option<usize>,
+}

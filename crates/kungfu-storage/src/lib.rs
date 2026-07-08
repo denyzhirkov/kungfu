@@ -12,8 +12,10 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::debug;
 
+mod annotations;
 mod process_cache;
 mod project_memory;
+pub use annotations::AnnotationStore;
 pub use project_memory::{AbsorbReport, MemoryMeta, ProjectMemoryStore};
 
 /// Version of the persisted index semantics. Bump whenever what gets stored
@@ -28,7 +30,9 @@ pub use project_memory::{AbsorbReport, MemoryMeta, ProjectMemoryStore};
 ///   comments; full reindex populates it uniformly.
 /// - 4: FileEntry.tags — heuristic tags from path/import/symbol signals
 ///   (tests, entrypoint, config, database, http, cli, auth, types).
-pub const INDEX_SCHEMA_VERSION: u32 = 4;
+/// - 5: FileEntry.purpose_source (doc | agent | agent-stale) + agent
+///   annotations merged from `.kungfu/annotations.json` at index time.
+pub const INDEX_SCHEMA_VERSION: u32 = 5;
 
 /// Atomically replace `path` with `contents`: write a sibling temp file, then
 /// rename it over the target. Rename is atomic on the same filesystem, so a
@@ -68,11 +72,13 @@ pub struct JsonStore {
     fingerprints_cache: RefCell<Option<Arc<HashMap<String, String>>>>,
     memories_cache: RefCell<Option<Arc<Vec<MemoryEntry>>>>,
     pmem: ProjectMemoryStore,
+    annotations: AnnotationStore,
 }
 
 impl JsonStore {
     pub fn new(base_dir: &Path) -> Self {
-        // Manual memory lives under `.kungfu/`, one level up from the index dir.
+        // Manual memory and annotations live under `.kungfu/`, one level up
+        // from the index dir.
         let kungfu_dir = base_dir.parent().unwrap_or(base_dir);
         Self {
             base_dir: base_dir.to_path_buf(),
@@ -82,7 +88,12 @@ impl JsonStore {
             fingerprints_cache: RefCell::new(None),
             memories_cache: RefCell::new(None),
             pmem: ProjectMemoryStore::new(kungfu_dir),
+            annotations: AnnotationStore::new(kungfu_dir),
         }
+    }
+
+    pub fn annotations(&self) -> &AnnotationStore {
+        &self.annotations
     }
 
     /// Invalidate all caches (call after save operations that modify the index).

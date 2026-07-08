@@ -195,6 +195,7 @@ mod tests {
                 indexed_at: Default::default(),
                 tags: vec![],
                 purpose: None,
+                purpose_source: None,
             },
             FileEntry {
                 id: "2".into(),
@@ -206,6 +207,7 @@ mod tests {
                 indexed_at: Default::default(),
                 tags: vec![],
                 purpose: None,
+                purpose_source: None,
             },
             FileEntry {
                 id: "3".into(),
@@ -217,6 +219,7 @@ mod tests {
                 indexed_at: Default::default(),
                 tags: vec![],
                 purpose: None,
+                purpose_source: None,
             },
         ];
         assert_eq!(detect_primary_language(&files), Some("rust".to_string()));

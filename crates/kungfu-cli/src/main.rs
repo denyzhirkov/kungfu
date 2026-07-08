@@ -288,6 +288,26 @@ enum Commands {
         budget: String,
     },
 
+    /// Record a one-line purpose for a file (agent annotation)
+    Annotate {
+        /// Path to the file (relative to project root)
+        path: String,
+
+        /// One-line description of what the file is for
+        #[arg(long)]
+        purpose: String,
+
+        /// Glossary term this file defines, as term=meaning (repeatable)
+        #[arg(long = "term")]
+        terms: Vec<String>,
+    },
+
+    /// List files most worth annotating (no purpose recorded, ranked by import degree)
+    AnnotationQueue {
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+
     /// Project memory management
     Memory {
         #[command(subcommand)]
@@ -548,6 +568,12 @@ fn main() {
         Commands::ChangeTimeline { name, budget } => {
             commands::change_timeline(&name, parse_budget(&budget), json)
         }
+        Commands::Annotate {
+            path,
+            purpose,
+            terms,
+        } => commands::annotate(&path, &purpose, &terms, json),
+        Commands::AnnotationQueue { limit } => commands::annotation_queue(limit, json),
         Commands::Memory { action } => commands::memory(action, json),
         Commands::Stats => commands::stats(json),
         Commands::Embeddings { action } => commands::embeddings(action, json),

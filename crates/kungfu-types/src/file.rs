@@ -16,6 +16,11 @@ pub struct FileEntry {
     /// (Rust `//!`, Python module docstring, Go package comment, `/**` file header).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
+    /// Where `purpose` came from: "doc" (authored module doc — the trusted layer),
+    /// "agent" (annotation via annotate_file), or "agent-stale" (annotation whose
+    /// content hash no longer matches the file). Absent when purpose is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

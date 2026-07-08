@@ -195,6 +195,7 @@ impl<'a> Indexer<'a> {
             call_edges_filtered,
         };
 
+        self.apply_annotations(&mut files);
         self.store.save_files(&files)?;
         self.store.save_symbols(&all_symbols)?;
         self.store.save_relations(&relations)?;
@@ -377,6 +378,7 @@ impl<'a> Indexer<'a> {
             }
         }
 
+        self.apply_annotations(&mut new_files);
         self.store.save_files(&new_files)?;
         self.store.save_symbols(&new_symbols)?;
         self.store.save_relations(&relations)?;
@@ -522,6 +524,7 @@ impl<'a> Indexer<'a> {
             }
         }
 
+        self.apply_annotations(&mut new_files);
         self.store.save_files(&new_files)?;
         self.store.save_symbols(&new_symbols)?;
         self.store.save_relations(&relations)?;
@@ -581,6 +584,42 @@ impl<'a> Indexer<'a> {
         Ok(ReadOutcome::Full(content))
     }
 
+    /// Merge agent annotations (`.kungfu/annotations.json`) into the file
+    /// entries. The authored module doc always wins; annotations fill the gaps
+    /// with `purpose_source: agent`, downgraded to `agent-stale` when the file
+    /// changed since it was annotated (retrieval honesty — a stale description
+    /// must be distinguishable from a current one). Runs on every index path,
+    /// so annotation edits take effect on the next index of any kind.
+    fn apply_annotations(&self, files: &mut [FileEntry]) {
+        let annotations = match self.store.annotations().load() {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("skipping annotations merge: {e:#}");
+                return;
+            }
+        };
+        if annotations.is_empty() {
+            return;
+        }
+        for file in files.iter_mut() {
+            if file.purpose_source.as_deref() == Some("doc") {
+                continue;
+            }
+            if let Some(ann) = annotations.get(&file.path) {
+                file.purpose = Some(ann.purpose.clone());
+                file.purpose_source = Some(if ann.content_hash == file.hash {
+                    "agent".to_string()
+                } else {
+                    "agent-stale".to_string()
+                });
+            } else if file.purpose_source.is_some() {
+                // Annotation was removed — drop the carried-over agent purpose.
+                file.purpose = None;
+                file.purpose_source = None;
+            }
+        }
+    }
+
     /// Build a FileEntry for a file whose content we deliberately did not read,
     /// so it stays discoverable by path/name. Fingerprint is size-based, so the
     /// file is only re-evaluated when its size changes.
@@ -608,6 +647,7 @@ impl<'a> Indexer<'a> {
             indexed_at: Utc::now(),
             tags,
             purpose: None,
+            purpose_source: None,
         }
     }
 
@@ -640,6 +680,7 @@ impl<'a> Indexer<'a> {
             indexed_at: Utc::now(),
             tags: Vec::new(),
             purpose: None,
+            purpose_source: None,
         };
 
         let (symbols, imports, comments, calls) = if language.is_code() {
@@ -658,6 +699,9 @@ impl<'a> Indexer<'a> {
                         rel_path
                     );
                     entry.purpose = result.module_doc;
+                    if entry.purpose.is_some() {
+                        entry.purpose_source = Some("doc".to_string());
+                    }
                     (
                         result.symbols,
                         result.imports,

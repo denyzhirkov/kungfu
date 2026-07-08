@@ -26,8 +26,11 @@ pub struct DirEntry {
 pub struct FileOutline {
     pub path: String,
     pub language: Option<String>,
-    /// Authored one-liner from the module doc comment — the trusted layer.
+    /// One-liner describing the file; `purpose_source` names where it came from.
     pub purpose: Option<String>,
+    /// "doc" (authored module doc), "agent" (annotate_file), or "agent-stale"
+    /// (annotation older than the file's current content).
+    pub purpose_source: Option<String>,
     /// Heuristic tags from path/import/symbol signals — structural provenance.
     pub tags: Vec<String>,
     pub symbols: Vec<SymbolOutline>,

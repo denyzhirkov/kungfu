@@ -2441,3 +2441,53 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn annotate(path: &str, purpose: &str, terms: &[String], json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let mut term_map = std::collections::BTreeMap::new();
+    for t in terms {
+        let (k, v) = t
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--term expects term=meaning, got: {t}"))?;
+        term_map.insert(k.trim().to_string(), v.trim().to_string());
+    }
+    let result = service.annotate_file(path, purpose, term_map)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("{}: {}", result.status, result.path);
+        println!("  {}", result.purpose);
+        if result.terms_recorded > 0 {
+            println!("  terms recorded: {}", result.terms_recorded);
+        }
+        println!("  → {}", result.hint);
+    }
+    Ok(())
+}
+
+pub fn annotation_queue(limit: usize, json: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let service = KungfuService::open(&cwd)?;
+    let queue = service.annotation_queue(limit)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&queue)?);
+    } else {
+        println!(
+            "{} files without purpose (showing {}):",
+            queue.total_unannotated,
+            queue.items.len()
+        );
+        for item in &queue.items {
+            let tags = if item.tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", item.tags.join(", "))
+            };
+            println!("  {}{} — {}", item.path, tags, item.why);
+        }
+        println!();
+        println!("→ {}", queue.instruction);
+    }
+    Ok(())
+}

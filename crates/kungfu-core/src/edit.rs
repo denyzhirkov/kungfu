@@ -139,7 +139,25 @@ impl KungfuService {
             })
             .collect();
 
-        Ok(serde_json::json!({
+        // Drip annotation: an agent about to edit here has just built an
+        // understanding of the file — capture it if no purpose is recorded.
+        let annotation_hint = self
+            .store
+            .load_files()
+            .ok()
+            .and_then(|files| {
+                files
+                    .iter()
+                    .find(|f| f.path == symbol.path)
+                    .map(|f| f.purpose.is_none() && !f.tags.iter().any(|t| t == "tests"))
+            })
+            .unwrap_or(false)
+            .then_some(
+                "no purpose recorded for this file — if you now understand it, \
+                 call annotate_file with a one-line purpose",
+            );
+
+        let mut out = serde_json::json!({
             "symbol": {
                 "name": symbol.name,
                 "kind": symbol.kind.to_string(),
@@ -158,6 +176,10 @@ impl KungfuService {
             "callers_count": callers_count,
             "call_graph": if call_graph_indexed { "indexed" } else { "not_indexed" },
             "rationale": rationale,
-        }))
+        });
+        if let Some(hint) = annotation_hint {
+            out["annotation_hint"] = serde_json::json!(hint);
+        }
+        Ok(out)
     }
 }

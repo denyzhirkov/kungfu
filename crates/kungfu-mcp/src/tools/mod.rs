@@ -1,3 +1,4 @@
+pub(crate) mod annotate;
 pub(crate) mod context;
 pub(crate) mod graph;
 pub(crate) mod history;
