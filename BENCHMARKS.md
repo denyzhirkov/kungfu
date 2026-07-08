@@ -50,14 +50,19 @@ built embeddings it runs true vector search — see `kungfu embeddings status`.
 
 ## Retrieval quality
 
-Quality is tracked by a 50-case suite against pinned checkouts of these repos
+Quality is tracked by a 56-case suite against pinned checkouts of these repos
 (`research/cases/`, commits pinned in `research/bench-repos.lock.json`; run it with
 `scripts/eval.sh && scripts/score.sh`). Categories cover concept-recall, identifier
-mismatch, over-selection, cross-file context, debugging, and orientation. The current
-recorded baseline is `research/baseline-score-v4.json` (v2.6.0: aggregate 53.03, 37/50
-passing — up from 46.41 / 32 before the v2.6.0 retrieval work; vector-layer cases require
-`kungfu embeddings build` in the target repos first). Self-targeting cases drift as this
-codebase evolves — A/B comparisons always re-run the BEFORE side at HEAD.
+mismatch, over-selection, cross-file context, debugging, orientation, and — new in
+v2.6.1 — concept-to-file (file-level purpose vectors in `semantic_search`) and
+onboarding (glossary + annotated entrypoints in `onboard`). The current recorded
+baseline is `research/baseline-score-v4.json` (v2.6.0, cases 001–050: aggregate 53.03,
+37/50 passing — up from 46.41 / 32 before the v2.6.0 retrieval work; vector-layer cases
+require `kungfu embeddings build` in the target repos first). v2.6.1 verified parity on
+baseline cases over unchanged corpora (bit-identical scores on 7 repos with rebuilt
+stores) and passes all six new-surface cases; a full baseline v5 refresh awaits complete
+embedding stores. Self-targeting cases drift as this codebase evolves — A/B comparisons
+always re-run the BEFORE side at HEAD.
 
 ## What's measured elsewhere
 

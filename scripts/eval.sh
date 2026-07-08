@@ -66,6 +66,12 @@ run_case() {
       # HARNESS FIX: the `context` subcommand no longer exists; `ask-context` is its successor.
       output=$(cd "$project_dir" && "$KUNGFU" ask-context "$query" --budget "$budget" 2>/dev/null) || output=""
       ;;
+    semantic-search)
+      output=$(cd "$project_dir" && "$KUNGFU" search "$query" --semantic 2>/dev/null) || output=""
+      ;;
+    onboard)
+      output=$(cd "$project_dir" && "$KUNGFU" onboard 2>/dev/null) || output=""
+      ;;
     *)
       output=""
       ;;

@@ -1595,7 +1595,11 @@ pub fn semantic_search(query: &str, budget: Budget, json: bool) -> Result<()> {
             })
             .unwrap_or_default();
 
-        let engine = result["engine"].as_str().unwrap_or("keyword");
+        // Vector mode reports `mode`; the keyword fallback reports `engine`.
+        let engine = result["mode"]
+            .as_str()
+            .or_else(|| result["engine"].as_str())
+            .unwrap_or("keyword");
         println!("Query:    {}", query);
         println!("Engine:   {}", engine);
         if !keywords.is_empty() {
@@ -1609,6 +1613,15 @@ pub fn semantic_search(query: &str, budget: Budget, json: bool) -> Result<()> {
         if let Some(results) = result.get("results").and_then(|r| r.as_array()) {
             for r in results {
                 let match_type = r["match_type"].as_str().unwrap_or("?");
+                if match_type == "vector-file" {
+                    println!(
+                        "  {:.2} [f] {}  file — {}",
+                        r["score"].as_f64().unwrap_or(0.0),
+                        r["path"].as_str().unwrap_or(""),
+                        r["purpose"].as_str().unwrap_or("(tags only)"),
+                    );
+                    continue;
+                }
                 let marker = if match_type == "semantic" { "~" } else { "=" };
                 println!(
                     "  {:.2} [{}] {}:{}  {} {}",
