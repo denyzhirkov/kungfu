@@ -55,6 +55,9 @@ pub struct OnboardInfo {
     pub key_symbols: Vec<String>,
     pub naming_style: String,
     pub test_pattern: String,
+    /// Project vocabulary: agent-curated terms + distinctive identifier words,
+    /// each with provenance (agent | doc | usage).
+    pub glossary: Vec<crate::glossary::GlossaryEntry>,
     pub total_files: usize,
     pub total_symbols: usize,
 }

@@ -159,7 +159,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 
 **Memory** — `memory_add`, `memory_search`, `memory_list`, `memory_get`, `memory_update`, `memory_archive`.
 
-**Annotations** — `annotate_file` (record a one-line file purpose + glossary terms; durable in `.kungfu/annotations.json`, merged with `purpose_source: agent`, authored module docs keep precedence), `annotation_queue` (files most worth annotating, ranked by import degree).
+**Annotations** — `annotate_file` (record a one-line file purpose + glossary terms; durable in `.kungfu/annotations.json`, merged with `purpose_source: agent`, authored module docs keep precedence), `annotation_queue` (files most worth annotating, ranked by import degree). `onboard` includes a project glossary computed on demand: agent-curated terms plus distinctive vocabulary mined from production identifiers, each entry carrying its provenance (`agent` / `doc` / `usage`).
 
 **Freshness & stats** — `reindex` (targeted reindex right after an edit), `usage_stats`.
 

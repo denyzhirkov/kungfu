@@ -920,6 +920,27 @@ pub fn onboard(json: bool) -> Result<()> {
         for sym in &info.key_symbols {
             println!("  {}", sym);
         }
+        if !info.glossary.is_empty() {
+            println!();
+            println!("## Glossary");
+            for entry in &info.glossary {
+                let meaning = match (&entry.meaning, &entry.defined_at) {
+                    (Some(m), _) => m.clone(),
+                    (None, Some(at)) => format!("(defined at {at} — no doc)"),
+                    (None, None) => "(no definition found)".to_string(),
+                };
+                let meaning = meaning.as_str();
+                let usage = entry
+                    .usage
+                    .as_deref()
+                    .map(|u| format!(" [{u}]"))
+                    .unwrap_or_default();
+                println!(
+                    "  {:<16} {} ({}){}",
+                    entry.term, meaning, entry.source, usage
+                );
+            }
+        }
         println!();
         println!("## Naming: {}", info.naming_style);
         println!("## Tests:  {}", info.test_pattern);

@@ -19,6 +19,7 @@ mod edit;
 mod embeddings;
 mod explore;
 mod export;
+mod glossary;
 mod helpers;
 mod history;
 mod memory;
@@ -32,6 +33,7 @@ pub use annotate::{AnnotateResult, AnnotationQueue, AnnotationQueueItem};
 pub use debug::{DebugTraceResult, TraceFrame};
 pub use embeddings::{EmbeddingsBuildResult, EmbeddingsStatus};
 pub use export::ExportStats;
+pub use glossary::GlossaryEntry;
 pub use memory::MemoryDoctor;
 pub use search_ops::EmptyCallGraphCause;
 

@@ -102,8 +102,22 @@ impl KungfuService {
         // Test pattern detection
         let test_pattern = detect_test_pattern(&files);
 
+        // Glossary: agent-curated terms from annotations + vocabulary mined
+        // from identifiers. Computed on demand — nothing persisted.
+        let agent_terms: std::collections::BTreeMap<String, String> = self
+            .store()
+            .annotations()
+            .load()
+            .unwrap_or_default()
+            .into_values()
+            .flat_map(|a| a.terms)
+            .collect();
+        let project_name = self.project.meta.name.clone();
+        let glossary =
+            crate::glossary::build_glossary(&symbols, &agent_terms, &[project_name.as_str()], 15);
+
         Ok(OnboardInfo {
-            project_name: self.project.meta.name.clone(),
+            project_name,
             languages,
             primary_language,
             architecture,
@@ -112,6 +126,7 @@ impl KungfuService {
             key_symbols,
             naming_style,
             test_pattern,
+            glossary,
             total_files: files.len(),
             total_symbols: symbols.len(),
         })
