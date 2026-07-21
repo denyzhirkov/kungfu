@@ -148,6 +148,13 @@ pub struct IndexConfig {
     /// memory during (re)indexing.
     #[serde(default = "default_max_file_bytes")]
     pub max_file_bytes: u64,
+
+    /// Hard cap on symbols kept from a single file. A byte-sane file that emits
+    /// a pathological number of symbols (parser bug, generated code) is truncated
+    /// to this many and the drop is logged — the byte cap above cannot catch this
+    /// because the file itself is small. Backstop against index blow-ups.
+    #[serde(default = "default_max_symbols_per_file")]
+    pub max_symbols_per_file: usize,
 }
 
 fn default_store_backend() -> String {
@@ -159,6 +166,9 @@ fn default_true() -> bool {
 fn default_max_file_bytes() -> u64 {
     2 * 1024 * 1024
 }
+fn default_max_symbols_per_file() -> usize {
+    10_000
+}
 
 impl Default for IndexConfig {
     fn default() -> Self {
@@ -166,6 +176,7 @@ impl Default for IndexConfig {
             store_backend: default_store_backend(),
             incremental: true,
             max_file_bytes: default_max_file_bytes(),
+            max_symbols_per_file: default_max_symbols_per_file(),
         }
     }
 }

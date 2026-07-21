@@ -683,7 +683,7 @@ impl<'a> Indexer<'a> {
             purpose_source: None,
         };
 
-        let (symbols, imports, comments, calls) = if language.is_code() {
+        let (mut symbols, imports, comments, calls) = if language.is_code() {
             let content_str = String::from_utf8_lossy(&content);
             match self
                 .parser
@@ -717,6 +717,21 @@ impl<'a> Indexer<'a> {
         } else {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         };
+
+        // Backstop against index blow-ups: a byte-sane file that yields a
+        // pathological number of symbols is truncated. The byte cap in
+        // `read_for_index` cannot catch this — the file is small.
+        let cap = self.config.index.max_symbols_per_file;
+        if symbols.len() > cap {
+            warn!(
+                "{}: {} symbols exceeds max_symbols_per_file ({}); truncating — \
+                 raise [index] max_symbols_per_file if this file is legitimately this large",
+                rel_path,
+                symbols.len(),
+                cap
+            );
+            symbols.truncate(cap);
+        }
 
         entry.tags = crate::file_tags::derive_tags(&rel_path, &imports, &symbols);
 

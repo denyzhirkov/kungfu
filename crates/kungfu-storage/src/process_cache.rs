@@ -27,6 +27,11 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::SystemTime;
 use tracing::debug;
 
+/// A JSON index shard larger than this is corrupt, not big: even a huge repo's
+/// symbols shard stays in the low hundreds of MB. Reading past this hangs every
+/// tool call (the blow-up symptom), so loads refuse it with a rebuild hint.
+const MAX_SHARD_BYTES: u64 = 1024 * 1024 * 1024;
+
 pub(crate) static FILES: Slot<Vec<FileEntry>> = Slot::new("files");
 pub(crate) static SYMBOLS: Slot<Vec<Symbol>> = Slot::new("symbols");
 pub(crate) static RELATIONS: Slot<Vec<Relation>> = Slot::new("relations");
@@ -109,7 +114,19 @@ impl<T: Default + Send + Sync> Slot<T> {
         debug!(shard = self.shard, path = %path.display(), "process cache miss, loading shard");
         let data = match current {
             None => Arc::new(T::default()),
-            Some(_) => {
+            Some(s) => {
+                // Fail loud instead of slurping a corrupt multi-GB shard into
+                // memory (the symbol-duplication blow-up hangs every reader on
+                // read_to_string). No real index shard approaches this size.
+                if s.len > MAX_SHARD_BYTES {
+                    anyhow::bail!(
+                        "index shard {} is {:.1} GiB — no real index is this large, \
+                         it is corrupt (likely duplicate-symbol accumulation). \
+                         Rebuild with `kungfu index --full`.",
+                        path.display(),
+                        s.len as f64 / (1024.0 * 1024.0 * 1024.0)
+                    );
+                }
                 let content = std::fs::read_to_string(path)
                     .with_context(|| format!("reading index shard {}", path.display()))?;
                 Arc::new(parse(&content)?)

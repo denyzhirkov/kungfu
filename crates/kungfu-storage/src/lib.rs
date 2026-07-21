@@ -49,6 +49,21 @@ pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clone `items` keeping the first entry per key, preserving order. Enforces
+/// per-shard identity invariants on save (one symbol per id, one file per path)
+/// — the last line of defence against index blow-ups from duplicate symbol
+/// accumulation. Runs once per save, so owned keys over a borrow-checker dance.
+fn dedup_by<T: Clone>(items: &[T], key: impl Fn(&T) -> String) -> Vec<T> {
+    let mut seen = std::collections::HashSet::with_capacity(items.len());
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        if seen.insert(key(item)) {
+            out.push(item.clone());
+        }
+    }
+    out
+}
+
 /// Sidecar stamp naming the binary version that last wrote the index.
 /// Additive: older binaries ignore it; its absence means the index was
 /// written by a version that predates the stamp.
@@ -106,12 +121,16 @@ impl JsonStore {
     }
 
     pub fn save_files(&self, files: &[FileEntry]) -> Result<()> {
+        // Integrity invariant: one entry per path. A file's identity is its path;
+        // duplicate path entries can only be redundant, and left unchecked they
+        // feed the symbol-duplication blow-up (see dedup in `save_symbols`).
+        let files = dedup_by(files, |f| f.path.clone());
         let path = self.base_dir.join("files.json");
-        let json = serde_json::to_string_pretty(files)?;
+        let json = serde_json::to_string_pretty(&files)?;
         atomic_write(&path, &json)?;
         debug!("saved {} files to index", files.len());
         process_cache::FILES.clear();
-        *self.files_cache.borrow_mut() = Some(Arc::new(files.to_vec()));
+        *self.files_cache.borrow_mut() = Some(Arc::new(files));
         self.stamp_store_version()?;
         Ok(())
     }
@@ -166,12 +185,27 @@ impl JsonStore {
     }
 
     pub fn save_symbols(&self, symbols: &[Symbol]) -> Result<()> {
+        // Integrity invariant: one entry per symbol id (`s:{file_id}:{line}:{name}`).
+        // Two symbols with the same id are the same logical symbol, so a duplicate
+        // is always redundant. This is the load-bearing guard against index
+        // blow-ups: incremental/only reindex can copy a file's symbols once per
+        // path-entry, and when identical-content files share a content-hash
+        // file_id, that copy doubles the set every run (unbounded without this).
+        let before = symbols.len();
+        let symbols = dedup_by(symbols, |s| s.id.clone());
+        if symbols.len() < before {
+            debug!(
+                "dropped {} duplicate symbols before save ({} unique)",
+                before - symbols.len(),
+                symbols.len()
+            );
+        }
         let path = self.base_dir.join("symbols.json");
-        let json = serde_json::to_string(symbols)?;
+        let json = serde_json::to_string(&symbols)?;
         atomic_write(&path, &json)?;
         debug!("saved {} symbols to index", symbols.len());
         process_cache::SYMBOLS.clear();
-        *self.symbols_cache.borrow_mut() = Some(Arc::new(symbols.to_vec()));
+        *self.symbols_cache.borrow_mut() = Some(Arc::new(symbols));
         Ok(())
     }
 
@@ -425,6 +459,58 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    fn symbol(id: &str) -> Symbol {
+        Symbol {
+            id: id.to_string(),
+            file_id: "f:aaaaaaaaaaaa".to_string(),
+            name: "x".to_string(),
+            kind: kungfu_types::symbol::SymbolKind::Function,
+            language: "rust".to_string(),
+            path: "src/x.rs".to_string(),
+            signature: None,
+            span: kungfu_types::symbol::Span {
+                start_line: 1,
+                end_line: 1,
+                start_col: 0,
+                end_col: 0,
+            },
+            parent_symbol_id: None,
+            exported: false,
+            visibility: None,
+            doc_summary: None,
+        }
+    }
+
+    #[test]
+    fn dedup_by_keeps_first_per_key_preserving_order() {
+        let items = vec!["a1", "b1", "a2", "c1", "b2"];
+        let out = dedup_by(&items, |s| s.chars().next().unwrap().to_string());
+        assert_eq!(out, vec!["a1", "b1", "c1"]);
+    }
+
+    #[test]
+    fn save_symbols_dedups_by_id() {
+        // Regression: identical-content files share a content-hash file_id, so
+        // incremental/only reindex could accumulate the same symbol id unbounded
+        // (the 10 GB blow-up). save must collapse duplicate ids to one.
+        let _guard = PROCESS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("dedup-symbols");
+        let store = JsonStore::new(&dir);
+        let dupes = vec![
+            symbol("s:f:aaaaaaaaaaaa:1:x"),
+            symbol("s:f:aaaaaaaaaaaa:1:x"),
+            symbol("s:f:aaaaaaaaaaaa:1:x"),
+            symbol("s:f:aaaaaaaaaaaa:2:y"),
+        ];
+        store.save_symbols(&dupes).unwrap();
+        store.invalidate();
+        process_cache::SYMBOLS.clear();
+        let loaded = store.load_symbols().unwrap();
+        assert_eq!(loaded.len(), 2, "duplicate symbol ids must collapse to one");
     }
 
     #[test]
