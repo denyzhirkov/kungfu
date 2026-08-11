@@ -170,6 +170,22 @@ pub fn doctor(json: bool, fix: bool) -> Result<()> {
     // Check version
     checks.push(("version", CheckStatus::Ok, KUNGFU_VERSION.to_string()));
 
+    // Release freshness — cache only, so `doctor` stays offline-safe and instant.
+    let update_status = kungfu_update::status_from_cache(&update_config());
+    checks.push((
+        "update",
+        if update_status.update_available {
+            CheckStatus::Info
+        } else {
+            CheckStatus::Ok
+        },
+        format!(
+            "{} [{}]",
+            update_status.summary(),
+            update_status.source.as_str()
+        ),
+    ));
+
     // Check project root
     match find_project_root(&cwd) {
         Ok(root) => {
@@ -2522,6 +2538,102 @@ pub fn annotation_queue(limit: usize, json: bool) -> Result<()> {
         }
         println!();
         println!("→ {}", queue.instruction);
+    }
+    Ok(())
+}
+
+/// Merged update settings for wherever the command was run: global config,
+/// overridden by the project's `.kungfu/config.toml`, overridden by environment.
+/// Missing or unreadable config degrades to defaults — never to an error.
+pub fn update_config() -> kungfu_config::UpdateConfig {
+    let project_config = env::current_dir()
+        .ok()
+        .and_then(|cwd| find_project_root(&cwd).ok())
+        .map(|root| root.join(".kungfu").join("config.toml"))
+        .filter(|p| p.exists());
+    kungfu_config::KungfuConfig::load_merged(project_config.as_deref())
+        .unwrap_or_default()
+        .update
+}
+
+/// `kungfu update` — check for and install a new release.
+///
+/// Explicit invocations always hit the network; `--quiet` (the SessionStart-hook
+/// shape) respects the `[update] check` setting and the 24h cache instead.
+pub fn update(check_only: bool, to: Option<String>, quiet: bool, json: bool) -> Result<()> {
+    let config = update_config();
+    let repo = kungfu_update::github::REPO;
+
+    if check_only {
+        let status = if quiet {
+            kungfu_update::ensure_checked(&config, repo)?
+        } else {
+            kungfu_update::check_now(repo, kungfu_update::CHECK_TIMEOUT)?
+        };
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "current": status.current,
+                    "latest": status.latest,
+                    "update_available": status.update_available,
+                    "checked_at": status.checked_at,
+                    "source": status.source.as_str(),
+                }))?
+            );
+        } else if status.update_available || !quiet {
+            println!("{}", status.summary());
+        }
+        return Ok(());
+    }
+
+    let target = match to {
+        Some(pinned) => kungfu_update::version::normalize(&pinned),
+        None => {
+            let status = kungfu_update::check_now(repo, kungfu_update::CHECK_TIMEOUT)?;
+            let Some(latest) = status.latest.clone() else {
+                anyhow::bail!("could not determine the latest release; retry or use --to X.Y.Z");
+            };
+            if !status.update_available {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "status": "up_to_date",
+                            "current": status.current,
+                            "latest": latest,
+                        }))?
+                    );
+                } else {
+                    println!("{}", status.summary());
+                }
+                return Ok(());
+            }
+            latest
+        }
+    };
+
+    let applied = kungfu_update::apply::apply(repo, &target, kungfu_update::CURRENT_VERSION)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "updated",
+                "from": applied.from,
+                "to": applied.to,
+                "path": applied.path.to_string_lossy(),
+                "checksum": applied.checksum.as_str(),
+                "restart_required": "restart the MCP server / Claude Code session to load the new binary",
+            }))?
+        );
+    } else {
+        println!("kungfu {} → {}", applied.from, applied.to);
+        println!("  {}", applied.path.display());
+        println!("  checksum: {}", applied.checksum.as_str());
+        println!();
+        println!("Restart Claude Code (or reconnect MCP via /mcp) — a running server keeps the old binary.");
+        println!("The index migrates itself on the next call if the schema changed.");
     }
     Ok(())
 }

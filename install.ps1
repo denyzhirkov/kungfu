@@ -77,4 +77,5 @@ if ($UserPath -notlike "*$InstallDir*") {
 
 Write-Host ""
 Write-Host "  Done! Run 'kungfu --help' to get started."
+Write-Host "  Later: 'kungfu update' upgrades this binary in place."
 Write-Host ""

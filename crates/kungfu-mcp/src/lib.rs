@@ -363,6 +363,17 @@ impl ServerHandler for KungfuMcp {
 pub async fn run_stdio_server(project_root: PathBuf) -> Result<()> {
     info!("starting kungfu MCP server (stdio)");
 
+    // The one long-lived process is the right place to refresh the release check:
+    // once at startup, on a background thread, cached 24h machine-wide, silent on
+    // failure. Tool handlers only ever read the cache.
+    kungfu_update::spawn_background_check(
+        kungfu_config::KungfuConfig::load_merged(Some(
+            &project_root.join(".kungfu").join("config.toml"),
+        ))
+        .unwrap_or_default()
+        .update,
+    );
+
     let server = KungfuMcp::new(project_root.clone());
     let transport = rmcp::transport::io::stdio();
     let service = server.serve(transport).await?;

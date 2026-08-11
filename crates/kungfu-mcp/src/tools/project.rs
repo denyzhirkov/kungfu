@@ -32,6 +32,8 @@ pub(crate) fn reindex(mcp: &KungfuMcp, params: ReindexParam) -> Result<String, S
 pub(crate) fn project_status(mcp: &KungfuMcp) -> Result<String, String> {
     let service = mcp.service()?;
     let info = service.status().map_err(|e| e.to_string())?;
+    // Cache-only: never a network call inside a tool handler.
+    let update = kungfu_update::status_from_cache(&service.config().update);
     let out = serde_json::to_string_pretty(&serde_json::json!({
         "project_name": info.project_name,
         "root": info.root,
@@ -39,6 +41,15 @@ pub(crate) fn project_status(mcp: &KungfuMcp) -> Result<String, String> {
         "indexed_symbols": info.indexed_symbols,
         "languages": info.languages,
         "has_git": info.has_git,
+        "kungfu_version": update.current,
+        "update": {
+            "latest": update.latest,
+            "available": update.update_available,
+            "source": update.source.as_str(),
+            "hint": update.update_available.then_some(
+                "run `kungfu update` in a terminal, then restart this session — a running server keeps the old binary"
+            ),
+        },
     }))
     .map_err(|e| e.to_string())?;
     mcp.record_served("project_status", &out);

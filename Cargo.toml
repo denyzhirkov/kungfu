@@ -16,10 +16,11 @@ members = [
     "crates/kungfu-mcp",
     "crates/kungfu-memory",
     "crates/kungfu-embed",
+    "crates/kungfu-update",
 ]
 
 [workspace.package]
-version = "2.6.2"
+version = "2.7.0"
 edition = "2021"
 license = "MIT"
 
@@ -67,3 +68,4 @@ kungfu-output = { path = "crates/kungfu-output" }
 kungfu-mcp = { path = "crates/kungfu-mcp" }
 kungfu-memory = { path = "crates/kungfu-memory" }
 kungfu-embed = { path = "crates/kungfu-embed" }
+kungfu-update = { path = "crates/kungfu-update" }

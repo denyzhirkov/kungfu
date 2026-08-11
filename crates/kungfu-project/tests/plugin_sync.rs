@@ -70,6 +70,18 @@ fn plugin_rules_injection_hook_reads_rules_file() {
 }
 
 #[test]
+fn plugin_update_check_hook_matches_template() {
+    let hooks = read_json(&repo_root().join("plugin/hooks/hooks.json"));
+    let session_start = hooks["hooks"]["SessionStart"]
+        .as_array()
+        .expect("plugin hooks.json: hooks.SessionStart must be an array");
+    assert!(
+        session_start.contains(&templates::update_check_hook_entry()),
+        "plugin/hooks/hooks.json SessionStart is missing templates::update_check_hook_entry()"
+    );
+}
+
+#[test]
 fn plugin_rules_file_matches_template() {
     let rules = read(&repo_root().join("plugin/rules/kungfu-rules.md"));
     assert_eq!(

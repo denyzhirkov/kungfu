@@ -81,6 +81,20 @@ pub const REINDEX_HOOK_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit";
 /// have customized it. Used to avoid installing a duplicate.
 pub const REINDEX_HOOK_FINGERPRINT: &str = "kungfu index --only";
 
+/// Shell command of the SessionStart release check. Prints one line only when a
+/// newer kungfu exists (cached 24h, silent on network failure), so a stale binary
+/// is noticed at the moment restarting the session is still cheap.
+pub const UPDATE_CHECK_HOOK_COMMAND: &str = "kungfu update --check --quiet 2>/dev/null || true";
+
+/// Full SessionStart hook entry for the update check.
+pub fn update_check_hook_entry() -> Value {
+    json!({
+        "hooks": [
+            { "type": "command", "command": UPDATE_CHECK_HOOK_COMMAND }
+        ]
+    })
+}
+
 /// Full PostToolUse hook entry for `.claude/settings.json`.
 pub fn reindex_hook_entry() -> Value {
     json!({

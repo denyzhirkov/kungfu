@@ -40,6 +40,25 @@ cd kungfu && cargo build --release
 cp target/release/kungfu ~/.local/bin/
 ```
 
+### Updating
+
+```sh
+kungfu update            # install the latest release over the running binary
+kungfu update --check    # only report whether a newer version exists
+kungfu update --to 2.6.2 # pin or roll back to an exact version
+```
+
+The download is verified against the release's `SHA256SUMS` and run once (`--version`) before it replaces anything; the swap itself is an atomic same-directory rename, so a failed update leaves the working binary untouched. **Restart Claude Code afterwards** — a running MCP server keeps the old binary until it does. The index migrates itself on the next call if the schema changed.
+
+kungfu also checks for a newer release at most once per 24h (cached in `~/.cache/kungfu/update-check.json`) on a background thread, never on a request path, and mentions the result in `kungfu doctor`, `project_status`, and a single stderr line. It is the only network access in the tool — turn it off with `KUNGFU_NO_UPDATE_CHECK=1` or:
+
+```toml
+# .kungfu/config.toml
+[update]
+check = true   # look for new releases (default)
+auto  = false  # also install them automatically (default: off — see the restart caveat)
+```
+
 ## Quick start
 
 ```sh
@@ -87,6 +106,7 @@ kungfu annotate src/db.ts --purpose "Connection pooling" --term "pool=reused cli
 kungfu annotation-queue                     # files most worth annotating
 
 # Maintenance
+kungfu update / update --check              # self-update to the latest release
 kungfu index --full | --changed | --only src/foo.rs
 kungfu watch                                # auto re-index on file changes
 kungfu clean / config / export --format jsonl
@@ -196,7 +216,8 @@ Pick one path; enabling both is harmless but duplicates the rules in context.
 
 - MCP registration, rules block (including an outdated block version), and the auto-reindex hook — all repairable with `kungfu doctor --fix`;
 - **binary/version coherence**: warns when `kungfu` on `PATH` differs from the binary you ran, or when the index was written by another version (a running MCP server keeps its old binary until restarted — the classic "I upgraded but nothing changed");
-- embeddings staleness (vectors lagging the index) with the exact command to catch up.
+- embeddings staleness (vectors lagging the index) with the exact command to catch up;
+- release freshness, read from the cached update check (no network call in `doctor`) and labelled with where the answer came from.
 
 A project with no Claude integration gets an info line, not a failure. `--fix` only performs safe, idempotent repairs and prints everything it changed.
 

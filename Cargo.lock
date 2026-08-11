@@ -188,6 +188,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-buffer"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+dependencies = [
+ "generic-array",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -453,6 +462,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "crypto-common"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
+dependencies = [
+ "generic-array",
+ "typenum",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -570,6 +589,16 @@ checksum = "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c"
 dependencies = [
  "derive_builder_core",
  "syn",
+]
+
+[[package]]
+name = "digest"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
 ]
 
 [[package]]
@@ -1064,6 +1093,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "generic-array"
+version = "0.14.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+dependencies = [
+ "typenum",
+ "version_check",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1373,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-cli"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1387,6 +1426,7 @@ dependencies = [
  "kungfu-output",
  "kungfu-project",
  "kungfu-types",
+ "kungfu-update",
  "serde_json",
  "tokio",
  "toml",
@@ -1396,7 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-config"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1410,7 +1450,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-core"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1431,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-embed"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1447,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-git"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "tracing",
@@ -1455,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-index"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1475,13 +1515,15 @@ dependencies = [
 
 [[package]]
 name = "kungfu-mcp"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
+ "kungfu-config",
  "kungfu-core",
  "kungfu-index",
  "kungfu-memory",
  "kungfu-types",
+ "kungfu-update",
  "rmcp",
  "schemars",
  "serde",
@@ -1492,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-memory"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "kungfu-types",
@@ -1501,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-output"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "kungfu-types",
  "serde",
@@ -1510,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-parse"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "kungfu-types",
@@ -1530,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-project"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1544,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-rank"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "kungfu-types",
@@ -1552,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-search"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "kungfu-storage",
@@ -1562,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "kungfu-storage"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1575,11 +1617,24 @@ dependencies = [
 
 [[package]]
 name = "kungfu-types"
-version = "2.6.2"
+version = "2.7.0"
 dependencies = [
  "chrono",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "kungfu-update"
+version = "2.7.0"
+dependencies = [
+ "anyhow",
+ "kungfu-config",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]
@@ -2462,6 +2517,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2989,6 +3055,12 @@ dependencies = [
  "cc",
  "tree-sitter-language",
 ]
+
+[[package]]
+name = "typenum"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "ug"

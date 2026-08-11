@@ -110,4 +110,5 @@ fi
 
 echo ""
 echo "  Done! Run 'kungfu --help' to get started."
+echo "  Later: 'kungfu update' upgrades this binary in place."
 echo ""

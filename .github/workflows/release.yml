@@ -72,6 +72,14 @@ jobs:
       - name: List artifacts
         run: ls -la artifacts/
 
+      # Consumed by `kungfu update`, which verifies the downloaded asset against
+      # this file before swapping the running binary.
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum kungfu-* > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:

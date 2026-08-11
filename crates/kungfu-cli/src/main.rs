@@ -44,6 +44,22 @@ enum Commands {
         fix: bool,
     },
 
+    /// Update the kungfu binary to the latest release
+    Update {
+        /// Only report whether a newer release exists — install nothing
+        #[arg(long)]
+        check: bool,
+
+        /// Install this exact version instead of the latest (also downgrades)
+        #[arg(long, value_name = "X.Y.Z")]
+        to: Option<String>,
+
+        /// Say nothing when already up to date, and honour the `[update] check`
+        /// setting plus the 24h cache. For SessionStart hooks.
+        #[arg(long)]
+        quiet: bool,
+    },
+
     /// Show current configuration
     #[command(name = "config")]
     Config,
@@ -500,9 +516,18 @@ fn main() {
 
     let json = cli.json;
 
+    // Long-lived commands report the update through their own channel, `update`
+    // says it itself, and JSON output stays machine-clean.
+    let show_update_notice = !json
+        && !matches!(
+            cli.command,
+            Commands::Mcp | Commands::Watch | Commands::Update { .. }
+        );
+
     let result = match cli.command {
         Commands::Init { agent, dry_run } => commands::init(agent.as_deref(), dry_run, json),
         Commands::Status => commands::status(json),
+        Commands::Update { check, to, quiet } => commands::update(check, to, quiet, json),
         Commands::Doctor { fix } => commands::doctor(json, fix),
         Commands::Config => commands::config_show(json),
         Commands::Index {
@@ -591,6 +616,14 @@ fn main() {
     if let Err(e) = result {
         eprintln!("error: {:#}", e);
         std::process::exit(1);
+    }
+
+    // Cache-only read: an outdated binary is worth one stderr line, never a
+    // network round-trip on someone's `kungfu find-symbol`.
+    if show_update_notice {
+        if let Some(line) = kungfu_update::take_notice(&commands::update_config()) {
+            eprintln!("{line}");
+        }
     }
 }
 

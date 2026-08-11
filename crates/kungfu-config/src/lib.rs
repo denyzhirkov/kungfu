@@ -35,6 +35,9 @@ pub struct KungfuConfig {
 
     #[serde(default)]
     pub call_graph: CallGraphConfig,
+
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 fn default_project_name() -> String {
@@ -226,6 +229,56 @@ impl Default for CallGraphConfig {
     }
 }
 
+/// Self-update behaviour. The only part of kungfu that talks to the network, so
+/// it is switchable from one place — config file or environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    /// Look up the latest release (at most once per 24h, off the request path)
+    /// and mention it when a newer version exists.
+    #[serde(default = "default_true")]
+    pub check: bool,
+
+    /// Install the update as soon as it is found, instead of only reporting it.
+    /// Off by default: swapping the binary under a live MCP server leaves that
+    /// process on the old code until the session restarts.
+    #[serde(default)]
+    pub auto: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check: true,
+            auto: false,
+        }
+    }
+}
+
+impl UpdateConfig {
+    /// Config with environment overrides applied — the single place update env
+    /// vars are read. `KUNGFU_NO_UPDATE_CHECK` wins over everything (an opt-out
+    /// must be absolute, e.g. in air-gapped or CI environments).
+    pub fn effective(&self) -> Self {
+        let mut out = self.clone();
+        if env_flag("KUNGFU_AUTO_UPDATE") {
+            out.check = true;
+            out.auto = true;
+        }
+        if env_flag("KUNGFU_NO_UPDATE_CHECK") {
+            out.check = false;
+            out.auto = false;
+        }
+        out
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 impl Default for KungfuConfig {
     fn default() -> Self {
         Self {
@@ -239,6 +292,7 @@ impl Default for KungfuConfig {
             index: IndexConfig::default(),
             git: GitConfig::default(),
             call_graph: CallGraphConfig::default(),
+            update: UpdateConfig::default(),
         }
     }
 }

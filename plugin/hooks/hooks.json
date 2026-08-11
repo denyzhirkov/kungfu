@@ -8,6 +8,14 @@
             "command": "cat \"${CLAUDE_PLUGIN_ROOT}/rules/kungfu-rules.md\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kungfu update --check --quiet 2>/dev/null || true"
+          }
+        ]
       }
     ],
     "PostToolUse": [
