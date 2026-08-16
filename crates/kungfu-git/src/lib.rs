@@ -295,8 +295,21 @@ pub fn diff_changed_lines(root: &Path) -> Result<Vec<FileChangedLines>> {
     Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
 }
 
+/// Reject anything but a bare hex hash. `hash` lands as a positional arg to
+/// `git show`; unvalidated, a value like `--output=...` is parsed as an
+/// option instead of a revision, turning attacker-controlled commit data
+/// (reachable via MCP history tools) into arbitrary file writes.
+fn validate_hash(hash: &str) -> Result<()> {
+    anyhow::ensure!(
+        !hash.is_empty() && hash.len() <= 40 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "invalid commit hash: {hash}"
+    );
+    Ok(())
+}
+
 /// Files + changed line ranges introduced by a specific commit.
 pub fn commit_changed_lines(root: &Path, hash: &str) -> Result<Vec<FileChangedLines>> {
+    validate_hash(hash)?;
     let output = Command::new("git")
         .args(["show", "-U0", "--format=", hash])
         .current_dir(root)
@@ -314,6 +327,7 @@ pub fn commit_changed_lines(root: &Path, hash: &str) -> Result<Vec<FileChangedLi
 
 /// Files touched by a commit (any change).
 pub fn commit_files(root: &Path, hash: &str) -> Result<Vec<String>> {
+    validate_hash(hash)?;
     let output = Command::new("git")
         .args(["show", "--name-only", "--format=", hash])
         .current_dir(root)
@@ -335,6 +349,7 @@ pub fn commit_files(root: &Path, hash: &str) -> Result<Vec<String>> {
 
 /// Commit metadata (hash, ISO date, author, subject).
 pub fn commit_meta(root: &Path, hash: &str) -> Result<LogEntry> {
+    validate_hash(hash)?;
     let output = Command::new("git")
         .args(["show", "-s", "--format=%H|%ai|%an|%s", hash])
         .current_dir(root)
