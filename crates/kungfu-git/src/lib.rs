@@ -299,10 +299,14 @@ pub fn diff_changed_lines(root: &Path) -> Result<Vec<FileChangedLines>> {
 /// `git show`; unvalidated, a value like `--output=...` is parsed as an
 /// option instead of a revision, turning attacker-controlled commit data
 /// (reachable via MCP history tools) into arbitrary file writes.
+///
+/// Bounds: 4 is git's minimum abbreviation; 64 covers SHA-256 repositories.
+/// Hex-only also rules out a leading `-`, so no `--end-of-options` is needed
+/// (that flag would break git < 2.24 for no extra safety).
 fn validate_hash(hash: &str) -> Result<()> {
     anyhow::ensure!(
-        !hash.is_empty() && hash.len() <= 40 && hash.chars().all(|c| c.is_ascii_hexdigit()),
-        "invalid commit hash: {hash}"
+        (4..=64).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "invalid commit hash `{hash}`: expected 4-64 hex characters (a full or abbreviated commit SHA)"
     );
     Ok(())
 }
@@ -431,4 +435,95 @@ pub fn staged_files(root: &Path) -> Result<Vec<String>> {
         .map(String::from)
         .filter(|s| !s.is_empty())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn validate_hash_accepts_full_and_abbreviated_shas() {
+        assert!(validate_hash("7558d1d").is_ok());
+        assert!(validate_hash("7558D1DA").is_ok());
+        assert!(validate_hash(&"a".repeat(40)).is_ok());
+        assert!(validate_hash(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn validate_hash_rejects_options_refs_and_bad_lengths() {
+        for bad in [
+            "",
+            "abc",
+            &"a".repeat(65),
+            "--output=/tmp/x",
+            "-p",
+            "HEAD",
+            "HEAD~1",
+            "main",
+            "7558d1d -- x",
+        ] {
+            assert!(validate_hash(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    /// Throwaway repo with one commit under the system temp dir.
+    fn temp_repo(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kungfu-git-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        dir
+    }
+
+    #[test]
+    fn option_shaped_hash_never_reaches_git() {
+        let repo = temp_repo("inject");
+        let target = repo.join("pwned.txt");
+        let hash = format!("--output={}", target.display());
+
+        assert!(commit_meta(&repo, &hash).is_err());
+        assert!(commit_files(&repo, &hash).is_err());
+        assert!(commit_changed_lines(&repo, &hash).is_err());
+        assert!(!target.exists(), "git show wrote {}", target.display());
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn real_hash_still_resolves() {
+        let repo = temp_repo("real");
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+        let meta = commit_meta(&repo, &head[..7]).unwrap();
+        assert_eq!(meta.message, "init");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }
