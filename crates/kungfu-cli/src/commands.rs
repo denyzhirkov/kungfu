@@ -686,6 +686,65 @@ pub fn index(full: bool, changed: bool, only: Vec<String>, json: bool) -> Result
     Ok(())
 }
 
+/// `kungfu index --from-hook`: reindex the file a Claude Code PostToolUse hook
+/// reports on stdin. Hook contract: never fails and never writes to stdout
+/// (PostToolUse stdout can land in the agent's context) — every problem is a
+/// quiet no-op logged at debug.
+pub fn index_from_hook() {
+    use std::io::Read;
+
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        tracing::debug!(error = %e, "index --from-hook: failed to read stdin");
+        return;
+    }
+    let Some(file_path) = hook_file_path(&input) else {
+        tracing::debug!("index --from-hook: no tool_input.file_path in payload");
+        return;
+    };
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            tracing::debug!(error = %e, "index --from-hook: no current dir");
+            return;
+        }
+    };
+    let file = cwd.join(&file_path);
+    let Some(root) = hook_project_root(&file, &cwd) else {
+        tracing::debug!(path = %file.display(), "index --from-hook: no .kungfu/ project");
+        return;
+    };
+    let file = file.to_string_lossy().into_owned();
+    let result = KungfuService::open(&root).and_then(|service| service.index_paths(&[file]));
+    if let Err(e) = result {
+        tracing::debug!(path = %file_path, error = %e, "index --from-hook: reindex failed");
+    }
+}
+
+/// `tool_input.file_path` from a PostToolUse hook payload, if present and non-empty.
+fn hook_file_path(input: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(input).ok()?;
+    let path = payload
+        .get("tool_input")?
+        .get("file_path")?
+        .as_str()?
+        .trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// Nearest indexed project (an ancestor with `.kungfu/`) owning `file`, else
+/// the one around `cwd`. Deliberately not `find_project_root`: that stops at the
+/// first Cargo.toml / package.json, so a sub-package cwd or file would miss the
+/// workspace index.
+fn hook_project_root(file: &std::path::Path, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    file.parent()
+        .into_iter()
+        .flat_map(std::path::Path::ancestors)
+        .chain(cwd.ancestors())
+        .find(|dir| dir.join(".kungfu").is_dir())
+        .map(std::path::Path::to_path_buf)
+}
+
 pub fn clean(json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let root = find_project_root(&cwd)?;
@@ -2636,4 +2695,74 @@ pub fn update(check_only: bool, to: Option<String>, quiet: bool, json: bool) -> 
         println!("The index migrates itself on the next call if the schema changed.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_payload_with_file_path() {
+        let input = r#"{"session_id":"s","tool_name":"Edit","tool_input":{"file_path":"/p/src/a.rs","old_string":"x"}}"#;
+        assert_eq!(hook_file_path(input).as_deref(), Some("/p/src/a.rs"));
+    }
+
+    #[test]
+    fn hook_payload_without_file_path() {
+        assert_eq!(hook_file_path(r#"{"tool_input":{"command":"ls"}}"#), None);
+        assert_eq!(hook_file_path(r#"{"tool_input":{"file_path":""}}"#), None);
+        assert_eq!(hook_file_path(r#"{"tool_input":{"file_path":42}}"#), None);
+        assert_eq!(hook_file_path(r#"{"tool_name":"Write"}"#), None);
+    }
+
+    #[test]
+    fn hook_payload_garbage() {
+        assert_eq!(hook_file_path(""), None);
+        assert_eq!(hook_file_path("not json"), None);
+        assert_eq!(hook_file_path("[1,2]"), None);
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("kungfu-cli-hook-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn hook_root_skips_sub_package_markers() {
+        let ws = temp_dir("subpkg");
+        std::fs::create_dir_all(ws.join(".kungfu")).unwrap();
+        std::fs::write(ws.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let pkg = ws.join("crates/foo");
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        std::fs::write(pkg.join("Cargo.toml"), "[package]\n").unwrap();
+
+        let file = pkg.join("src/lib.rs");
+        assert_eq!(hook_project_root(&file, &pkg), Some(ws));
+    }
+
+    #[test]
+    fn hook_root_follows_the_file_not_the_cwd() {
+        let base = temp_dir("two-projects");
+        let a = base.join("a");
+        let b = base.join("b");
+        std::fs::create_dir_all(a.join(".kungfu")).unwrap();
+        std::fs::create_dir_all(b.join(".kungfu")).unwrap();
+        std::fs::create_dir_all(b.join("src")).unwrap();
+
+        assert_eq!(hook_project_root(&b.join("src/x.rs"), &a), Some(b));
+    }
+
+    #[test]
+    fn hook_root_falls_back_to_cwd_then_none() {
+        let base = temp_dir("fallback");
+        let proj = base.join("proj");
+        std::fs::create_dir_all(proj.join(".kungfu")).unwrap();
+        let outside = base.join("loose/x.rs");
+
+        assert_eq!(hook_project_root(&outside, &proj), Some(proj));
+        assert_eq!(hook_project_root(&outside, &base), None);
+    }
 }

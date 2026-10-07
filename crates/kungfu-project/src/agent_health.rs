@@ -113,7 +113,7 @@ pub fn check_claude_integration(root: &Path) -> ClaudeIntegrationHealth {
         }
     }
 
-    let needs_sync = configured && checks.iter().any(|c| c.status != CheckStatus::Ok);
+    let needs_sync = configured && checks.iter().any(|c| c.status.needs_attention());
 
     if !configured {
         checks.push(IntegrationCheck {
@@ -240,12 +240,33 @@ fn hook_artifact(root: &Path) -> Artifact {
         .get("hooks")
         .and_then(|h| h.get("PostToolUse"))
         .and_then(Value::as_array);
-    match post {
-        Some(arr) if crate::agent_init::has_kungfu_reindex_hook(arr) => Artifact::Present(
+    let Some(post) = post else {
+        return Artifact::Absent;
+    };
+    let found = crate::agent_init::scan_reindex_hooks(post);
+    if found.legacy_template {
+        Artifact::Present(
+            CheckStatus::Warning,
+            format!(
+                "outdated auto-reindex hook in .claude/settings.json (jq + `kungfu index --only`) — run 'kungfu init --agent claude' or 'kungfu doctor --fix' to replace it with `{}`",
+                templates::REINDEX_HOOK_COMMAND
+            ),
+        )
+    } else if found.current {
+        Artifact::Present(
             CheckStatus::Ok,
             "auto-reindex hook present in .claude/settings.json".to_string(),
-        ),
-        _ => Artifact::Absent,
+        )
+    } else if found.custom {
+        Artifact::Present(
+            CheckStatus::Info,
+            format!(
+                "custom kungfu reindex hook found in .claude/settings.json; the template now uses `{}` — left as is",
+                templates::REINDEX_HOOK_COMMAND
+            ),
+        )
+    } else {
+        Artifact::Absent
     }
 }
 
@@ -417,6 +438,54 @@ mod tests {
     }
 
     #[test]
+    fn legacy_hook_is_a_warning_and_fix_upgrades_it() {
+        let root = temp_root("legacy-hook");
+        init_claude_integration(&root, false).unwrap();
+        let legacy = serde_json::json!({ "hooks": { "PostToolUse": [{
+            "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+            "hooks": [{ "type": "command", "command": templates::LEGACY_REINDEX_HOOK_COMMAND }]
+        }]}});
+        std::fs::write(root.join(".claude/settings.json"), legacy.to_string()).unwrap();
+
+        let h = check_claude_integration(&root);
+        assert!(h.needs_sync);
+        let hook = find(&h, "claude_hook");
+        assert_eq!(hook.status, CheckStatus::Warning);
+        assert!(hook.detail.contains("outdated"));
+        assert!(hook.detail.contains("kungfu doctor --fix"));
+
+        init_claude_integration(&root, false).unwrap();
+        let h = check_claude_integration(&root);
+        assert!(!h.needs_sync);
+        assert_eq!(find(&h, "claude_hook").status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn custom_only_hook_is_info_and_fix_leaves_it() {
+        let root = temp_root("custom-hook");
+        init_claude_integration(&root, false).unwrap();
+        let custom = serde_json::json!({ "hooks": { "PostToolUse": [{
+            "matcher": "Bash",
+            "hooks": [{ "type": "command", "command": "git diff --name-only | xargs kungfu index --only" }]
+        }]}});
+        std::fs::write(root.join(".claude/settings.json"), custom.to_string()).unwrap();
+
+        let h = check_claude_integration(&root);
+        assert!(!h.needs_sync);
+        let hook = find(&h, "claude_hook");
+        assert_eq!(hook.status, CheckStatus::Info);
+        assert!(hook.detail.contains("custom kungfu reindex hook"));
+        assert!(hook.detail.contains(templates::REINDEX_HOOK_COMMAND));
+
+        init_claude_integration(&root, false).unwrap();
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after, custom);
+    }
+
+    #[test]
     fn missing_mcp_entry_is_a_warning() {
         let root = temp_root("no-mcp");
         init_claude_integration(&root, false).unwrap();
@@ -450,7 +519,7 @@ mod tests {
         let root = temp_root("old-rules");
         init_claude_integration(&root, false).unwrap();
         let old_block = format!(
-            "{} v0 -->\nold rules\n{}",
+            "{} v1 -->\nold rules\n{}",
             templates::RULES_MARKER_START_PREFIX,
             templates::RULES_MARKER_END
         );
@@ -460,7 +529,7 @@ mod tests {
         assert!(h.needs_sync);
         let rules = find(&h, "claude_rules");
         assert_eq!(rules.status, CheckStatus::Warning);
-        assert!(rules.detail.contains("v0"));
+        assert!(rules.detail.contains("v1"));
         assert!(rules.detail.contains(templates::RULES_VERSION));
 
         // Fix replaces the block in place; re-check is clean.

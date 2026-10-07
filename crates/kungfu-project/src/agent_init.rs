@@ -230,24 +230,38 @@ fn sync_settings_json(root: &Path, dry_run: bool) -> Result<AgentInitAction, Age
         }
     };
 
-    if has_kungfu_reindex_hook(post) {
+    let found = scan_reindex_hooks(post);
+    let has_reindex_hook = found.current || found.custom;
+
+    let detail = if found.legacy_template {
+        // A custom hook may not fire on Edit/Write, so only a current hook
+        // makes the template redundant here.
+        *post = replace_legacy_reindex_hooks(post, !found.current);
+        "outdated auto-reindex hook (jq + `kungfu index --only`) replaced with `kungfu index --from-hook`"
+            .to_string()
+    } else if has_reindex_hook {
+        let detail = if found.current {
+            "auto-reindex hook already present"
+        } else {
+            "custom kungfu reindex hook present — left as is"
+        };
         return Ok(AgentInitAction {
             path: display,
             status: ActionStatus::AlreadyCurrent,
-            detail: "auto-reindex hook already present".to_string(),
+            detail: detail.to_string(),
         });
-    }
-
-    post.push(templates::reindex_hook_entry());
+    } else {
+        post.push(templates::reindex_hook_entry());
+        if existing.is_some() {
+            "auto-reindex hook appended (existing hooks preserved)".to_string()
+        } else {
+            "auto-reindex hook installed (PostToolUse on Edit/Write)".to_string()
+        }
+    };
     let status = if existing.is_some() {
         ActionStatus::Updated
     } else {
         ActionStatus::Created
-    };
-    let detail = if existing.is_some() {
-        "auto-reindex hook appended (existing hooks preserved)".to_string()
-    } else {
-        "auto-reindex hook installed (PostToolUse on Edit/Write)".to_string()
     };
 
     if !dry_run {
@@ -260,19 +274,73 @@ fn sync_settings_json(root: &Path, dry_run: bool) -> Result<AgentInitAction, Age
     })
 }
 
-pub(crate) fn has_kungfu_reindex_hook(post: &[Value]) -> bool {
-    post.iter().any(|entry| {
-        entry
-            .get("hooks")
-            .and_then(Value::as_array)
-            .is_some_and(|hooks| {
-                hooks.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(Value::as_str)
-                        .is_some_and(|cmd| cmd.contains(templates::REINDEX_HOOK_FINGERPRINT))
-                })
-            })
-    })
+/// Which kinds of kungfu reindex hook a `PostToolUse` array contains.
+#[derive(Debug, Default)]
+pub(crate) struct ReindexHooks {
+    /// A hook running `kungfu index --from-hook` (the template or a variant).
+    pub current: bool,
+    /// The exact pre-`--from-hook` template command — safe to replace.
+    pub legacy_template: bool,
+    /// Any other user-written `kungfu index --only` hook — never touched.
+    pub custom: bool,
+}
+
+pub(crate) fn scan_reindex_hooks(post: &[Value]) -> ReindexHooks {
+    let mut found = ReindexHooks::default();
+    let commands = post
+        .iter()
+        .filter_map(|entry| entry.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(hook_command);
+    for cmd in commands {
+        if cmd.contains(templates::REINDEX_HOOK_FINGERPRINT) {
+            found.current = true;
+        } else if is_legacy_template(cmd) {
+            found.legacy_template = true;
+        } else if cmd.contains(templates::LEGACY_REINDEX_HOOK_FINGERPRINT) {
+            found.custom = true;
+        }
+    }
+    found
+}
+
+fn hook_command(hook: &Value) -> Option<&str> {
+    hook.get("command").and_then(Value::as_str)
+}
+
+fn is_legacy_template(cmd: &str) -> bool {
+    cmd.trim() == templates::LEGACY_REINDEX_HOOK_COMMAND
+}
+
+/// Drop every legacy template hook; an entry left with no hooks is dropped
+/// too, so user hooks sharing an entry survive. With `insert_current`, the
+/// template entry takes the position of the first legacy entry.
+fn replace_legacy_reindex_hooks(post: &[Value], insert_current: bool) -> Vec<Value> {
+    let is_legacy = |h: &Value| hook_command(h).is_some_and(is_legacy_template);
+    let mut out = Vec::with_capacity(post.len());
+    let mut insert_at = None;
+    for entry in post {
+        let hooks = entry.get("hooks").and_then(Value::as_array);
+        if !hooks.is_some_and(|hooks| hooks.iter().any(is_legacy)) {
+            out.push(entry.clone());
+            continue;
+        }
+        insert_at.get_or_insert(out.len());
+        let mut entry = entry.clone();
+        if let Some(hooks) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
+            hooks.retain(|h| !is_legacy(h));
+            if !hooks.is_empty() {
+                out.push(entry);
+            }
+        }
+    }
+    if insert_current {
+        out.insert(
+            insert_at.unwrap_or(out.len()),
+            templates::reindex_hook_entry(),
+        );
+    }
+    out
 }
 
 /// Get `doc[key]` as a mutable object, inserting an empty object if the key is
@@ -423,7 +491,7 @@ mod tests {
     fn old_rules_block_version_is_replaced_in_place() {
         let root = temp_root("upgrade");
         let old_block = format!(
-            "{} v0 -->\nold stale rules\n{}",
+            "{} v1 -->\nold stale rules\n{}",
             templates::RULES_MARKER_START_PREFIX,
             templates::RULES_MARKER_END
         );
@@ -438,7 +506,9 @@ mod tests {
         assert!(md.starts_with("# Before\n"));
         assert!(md.ends_with("\n\n# After\n"));
         assert!(md.contains(&templates::rules_marker_start()));
+        assert!(md.contains(templates::CLAUDE_RULES_BODY));
         assert!(!md.contains("old stale rules"));
+        assert!(!md.contains(&format!("{} v1 -->", templates::RULES_MARKER_START_PREFIX)));
         assert_eq!(md.matches(templates::RULES_MARKER_END).count(), 1);
     }
 
@@ -503,6 +573,157 @@ mod tests {
             .find(|a| a.path == ".claude/settings.json")
             .unwrap();
         assert_eq!(action.status, ActionStatus::AlreadyCurrent);
+    }
+
+    fn legacy_hook_entry() -> Value {
+        serde_json::json!({
+            "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+            "hooks": [ { "type": "command", "command": templates::LEGACY_REINDEX_HOOK_COMMAND } ]
+        })
+    }
+
+    fn write_post_tool_use(root: &Path, post: Value) {
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        let doc = serde_json::json!({ "hooks": { "PostToolUse": post } });
+        std::fs::write(
+            root.join(".claude/settings.json"),
+            serde_json::to_string_pretty(&doc).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn post_tool_use(root: &Path) -> Vec<Value> {
+        let settings: Value = serde_json::from_str(&read(root, ".claude/settings.json")).unwrap();
+        settings["hooks"]["PostToolUse"].as_array().unwrap().clone()
+    }
+
+    fn kungfu_entries(post: &[Value]) -> usize {
+        post.iter()
+            .filter(|e| {
+                let found = scan_reindex_hooks(std::slice::from_ref(e));
+                found.current || found.legacy_template || found.custom
+            })
+            .count()
+    }
+
+    #[test]
+    fn legacy_reindex_hook_is_replaced_in_place() {
+        let root = temp_root("legacy-hook");
+        let custom = |cmd: &str| serde_json::json!({ "matcher": "Write", "hooks": [ { "type": "command", "command": cmd } ] });
+        write_post_tool_use(
+            &root,
+            serde_json::json!([custom("echo a"), legacy_hook_entry(), custom("echo b")]),
+        );
+
+        let actions = init_claude_integration(&root, false).unwrap();
+        let action = actions
+            .iter()
+            .find(|a| a.path == ".claude/settings.json")
+            .unwrap();
+        assert_eq!(action.status, ActionStatus::Updated);
+        assert!(action.detail.contains("replaced"));
+
+        let post = post_tool_use(&root);
+        assert_eq!(
+            post,
+            vec![
+                custom("echo a"),
+                templates::reindex_hook_entry(),
+                custom("echo b")
+            ]
+        );
+        assert_eq!(kungfu_entries(&post), 1);
+
+        let actions = init_claude_integration(&root, false).unwrap();
+        let action = actions
+            .iter()
+            .find(|a| a.path == ".claude/settings.json")
+            .unwrap();
+        assert_eq!(action.status, ActionStatus::AlreadyCurrent);
+    }
+
+    #[test]
+    fn legacy_hook_sharing_an_entry_keeps_user_hooks() {
+        let root = temp_root("legacy-shared");
+        write_post_tool_use(
+            &root,
+            serde_json::json!([{
+                "matcher": "Edit|Write",
+                "hooks": [
+                    { "type": "command", "command": "echo mine" },
+                    { "type": "command", "command": templates::LEGACY_REINDEX_HOOK_COMMAND }
+                ]
+            }]),
+        );
+
+        init_claude_integration(&root, false).unwrap();
+        let post = post_tool_use(&root);
+        assert_eq!(post.len(), 2);
+        assert_eq!(post[0], templates::reindex_hook_entry());
+        assert_eq!(post[1]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(post[1]["hooks"][0]["command"], "echo mine");
+        assert_eq!(kungfu_entries(&post), 1);
+    }
+
+    #[test]
+    fn legacy_hook_next_to_current_one_is_removed() {
+        let root = temp_root("legacy-and-current");
+        write_post_tool_use(
+            &root,
+            serde_json::json!([templates::reindex_hook_entry(), legacy_hook_entry()]),
+        );
+
+        init_claude_integration(&root, false).unwrap();
+        assert_eq!(post_tool_use(&root), vec![templates::reindex_hook_entry()]);
+    }
+
+    #[test]
+    fn custom_only_hooks_are_left_alone() {
+        let customs = [
+            serde_json::json!({
+                "matcher": "Bash",
+                "hooks": [ { "type": "command", "command": "git diff --name-only | xargs kungfu index --only" } ]
+            }),
+            serde_json::json!({
+                "matcher": "Edit|Write",
+                "hooks": [ { "type": "command", "command": "jq -r '.tool_input.file_path // empty' | xargs -I{} kungfu index --only {} && cargo fmt" } ]
+            }),
+        ];
+        for (i, custom) in customs.into_iter().enumerate() {
+            let root = temp_root(&format!("custom-only-{i}"));
+            write_post_tool_use(&root, serde_json::json!([custom.clone()]));
+
+            let actions = init_claude_integration(&root, false).unwrap();
+            let action = actions
+                .iter()
+                .find(|a| a.path == ".claude/settings.json")
+                .unwrap();
+            assert_eq!(action.status, ActionStatus::AlreadyCurrent);
+            assert!(action.detail.contains("custom"));
+            assert_eq!(post_tool_use(&root), vec![custom]);
+        }
+    }
+
+    #[test]
+    fn legacy_template_next_to_custom_hook_is_replaced_and_custom_kept() {
+        let root = temp_root("legacy-and-custom");
+        let custom = serde_json::json!({
+            "matcher": "Bash",
+            "hooks": [ { "type": "command", "command": "git diff --name-only | xargs kungfu index --only" } ]
+        });
+        write_post_tool_use(
+            &root,
+            serde_json::json!([legacy_hook_entry(), custom.clone()]),
+        );
+
+        init_claude_integration(&root, false).unwrap();
+        let post = post_tool_use(&root);
+        assert_eq!(post, vec![templates::reindex_hook_entry(), custom]);
+        let from_hook = post
+            .iter()
+            .filter(|e| scan_reindex_hooks(std::slice::from_ref(e)).current)
+            .count();
+        assert_eq!(from_hook, 1);
     }
 
     #[test]

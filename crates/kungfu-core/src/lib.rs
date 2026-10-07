@@ -208,24 +208,28 @@ impl KungfuService {
 
     /// Reindex only the given files. Agent-driven freshness: the editor knows exactly
     /// which files it touched, so it tells us instead of us guessing via mtime scans.
-    /// Accepts paths relative to the project root or absolute ones under it.
+    /// Accepts paths relative to the project root or absolute ones under it; a
+    /// path outside the project is an error naming it, and nothing is indexed.
     pub fn index_paths(&self, paths: &[String]) -> Result<kungfu_index::indexer::IndexStats> {
         if paths.is_empty() {
             bail!("no paths given — pass the files you changed, or run a full/incremental index");
         }
+        let root = &self.project.root;
+        let rels = paths
+            .iter()
+            .map(|p| {
+                project_relative_path(root, Path::new(p)).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{p} is outside the project root {} — pass a path under it (absolute, or relative to the root); nothing was reindexed",
+                        root.display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<String>>>()?;
         if !self.index_schema_current() {
             info!("index schema is outdated, upgrading via full reindex");
             return self.index_full();
         }
-        let root = &self.project.root;
-        let rels: Vec<String> = paths
-            .iter()
-            .map(|p| {
-                let path = std::path::Path::new(p);
-                let rel = path.strip_prefix(root).unwrap_or(path);
-                rel.to_string_lossy().trim_start_matches("./").to_string()
-            })
-            .collect();
         self.store.invalidate();
         let mut indexer =
             Indexer::new(&self.project.root, self.project.config.clone(), &self.store);
@@ -293,5 +297,128 @@ impl KungfuService {
         Ok(kungfu_types::stats::UsageStats::load(
             &self.project.kungfu_dir,
         ))
+    }
+}
+
+/// `path` (absolute, or relative to `root`) as a `/`-separated path relative to
+/// `root`, or `None` when it lies outside the project. Symlinked prefixes
+/// (macOS `/tmp` → `/private/tmp`) are resolved on both sides; a deleted file
+/// resolves through its parent directory.
+fn project_relative_path(root: &Path, path: &Path) -> Option<String> {
+    use std::path::Component;
+
+    let joined = root.join(path);
+    let canonical_root = root.canonicalize().ok();
+    let rel = canonical_root
+        .as_deref()
+        .and_then(|croot| {
+            resolve_existing_prefix(&joined)
+                .strip_prefix(croot)
+                .ok()
+                .map(Path::to_path_buf)
+        })
+        .or_else(|| joined.strip_prefix(root).ok().map(Path::to_path_buf))?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| match c {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+fn resolve_existing_prefix(path: &Path) -> std::path::PathBuf {
+    if let Ok(resolved) = path.canonicalize() {
+        return resolved;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => parent
+            .canonicalize()
+            .map(|p| p.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_relative_path;
+    use std::path::{Path, PathBuf};
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("kungfu-core-relpath-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn relative_and_absolute_paths_inside_the_root() {
+        let root = temp_root("inside");
+        let abs = root.join("src/a.rs");
+        assert_eq!(
+            project_relative_path(&root, &abs).as_deref(),
+            Some("src/a.rs")
+        );
+        assert_eq!(
+            project_relative_path(&root, Path::new("src/a.rs")).as_deref(),
+            Some("src/a.rs")
+        );
+        assert_eq!(
+            project_relative_path(&root, Path::new("./src/a.rs")).as_deref(),
+            Some("src/a.rs")
+        );
+        // Deleted file: resolved through its existing parent.
+        assert_eq!(
+            project_relative_path(&root, &root.join("src/gone.rs")).as_deref(),
+            Some("src/gone.rs")
+        );
+    }
+
+    #[test]
+    fn paths_outside_the_root_are_rejected() {
+        let root = temp_root("outside");
+        assert_eq!(
+            project_relative_path(&root, Path::new("/elsewhere/a.rs")),
+            None
+        );
+        assert_eq!(
+            project_relative_path(&root, Path::new("../other/a.rs")),
+            None
+        );
+        assert_eq!(
+            project_relative_path(&root, Path::new("src/../../x.rs")),
+            None
+        );
+        assert_eq!(project_relative_path(&root, &root), None);
+    }
+
+    #[test]
+    fn nonexistent_root_falls_back_to_lexical_match() {
+        let root = Path::new("/nonexistent-kungfu-root");
+        assert_eq!(
+            project_relative_path(root, Path::new("/nonexistent-kungfu-root/src/a.rs")).as_deref(),
+            Some("src/a.rs")
+        );
+        assert_eq!(
+            project_relative_path(root, Path::new("/elsewhere/a.rs")),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_root_prefix_is_resolved() {
+        let root = temp_root("symlink");
+        let link = root.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        assert_eq!(
+            project_relative_path(&root, &link.join("src/a.rs")).as_deref(),
+            Some("src/a.rs")
+        );
     }
 }

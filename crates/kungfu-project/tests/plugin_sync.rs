@@ -55,17 +55,21 @@ fn plugin_reindex_hook_matches_template() {
 }
 
 #[test]
-fn plugin_rules_injection_hook_reads_rules_file() {
+fn plugin_session_start_does_not_inject_rules() {
+    // Routing rules travel in the MCP server `instructions`; a SessionStart
+    // injection would duplicate them in context.
     let hooks = read_json(&repo_root().join("plugin/hooks/hooks.json"));
     let session_start = hooks["hooks"]["SessionStart"]
         .as_array()
         .expect("plugin hooks.json: hooks.SessionStart must be an array");
-    let command = session_start[0]["hooks"][0]["command"]
-        .as_str()
-        .expect("SessionStart hook must have a command");
+    assert_eq!(
+        session_start,
+        &vec![templates::update_check_hook_entry()],
+        "plugin SessionStart must only run the update check, not inject rules"
+    );
     assert!(
-        command.contains("${CLAUDE_PLUGIN_ROOT}/rules/kungfu-rules.md"),
-        "SessionStart hook must inject rules/kungfu-rules.md, got: {command}"
+        !repo_root().join("plugin/rules").exists(),
+        "plugin/rules/ is obsolete — routing rules live in templates::MCP_INSTRUCTIONS"
     );
 }
 
@@ -78,16 +82,6 @@ fn plugin_update_check_hook_matches_template() {
     assert!(
         session_start.contains(&templates::update_check_hook_entry()),
         "plugin/hooks/hooks.json SessionStart is missing templates::update_check_hook_entry()"
-    );
-}
-
-#[test]
-fn plugin_rules_file_matches_template() {
-    let rules = read(&repo_root().join("plugin/rules/kungfu-rules.md"));
-    assert_eq!(
-        rules.trim_end(),
-        templates::CLAUDE_RULES_BODY.trim_end(),
-        "plugin/rules/kungfu-rules.md drifted from templates::CLAUDE_RULES_BODY"
     );
 }
 
@@ -129,8 +123,12 @@ fn marketplace_points_at_plugin_dir() {
 fn readme_blocks_match_templates() {
     let readme = read(&repo_root().join("README.md"));
     assert!(
+        readme.contains(templates::MCP_INSTRUCTIONS.trim_end()),
+        "README.md routing-rules block drifted from templates::MCP_INSTRUCTIONS"
+    );
+    assert!(
         readme.contains(templates::CLAUDE_RULES_BODY.trim_end()),
-        "README.md agent-rules block drifted from templates::CLAUDE_RULES_BODY"
+        "README.md CLAUDE.md block drifted from templates::CLAUDE_RULES_BODY"
     );
     assert!(
         readme.contains(templates::REINDEX_HOOK_COMMAND),

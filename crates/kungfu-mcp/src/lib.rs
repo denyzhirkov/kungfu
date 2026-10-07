@@ -40,7 +40,7 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Reindex specific files after you create/edit/delete them. Call this with the paths you just touched so subsequent queries see fresh symbols immediately — much faster and more reliable than waiting for the automatic staleness check"
+        description = "Reindex specific files so subsequent queries see fresh symbols immediately. Not needed after Edit/Write when kungfu's edit hook is installed (plugin or `kungfu init --agent claude`) — those files are reindexed automatically; without the hook, pass the paths you changed. Always call it after shell edits, codegen or git checkout: the automatic staleness check is only a coarse safety net"
     )]
     fn reindex(&self, Parameters(params): Parameters<ReindexParam>) -> Result<String, String> {
         tools::project::reindex(self, params)
@@ -356,7 +356,7 @@ impl KungfuMcp {
 impl ServerHandler for KungfuMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Kungfu is a context retrieval and distillation engine for coding agents. Use its tools to explore project structure, find symbols, search code, and get minimal context packets.")
+            .with_instructions(kungfu_project::templates::MCP_INSTRUCTIONS)
     }
 }
 

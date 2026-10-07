@@ -108,6 +108,7 @@ kungfu annotation-queue                     # files most worth annotating
 # Maintenance
 kungfu update / update --check              # self-update to the latest release
 kungfu index --full | --changed | --only src/foo.rs
+kungfu index --from-hook                    # PostToolUse hook: reindex the edited file (stdin)
 kungfu watch                                # auto re-index on file changes
 kungfu clean / config / export --format jsonl
 kungfu embeddings status | build            # vector-search readiness
@@ -183,7 +184,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 
 **Annotations** — `annotate_file` (record a one-line file purpose + glossary terms; durable in `.kungfu/annotations.json`, merged with `purpose_source: agent`, authored module docs keep precedence), `annotation_queue` (files most worth annotating, ranked by import degree). `onboard` includes a project glossary computed on demand: agent-curated terms plus distinctive vocabulary mined from production identifiers, each entry carrying its provenance (`agent` / `doc` / `usage`).
 
-**Freshness & stats** — `reindex` (targeted reindex right after an edit), `usage_stats`.
+**Freshness & stats** — `reindex` (targeted reindex of given paths — after shell edits, codegen or git checkout, or after any edit when the edit hook is not installed), `usage_stats`.
 
 While connected, the server pushes `notifications/resources/updated` (URI `kungfu://index`) whenever the index changes on disk — subscribing agents can invalidate stale assumptions.
 
@@ -198,7 +199,7 @@ Two turnkey paths — either one activates the MCP server, the always-on routing
 /plugin install kungfu@kungfu
 ```
 
-The plugin bundles the MCP server (`.mcp.json`), injects the routing rules into context at session start (`SessionStart` hook), and reindexes every file the agent edits (`PostToolUse` hook).
+The plugin bundles the MCP server (`.mcp.json`) — whose `instructions` carry the routing rules, so they reach the agent at session start even when MCP tools are deferred — reindexes every file the agent edits (`PostToolUse` hook), and runs a cached release check at session start (`SessionStart` hook).
 
 **`kungfu init --agent claude`** (per project):
 
@@ -206,9 +207,9 @@ The plugin bundles the MCP server (`.mcp.json`), injects the routing rules into 
 kungfu init --agent claude
 ```
 
-Writes the rules block into the project `CLAUDE.md` (versioned markers — a re-run replaces the block in place), registers the MCP server in `.mcp.json`, and adds the auto-reindex hook to `.claude/settings.json`. Idempotent; existing files are merged, not overwritten.
+Writes a short pointer block into the project `CLAUDE.md` (versioned markers — a re-run replaces an older block in place), registers the MCP server in `.mcp.json` (its `instructions` carry the routing rules), and adds the auto-reindex hook to `.claude/settings.json`. Idempotent; existing files are merged, not overwritten.
 
-Pick one path; enabling both is harmless but duplicates the rules in context.
+Pick one path; enabling both registers the MCP server twice (duplicate tools and instructions in context, and a double reindex hook).
 
 ### Keeping it healthy: `kungfu doctor`
 
@@ -223,15 +224,18 @@ A project with no Claude integration gets an info line, not a failure. `--fix` o
 
 ### Manual setup (advanced / other agents)
 
-Add the block below to `CLAUDE.md` or the system prompt. Keep it about *policy and routing* — the agent already sees tool descriptions from MCP. It is a working minimum and the source template for both turnkey paths above; copy it verbatim.
+#### Routing rules (MCP server instructions)
+
+`kungfu mcp` sends the block below as `instructions` in its `initialize` response — this is what the agent sees at session start, next to the tool names (Claude Code truncates server instructions at 2048 chars; the block stays under that). An MCP client that ignores server instructions can paste it into the system prompt verbatim.
 
 ```markdown
-## kungfu — context retrieval (use BEFORE Read / grep / find)
+kungfu — context retrieval. Use it BEFORE Read / grep / find: it returns ranked,
+scoped packets instead of whole files; raw reads are the fallback. Start every task
+with `ask_context("<task>", budget: "tiny")` and escalate the budget only if the
+packet is clearly insufficient. Open a raw file only once kungfu points you at it.
 
-Default to kungfu; raw file reads are the fallback, not the first move — it returns
-ranked, scoped packets instead of whole files. Start every task with
-`ask_context("<task>", budget: "tiny")` and escalate the budget only if the packet
-is clearly insufficient. Open a raw file only once kungfu points you at it.
+Tools may be deferred: load the ones you need in ONE ToolSearch call, e.g.
+"+kungfu ask_context edit_context verify_change".
 
 Route by situation:
 
@@ -246,13 +250,28 @@ Route by situation:
 | Refactor touching > 1 file | `affected` + `coupling` + `smart_test` before editing |
 | Bug with no clear file | `hotspots`, then `debug_trace` on the stack trace |
 
-After edits: `reindex` the changed paths, then `verify_change` for the blast radius
-and minimal test set. `memory_search` before implementing (there may already be a
-decision or warning); `memory_add` to persist new ones — pin sparingly.
+If kungfu's edit hook is installed (plugin or `kungfu init --agent claude`), files
+you Edit/Write are reindexed automatically; otherwise `reindex` the paths you
+changed. Always `reindex` after shell edits, codegen or git checkout. After edits,
+`verify_change` for the blast radius and minimal test set.
+`memory_search` before implementing (there may already be a decision or warning);
+`memory_add` to persist new ones — pin sparingly.
 
 Skip kungfu only for: a one-line edit in a file already open this session; a file
 < 50 lines whose exact path you know; pure shell ops; reading a config/lock file by
 exact path. Otherwise, if you reach for Read / grep / find — stop and route above.
+```
+
+#### CLAUDE.md block
+
+The block `kungfu init --agent claude` writes between versioned `<!-- kungfu:rules:start … -->` / `<!-- kungfu:rules:end -->` markers. It only points at the server instructions, so the routing table lives in one place:
+
+```markdown
+## kungfu — context retrieval
+
+kungfu (MCP) is connected; its routing rules — which tool to call first for each
+situation — are in the kungfu MCP server instructions. Start every task with
+`ask_context("<task>", budget: "tiny")`; raw Read / grep / find are the fallback.
 ```
 
 #### Auto-reindex on edit (Claude Code hook)
@@ -264,10 +283,9 @@ Wire reindex into the harness so every `Edit`/`Write` triggers a targeted reinde
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "Edit|Write",
         "hooks": [
-          { "type": "command",
-            "command": "jq -r '.tool_input.file_path // empty' | xargs -I{} kungfu index --only {} >/dev/null 2>&1 || true" }
+          { "type": "command", "command": "kungfu index --from-hook 2>/dev/null || true" }
         ]
       }
     ]
@@ -275,7 +293,9 @@ Wire reindex into the harness so every `Edit`/`Write` triggers a targeted reinde
 }
 ```
 
-The lazy staleness check stays as a safety net for files changed outside the agent (git pull, formatters, codegen).
+`kungfu index --from-hook` reads the hook payload from stdin and reindexes `tool_input.file_path`. It always exits 0 and prints nothing; a payload without a file path, a file outside the project, or a project without `.kungfu/` is a silent no-op. The project is the nearest ancestor of the edited file that has `.kungfu/`, so a session sitting in a sub-package still updates the workspace index. Re-running `kungfu init --agent claude` (or `kungfu doctor --fix`) replaces the previous template hook (`jq … | xargs kungfu index --only {}`) in place; a hand-written `kungfu index --only` hook is left alone.
+
+Files changed outside `Edit`/`Write` (shell edits, codegen, git checkout) are not covered by the hook — run `kungfu index` or call the `reindex` MCP tool with those paths. The lazy staleness check on every call is only a coarse safety net.
 
 ## Token savings (open-source projects)
 

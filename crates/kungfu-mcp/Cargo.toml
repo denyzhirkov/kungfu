@@ -15,5 +15,6 @@ kungfu-core = { workspace = true }
 kungfu-update = { workspace = true }
 kungfu-memory = { workspace = true }
 kungfu-index = { workspace = true }
+kungfu-project = { workspace = true }
 rmcp = { version = "1.1", features = ["server", "transport-io"] }
 schemars = "1"

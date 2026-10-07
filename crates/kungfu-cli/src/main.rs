@@ -77,6 +77,11 @@ enum Commands {
         /// Reindex only these files (e.g. after an edit). For editor/agent hooks.
         #[arg(long, num_args = 1.., value_name = "PATH")]
         only: Vec<String>,
+
+        /// Reindex the file named in a Claude Code PostToolUse hook payload read
+        /// from stdin (`tool_input.file_path`). Always exits 0 and prints nothing.
+        #[arg(long, conflicts_with_all = ["full", "changed", "only"])]
+        from_hook: bool,
     },
 
     /// Remove caches and indexes
@@ -517,11 +522,17 @@ fn main() {
     let json = cli.json;
 
     // Long-lived commands report the update through their own channel, `update`
-    // says it itself, and JSON output stays machine-clean.
+    // says it itself, JSON output stays machine-clean, and hook mode stays silent.
     let show_update_notice = !json
         && !matches!(
             cli.command,
-            Commands::Mcp | Commands::Watch | Commands::Update { .. }
+            Commands::Mcp
+                | Commands::Watch
+                | Commands::Update { .. }
+                | Commands::Index {
+                    from_hook: true,
+                    ..
+                }
         );
 
     let result = match cli.command {
@@ -531,9 +542,16 @@ fn main() {
         Commands::Doctor { fix } => commands::doctor(json, fix),
         Commands::Config => commands::config_show(json),
         Commands::Index {
+            from_hook: true, ..
+        } => {
+            commands::index_from_hook();
+            Ok(())
+        }
+        Commands::Index {
             full,
             changed,
             only,
+            from_hook: false,
         } => commands::index(full, changed, only, json),
         Commands::Clean => commands::clean(json),
         Commands::RepoOutline { budget } => commands::repo_outline(parse_budget(&budget), json),
