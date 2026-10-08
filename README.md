@@ -62,7 +62,7 @@ auto  = false  # also install them automatically (default: off — see the resta
 ## Quick start
 
 ```sh
-kungfu init      # create .kungfu/ in the project root
+kungfu init      # create .kungfu/ in the project root (inside an indexed repo: refuses; `--here` makes a nested index)
 kungfu index     # build the index
 kungfu doctor    # validate install + index (--fix repairs common issues)
 ```

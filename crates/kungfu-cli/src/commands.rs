@@ -2,23 +2,70 @@ use anyhow::Result;
 use kungfu_core::{EmptyCallGraphCause, KungfuService};
 use kungfu_memory::project_search::MemoryFilter;
 use kungfu_project::agent_health::{self, CheckStatus};
-use kungfu_project::{find_project_root, init_project, KUNGFU_VERSION};
+use kungfu_project::{
+    find_indexed_root, find_marker_root, find_project_root, init_project, KUNGFU_VERSION,
+};
 use kungfu_types::memory::ProjectMemoryKind;
 use kungfu_types::Budget;
 use std::env;
 
 use crate::{EmbeddingsCommands, MemoryCommands};
 
-pub fn init(agent: Option<&str>, dry_run: bool, json: bool) -> Result<()> {
+#[derive(Debug, PartialEq)]
+enum InitTarget {
+    Create(std::path::PathBuf),
+    AlreadyHere(std::path::PathBuf),
+    InsideIndexed {
+        requested: std::path::PathBuf,
+        index_root: std::path::PathBuf,
+    },
+}
+
+/// Where `kungfu init` acts. `.kungfu/` is created at the marker root, as
+/// before; an index owned by an enclosing repository blocks it unless `here`.
+fn init_target(cwd: &std::path::Path, here: bool) -> Result<InitTarget> {
+    let requested = find_marker_root(cwd)?;
+    if requested.join(".kungfu").exists() {
+        return Ok(InitTarget::AlreadyHere(requested));
+    }
+    match find_indexed_root(cwd) {
+        Some(index_root) if !here => Ok(InitTarget::InsideIndexed {
+            requested,
+            index_root,
+        }),
+        _ => Ok(InitTarget::Create(requested)),
+    }
+}
+
+pub fn init(agent: Option<&str>, dry_run: bool, here: bool, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
-    let root = find_project_root(&cwd)?;
 
     match agent {
         None => {
+            let root = match init_target(&cwd, here)? {
+                InitTarget::Create(root) => root,
+                InitTarget::AlreadyHere(root) => {
+                    init_refused(json, "already_initialized", &root, &root)?;
+                    anyhow::bail!("kungfu is already initialized in {}", root.display());
+                }
+                InitTarget::InsideIndexed {
+                    requested,
+                    index_root,
+                } => {
+                    init_refused(json, "inside_indexed_repository", &requested, &index_root)?;
+                    anyhow::bail!(
+                        "{} is inside the indexed repository at {} \u{2014} run kungfu commands from anywhere inside it, or `kungfu init --here` to create a separate nested index",
+                        requested.display(),
+                        index_root.display()
+                    );
+                }
+            };
             let project = init_project(&root)?;
             if json {
                 let info = serde_json::json!({
                     "status": "initialized",
+                    "requested_root": project.root.to_string_lossy(),
+                    "index_root": project.root.to_string_lossy(),
                     "root": project.root.to_string_lossy(),
                     "project_name": project.meta.name,
                 });
@@ -31,9 +78,26 @@ pub fn init(agent: Option<&str>, dry_run: bool, json: bool) -> Result<()> {
             }
             Ok(())
         }
-        Some("claude") => init_agent_claude(&root, dry_run, json),
+        Some("claude") => init_agent_claude(&find_project_root(&cwd)?, dry_run, json),
         Some(other) => anyhow::bail!("unsupported agent '{}' (supported: claude)", other),
     }
+}
+
+fn init_refused(
+    json: bool,
+    status: &str,
+    requested: &std::path::Path,
+    index_root: &std::path::Path,
+) -> Result<()> {
+    if json {
+        let info = serde_json::json!({
+            "status": status,
+            "requested_root": requested.to_string_lossy(),
+            "index_root": index_root.to_string_lossy(),
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    }
+    Ok(())
 }
 
 fn init_agent_claude(root: &std::path::Path, dry_run: bool, json: bool) -> Result<()> {
@@ -732,17 +796,12 @@ fn hook_file_path(input: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
-/// Nearest indexed project (an ancestor with `.kungfu/`) owning `file`, else
-/// the one around `cwd`. Deliberately not `find_project_root`: that stops at the
-/// first Cargo.toml / package.json, so a sub-package cwd or file would miss the
-/// workspace index.
+/// Nearest indexed project owning `file`, else the one around `cwd`
+/// (see `find_indexed_root` for the repository-boundary rule).
 fn hook_project_root(file: &std::path::Path, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     file.parent()
-        .into_iter()
-        .flat_map(std::path::Path::ancestors)
-        .chain(cwd.ancestors())
-        .find(|dir| dir.join(".kungfu").is_dir())
-        .map(std::path::Path::to_path_buf)
+        .and_then(find_indexed_root)
+        .or_else(|| find_indexed_root(cwd))
 }
 
 pub fn clean(json: bool) -> Result<()> {
@@ -2726,7 +2785,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("kungfu-cli-hook-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
         dir
     }
 
@@ -2764,5 +2823,51 @@ mod tests {
 
         assert_eq!(hook_project_root(&outside, &proj), Some(proj));
         assert_eq!(hook_project_root(&outside, &base), None);
+    }
+
+    #[test]
+    fn init_target_cases() {
+        let ws = temp_dir("init-target");
+        std::fs::write(ws.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let pkg = ws.join("crates/foo");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("Cargo.toml"), "[package]\n").unwrap();
+
+        assert_eq!(
+            init_target(&pkg, false).unwrap(),
+            InitTarget::Create(pkg.clone())
+        );
+
+        std::fs::create_dir_all(ws.join(".kungfu")).unwrap();
+        assert_eq!(
+            init_target(&ws, false).unwrap(),
+            InitTarget::AlreadyHere(ws.clone())
+        );
+        assert_eq!(
+            init_target(&ws, true).unwrap(),
+            InitTarget::AlreadyHere(ws.clone())
+        );
+        assert_eq!(
+            init_target(&pkg, false).unwrap(),
+            InitTarget::InsideIndexed {
+                requested: pkg.clone(),
+                index_root: ws.clone()
+            }
+        );
+        assert_eq!(init_target(&pkg, true).unwrap(), InitTarget::Create(pkg));
+    }
+
+    #[test]
+    fn init_target_ignores_stray_ancestor_index_outside_git() {
+        let outer = temp_dir("init-stray");
+        std::fs::remove_dir_all(outer.join(".git")).unwrap();
+        std::fs::create_dir_all(outer.join(".kungfu")).unwrap();
+        let proj = outer.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("Cargo.toml"), "[package]\n").unwrap();
+
+        if !outer.ancestors().any(|d| d.join(".git").exists()) {
+            assert_eq!(init_target(&proj, false).unwrap(), InitTarget::Create(proj));
+        }
     }
 }
