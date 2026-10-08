@@ -3,7 +3,7 @@ use chrono::Utc;
 use kungfu_config::KungfuConfig;
 use kungfu_parse::{CommentKind, Parser, RawCall, RawComment, RawImport};
 use kungfu_storage::JsonStore;
-use kungfu_types::file::{FileEntry, Language};
+use kungfu_types::file::{FileEntry, Language, TreeState};
 use kungfu_types::memory::{MemoryEntry, MemoryKind};
 use kungfu_types::relation::{CallGraphMeta, Relation, RelationKind};
 use kungfu_types::symbol::Symbol;
@@ -143,7 +143,9 @@ impl<'a> Indexer<'a> {
     pub fn index_full(&mut self) -> Result<IndexStats> {
         info!("starting full index of {}", self.root.display());
 
-        let paths = scanner::scan_files(&self.root, &self.config)?;
+        let scan_started = Utc::now();
+        let tree = scanner::scan_tree(&self.root, &self.config)?;
+        let paths = tree.files;
         let mut files = Vec::new();
         let mut fingerprints = HashMap::new();
         let mut all_symbols = Vec::new();
@@ -203,6 +205,7 @@ impl<'a> Indexer<'a> {
         self.store.save_fingerprints(&fingerprints)?;
         self.store.save_memories(&memories)?;
         self.store.save_schema_version()?;
+        self.save_scanned_tree_state(scan_started, &tree.dirs)?;
 
         info!(
             "indexed {} files, {} symbols, {} relations, {} memories",
@@ -227,7 +230,9 @@ impl<'a> Indexer<'a> {
             std::collections::HashSet::new();
         let mut changed_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        let paths = scanner::scan_files(&self.root, &self.config)?;
+        let scan_started = Utc::now();
+        let tree = scanner::scan_tree(&self.root, &self.config)?;
+        let paths = tree.files;
 
         let mut new_fingerprints = HashMap::new();
         let mut new_files = Vec::new();
@@ -386,6 +391,7 @@ impl<'a> Indexer<'a> {
         self.store.save_fingerprints(&new_fingerprints)?;
         self.store.save_memories(&memories)?;
         self.store.save_schema_version()?;
+        self.save_scanned_tree_state(scan_started, &tree.dirs)?;
 
         info!(
             "incremental index: {} total, {} new, {} changed, {} removed, {} symbols, {} relations",
@@ -401,6 +407,7 @@ impl<'a> Indexer<'a> {
 
     /// Index only the specified files (by relative path), keeping everything else unchanged.
     pub fn index_only(&mut self, changed_paths: &[String]) -> Result<IndexStats> {
+        let started = Utc::now();
         let old_fingerprints = self.store.load_fingerprints()?;
         let old_files = self.store.load_files()?;
         let old_symbols = self.store.load_symbols()?;
@@ -532,12 +539,98 @@ impl<'a> Indexer<'a> {
         self.store.save_fingerprints(&new_fingerprints)?;
         self.store.save_memories(&memories)?;
         self.store.save_schema_version()?;
+        self.refresh_tree_state(changed_paths, &new_files, started)?;
 
         info!(
             "changed-only index: {} changed, {} new, {} removed",
             stats.changed_files, stats.new_files, stats.removed_files
         );
         Ok(stats)
+    }
+
+    fn rel_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// Record what a whole-tree scan saw. It covers every change before
+    /// `scanned_at`, so earlier targeted refreshes are dropped.
+    fn save_scanned_tree_state(
+        &self,
+        scanned_at: chrono::DateTime<Utc>,
+        dirs: &[std::path::PathBuf],
+    ) -> Result<()> {
+        self.store.save_tree_state(&TreeState {
+            scanned_at,
+            dirs: dirs.iter().map(|d| self.rel_path(d)).collect(),
+            refreshed: HashMap::new(),
+        })
+    }
+
+    /// After a targeted reindex: re-read files get their own reference time,
+    /// newly created ancestor directories are recorded, and each touched
+    /// directory whose listing holds nothing unknown to the index is marked
+    /// checked. The freshness check then neither re-flags these edits nor
+    /// forgets other ones (the scan reference itself does not move). Without a
+    /// tree state (index predates it) there is nothing to refresh; the next
+    /// full/incremental run creates one.
+    fn refresh_tree_state(
+        &self,
+        changed_paths: &[String],
+        files: &[FileEntry],
+        started: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let Some(mut state) = (*self.store.tree_state()).clone() else {
+            return Ok(());
+        };
+        let mut dirs: std::collections::BTreeSet<String> = state.dirs.drain(..).collect();
+        let indexed: std::collections::HashSet<&str> =
+            files.iter().map(|f| f.path.as_str()).collect();
+        let mut to_check = std::collections::BTreeSet::new();
+        for rel in changed_paths {
+            let is_indexed = indexed.contains(rel.as_str());
+            if is_indexed {
+                state.refreshed.insert(rel.clone(), started);
+            } else {
+                state.refreshed.remove(rel);
+            }
+            let mut child = Path::new(rel);
+            while let Some(dir) = child.parent() {
+                let dir_rel = dir.to_string_lossy().to_string();
+                to_check.insert(dir_rel.clone());
+                // An already-recorded dir means only its own listing changed;
+                // a new one also changed its parent's.
+                if !is_indexed || !dirs.insert(dir_rel) {
+                    break;
+                }
+                child = dir;
+            }
+        }
+        for dir in to_check {
+            let abs = self.root.join(&dir);
+            if !abs.is_dir() {
+                continue;
+            }
+            let checked_at = Utc::now();
+            let entries = match scanner::scan_dirs_shallow(&self.root, &[abs], &self.config) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    debug!("cannot list {dir}: {e:#}");
+                    continue;
+                }
+            };
+            let all_known = entries.iter().all(|e| {
+                let rel = self.rel_path(e);
+                indexed.contains(rel.as_str()) || dirs.contains(&rel)
+            });
+            if all_known {
+                state.refreshed.insert(dir, checked_at);
+            }
+        }
+        state.dirs = dirs.into_iter().collect();
+        self.store.save_tree_state(&state)
     }
 
     fn index_file(&mut self, path: &Path) -> Result<ParsedFile> {

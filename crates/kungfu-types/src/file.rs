@@ -23,6 +23,22 @@ pub struct FileEntry {
     pub purpose_source: Option<String>,
 }
 
+/// What the last tree scan saw, for the lazy freshness check. Anything whose
+/// mtime is at or after its reference time may be missing from the index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeState {
+    /// Start of the last full/incremental scan — the default reference. The
+    /// start, not the end: an edit made while the scan ran must stay visible.
+    pub scanned_at: DateTime<Utc>,
+    /// Directories the scan walked (including empty ones), relative to the
+    /// root; `""` is the root itself.
+    pub dirs: Vec<String>,
+    /// Later references set by targeted reindexes: when a file was re-read,
+    /// or when a directory's listing was checked against the index.
+    #[serde(default)]
+    pub refreshed: std::collections::HashMap<String, DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {

@@ -4,13 +4,14 @@
 
 use crate::KungfuService;
 use anyhow::Result;
-use kungfu_types::file::FileEntry;
+use kungfu_config::KungfuConfig;
+use kungfu_types::file::{FileEntry, TreeState};
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Root manifests/lockfiles: a change can matter even when the file itself is
 /// not part of the index.
@@ -26,6 +27,7 @@ const ROOT_MARKERS: [&str; 7] = [
 
 #[derive(Debug, PartialEq, Eq)]
 enum StaleReason {
+    NoTreeState,
     Marker(PathBuf),
     Modified(PathBuf),
     Missing(PathBuf),
@@ -35,6 +37,7 @@ enum StaleReason {
 impl fmt::Display for StaleReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NoTreeState => write!(f, "no tree state recorded by the last index run"),
             Self::Marker(p) => write!(f, "root marker {} changed", p.display()),
             Self::Modified(p) => write!(f, "{} modified", p.display()),
             Self::Missing(p) => write!(f, "{} removed", p.display()),
@@ -45,8 +48,8 @@ impl fmt::Display for StaleReason {
 
 impl KungfuService {
     /// Check if the index is stale and reindex if needed. Returns whether a
-    /// reindex ran. Staleness is judged against the fingerprints.json mtime —
-    /// every index write rewrites that file, so a reindex always settles the
+    /// reindex ran. Every full/incremental run records its scan start and the
+    /// directories it walked (`TreeState`), so a reindex always settles the
     /// check.
     pub fn ensure_fresh_index(&self) -> Result<bool> {
         let fp_path = self.project.index_dir().join("fingerprints.json");
@@ -62,14 +65,16 @@ impl KungfuService {
             return Ok(true);
         }
 
-        let fp_mtime = std::fs::metadata(&fp_path)?.modified()?;
-        let files = self.store.files_arc()?;
-        match find_staleness(
-            &self.project.root,
-            &files,
-            fp_mtime,
-            self.project.config.index_hidden,
-        ) {
+        let state = self.store.tree_state();
+        let reason = match state.as_ref() {
+            // Index written before tree states existed: one rescan records it.
+            None => Some(StaleReason::NoTreeState),
+            Some(state) => {
+                let files = self.store.files_arc()?;
+                find_staleness(&self.project.root, &self.project.config, &files, state)
+            }
+        };
+        match reason {
             Some(reason) => {
                 info!("index is stale ({reason}), running incremental reindex");
                 self.index_incremental()?;
@@ -82,28 +87,39 @@ impl KungfuService {
 
 /// First reason the index is older than the tree, or `None` when fresh.
 ///
-/// Stale when an indexed file is missing or newer than the index, or when a
-/// directory on the path to an indexed file (root included) is newer and holds
-/// an entry the index does not know — a directory mtime moves on any
-/// add/remove/rename, but removals already surface as missing files.
+/// Stale when an indexed file is missing or modified at/after its reference
+/// time, or when a directory the last scan walked was modified after its
+/// reference and now holds an entry the scanner would pick up but the index
+/// does not know. A directory mtime moves on any add/remove/rename; removals
+/// already surface as missing files, and ignored or hidden entries
+/// (`.DS_Store`, swap files, `target/`) are filtered by the scanner's rules.
 fn find_staleness(
     root: &Path,
+    config: &KungfuConfig,
     files: &[FileEntry],
-    index_mtime: SystemTime,
-    index_hidden: bool,
+    state: &TreeState,
 ) -> Option<StaleReason> {
+    let scanned_at = SystemTime::from(state.scanned_at);
     // A future mtime cannot come from an edit made since the index was written
     // (an edit stamps "now"); counting it would reindex on every call until the
     // clock catches up.
     let now = SystemTime::now();
-    let newer = |path: &Path| {
-        std::fs::metadata(path)
+    let changed_since = |rel: &str, mtime: SystemTime| {
+        mtime >= scanned_at
+            && mtime <= now
+            && state
+                .refreshed
+                .get(rel)
+                .is_none_or(|t| mtime >= SystemTime::from(*t))
+    };
+    let modified = |rel: &str| {
+        std::fs::metadata(root.join(rel))
             .and_then(|m| m.modified())
-            .is_ok_and(|t| t > index_mtime && t <= now)
+            .is_ok_and(|t| changed_since(rel, t))
     };
 
     for marker in ROOT_MARKERS {
-        if newer(&root.join(marker)) {
+        if modified(marker) {
             return Some(StaleReason::Marker(PathBuf::from(marker)));
         }
     }
@@ -114,13 +130,12 @@ fn find_staleness(
             if stop.load(Ordering::Relaxed) {
                 return None;
             }
-            let rel = Path::new(&file.path);
-            let reason = match std::fs::metadata(root.join(rel)) {
-                Ok(meta) if meta.modified().is_ok_and(|t| t > index_mtime && t <= now) => {
-                    Some(StaleReason::Modified(rel.to_path_buf()))
+            let reason = match std::fs::metadata(root.join(&file.path)) {
+                Ok(meta) if meta.modified().is_ok_and(|t| changed_since(&file.path, t)) => {
+                    Some(StaleReason::Modified(PathBuf::from(&file.path)))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    Some(StaleReason::Missing(rel.to_path_buf()))
+                    Some(StaleReason::Missing(PathBuf::from(&file.path)))
                 }
                 // Unreadable metadata: the indexer would skip it too; flagging
                 // it would reindex forever.
@@ -137,22 +152,11 @@ fn find_staleness(
         return Some(reason);
     }
 
-    let mut dirs: HashSet<&Path> = HashSet::new();
-    for file in files {
-        let mut parent = Path::new(&file.path).parent();
-        while let Some(dir) = parent {
-            if !dirs.insert(dir) {
-                break;
-            }
-            parent = dir.parent();
-        }
-    }
-    let dir_list: Vec<&Path> = dirs.iter().copied().collect();
-    let dirty: Vec<&Path> = in_parallel(&dir_list, |chunk| {
+    let dirty: Vec<PathBuf> = in_parallel(&state.dirs, |chunk| {
         chunk
             .iter()
-            .copied()
-            .filter(|d| newer(&root.join(d)))
+            .filter(|d| modified(d))
+            .map(|d| root.join(d))
             .collect::<Vec<_>>()
     })
     .into_iter()
@@ -162,26 +166,21 @@ fn find_staleness(
         return None;
     }
 
-    // Only an unknown, possibly indexable entry is worth a reindex; hidden
-    // entries (.DS_Store, editor swap files) are never indexed unless asked.
-    let mut known: HashSet<&Path> = files.iter().map(|f| Path::new(&f.path)).collect();
-    known.extend(dirs.iter().copied());
-    for dir in dirty {
-        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if !index_hidden && name.to_string_lossy().starts_with('.') {
-                continue;
-            }
-            let rel = dir.join(&name);
-            if !known.contains(rel.as_path()) {
-                return Some(StaleReason::NewEntry(rel));
-            }
+    // A dirty directory stays dirty until the next full scan, so this listing
+    // repeats per call — one shallow walk over just those directories.
+    let entries = match kungfu_index::scanner::scan_dirs_shallow(root, &dirty, config) {
+        Ok(entries) => entries,
+        Err(e) => {
+            debug!("cannot list changed directories: {e:#}");
+            return None;
         }
-    }
-    None
+    };
+    let mut known: HashSet<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    known.extend(state.dirs.iter().map(String::as_str));
+    entries.into_iter().find_map(|abs| {
+        let rel = abs.strip_prefix(root).unwrap_or(&abs).to_string_lossy();
+        (!known.contains(rel.as_ref())).then(|| StaleReason::NewEntry(PathBuf::from(rel.as_ref())))
+    })
 }
 
 /// Stat calls dominate the check (~2µs each on APFS) and parallelize well;
