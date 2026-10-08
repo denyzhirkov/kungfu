@@ -34,7 +34,7 @@ enum Commands {
 
         /// Create a separate nested index here even when an enclosing
         /// repository is already indexed
-        #[arg(long)]
+        #[arg(long, conflicts_with = "agent")]
         here: bool,
     },
 
