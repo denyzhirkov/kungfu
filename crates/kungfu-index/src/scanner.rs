@@ -84,14 +84,17 @@ fn walk_builder(root: &Path, starts: &[PathBuf], config: &KungfuConfig) -> Resul
     // kungfu's own state dir is never project content, whatever the config
     // says (`ignore.paths` replaces its defaults; `index_hidden` lets dot
     // dirs in). Indexing it would make every index write look like an edit.
-    // Same name as `kungfu_project::KUNGFU_DIR`.
-    let state_dir = root.join(".kungfu");
+    // Matched by name at any depth so a nested `init --here` project's state
+    // dir stays out of the parent index too. Same name as
+    // `kungfu_project::KUNGFU_DIR`.
     builder
         .hidden(!config.index_hidden)
         .follow_links(config.follow_symlinks)
         .git_ignore(true)
         .git_global(true)
-        .filter_entry(move |entry| entry.path() != state_dir);
+        .filter_entry(|entry| {
+            !(entry.file_name() == ".kungfu" && entry.file_type().is_some_and(|t| t.is_dir()))
+        });
 
     let mut overrides = ignore::overrides::OverrideBuilder::new(root);
     for path in &config.ignore.paths {
