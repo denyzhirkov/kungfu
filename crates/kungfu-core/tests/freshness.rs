@@ -306,6 +306,30 @@ fn index_without_tree_state_rescans_once() {
 }
 
 #[test]
+fn state_dir_is_never_indexed_even_when_config_allows_it() {
+    let tmp = temp_project("statedir");
+    // Custom ignore.paths replace the defaults (which list .git, not
+    // .kungfu), and index_hidden lets dot dirs through the walker.
+    let config_path = tmp.join(".kungfu/config.toml");
+    let mut config = kungfu_config::KungfuConfig::load(&config_path).unwrap();
+    config.index_hidden = true;
+    config.ignore.paths = vec!["target".to_string()];
+    config.save(&config_path).unwrap();
+    KungfuService::open(&tmp).unwrap().index_full().unwrap();
+
+    let files = std::fs::read_to_string(index_file(&tmp, "files.json")).unwrap();
+    assert!(
+        !files.contains(".kungfu"),
+        "the index must not index itself"
+    );
+    assert!(
+        !ensure(&tmp),
+        "index writes are not edits — the check settles"
+    );
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
 fn future_mtime_does_not_loop() {
     let tmp = temp_project("future");
     set_mtime(
