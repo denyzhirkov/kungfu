@@ -31,6 +31,11 @@ enum Commands {
         /// With --agent: show what would be written without touching anything
         #[arg(long, requires = "agent")]
         dry_run: bool,
+
+        /// Create a separate nested index here even when an enclosing
+        /// repository is already indexed
+        #[arg(long)]
+        here: bool,
     },
 
     /// Show project status and index health
@@ -536,7 +541,11 @@ fn main() {
         );
 
     let result = match cli.command {
-        Commands::Init { agent, dry_run } => commands::init(agent.as_deref(), dry_run, json),
+        Commands::Init {
+            agent,
+            dry_run,
+            here,
+        } => commands::init(agent.as_deref(), dry_run, here, json),
         Commands::Status => commands::status(json),
         Commands::Update { check, to, quiet } => commands::update(check, to, quiet, json),
         Commands::Doctor { fix } => commands::doctor(json, fix),

@@ -111,17 +111,42 @@ pub fn init_project(root: &Path) -> Result<Project> {
     })
 }
 
-/// Nearest ancestor of `start` (inclusive) holding a `.kungfu/` directory.
-/// The walk never crosses a repository boundary: it stops after the first
-/// ancestor containing `.git` (file or directory, so submodules and worktrees
-/// count). Outside any git repo there is no boundary and it walks to the
-/// filesystem root.
+const ROOT_MARKERS: [&str; 7] = [
+    ".git",
+    "Cargo.toml",
+    "package.json",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "Makefile",
+];
+
+/// Nearest `.kungfu/` that belongs to the same repository as `start`.
+///
+/// Inside a git repo (some ancestor, inclusive, has `.git` as a file or
+/// directory) the walk goes up to that repository boundary, inclusive, and
+/// never beyond it, skipping project markers on the way (sub-packages).
+/// Outside any git repo there is no boundary to trust, so the walk stops at
+/// the first project marker: a stray `.kungfu/` above a marker project is not
+/// picked up.
 pub fn find_indexed_root(start: &Path) -> Option<PathBuf> {
+    let has_dir = |dir: &Path| dir.join(KUNGFU_DIR).is_dir();
+    if start.ancestors().any(|d| d.join(".git").exists()) {
+        for dir in start.ancestors() {
+            if has_dir(dir) {
+                return Some(dir.to_path_buf());
+            }
+            if dir.join(".git").exists() {
+                return None;
+            }
+        }
+        return None;
+    }
     for dir in start.ancestors() {
-        if dir.join(KUNGFU_DIR).is_dir() {
+        if has_dir(dir) {
             return Some(dir.to_path_buf());
         }
-        if dir.join(".git").exists() {
+        if ROOT_MARKERS.iter().any(|m| dir.join(m).exists()) {
             return None;
         }
     }
@@ -149,18 +174,7 @@ pub fn find_marker_root(start_dir: &Path) -> Result<PathBuf> {
             return Ok(current);
         }
 
-        // Check for common project root indicators
-        let root_markers = [
-            ".git",
-            "Cargo.toml",
-            "package.json",
-            "go.mod",
-            "pyproject.toml",
-            "setup.py",
-            "Makefile",
-        ];
-
-        for marker in &root_markers {
+        for marker in &ROOT_MARKERS {
             if current.join(marker).exists() {
                 return Ok(current);
             }
@@ -182,7 +196,7 @@ mod tests {
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kungfu-project-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
         dir
     }
 
@@ -235,5 +249,33 @@ mod tests {
 
         assert_eq!(find_indexed_root(&pkg), None);
         assert_eq!(find_project_root(&pkg).unwrap(), pkg);
+    }
+
+    #[test]
+    fn kungfu_above_non_git_marker_project_is_ignored() {
+        let outer = temp_dir("nongit");
+        std::fs::remove_dir_all(outer.join(".git")).unwrap();
+        std::fs::create_dir_all(outer.join(".kungfu")).unwrap();
+        let proj = outer.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("Cargo.toml"), "[package]\n").unwrap();
+
+        // The temp dir itself may sit inside a git checkout; only assert when it does not.
+        if !outer.ancestors().any(|d| d.join(".git").exists()) {
+            assert_eq!(find_indexed_root(&proj), None);
+            assert_eq!(find_project_root(&proj).unwrap(), proj);
+        }
+    }
+
+    #[test]
+    fn non_git_project_with_own_kungfu_is_found() {
+        let proj = temp_dir("nongit-own");
+        std::fs::remove_dir_all(proj.join(".git")).unwrap();
+        std::fs::write(proj.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::create_dir_all(proj.join(".kungfu")).unwrap();
+
+        if !proj.ancestors().any(|d| d.join(".git").exists()) {
+            assert_eq!(find_indexed_root(&proj), Some(proj.clone()));
+        }
     }
 }
