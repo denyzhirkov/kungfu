@@ -111,8 +111,36 @@ pub fn init_project(root: &Path) -> Result<Project> {
     })
 }
 
-/// Walk up from start_dir looking for project root indicators
+/// Nearest ancestor of `start` (inclusive) holding a `.kungfu/` directory.
+/// The walk never crosses a repository boundary: it stops after the first
+/// ancestor containing `.git` (file or directory, so submodules and worktrees
+/// count). Outside any git repo there is no boundary and it walks to the
+/// filesystem root.
+pub fn find_indexed_root(start: &Path) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        if dir.join(KUNGFU_DIR).is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        if dir.join(".git").exists() {
+            return None;
+        }
+    }
+    None
+}
+
+/// Project root for `start`: the indexed root if one exists within the
+/// repository, else the nearest project-marker directory (see
+/// [`find_marker_root`]).
 pub fn find_project_root(start_dir: &Path) -> Result<PathBuf> {
+    match find_indexed_root(start_dir) {
+        Some(root) => Ok(root),
+        None => find_marker_root(start_dir),
+    }
+}
+
+/// Walk up from start_dir to the first directory with `.kungfu` or a project
+/// marker (.git, Cargo.toml, ...). This is where `kungfu init` creates `.kungfu/`.
+pub fn find_marker_root(start_dir: &Path) -> Result<PathBuf> {
     let mut current = start_dir.to_path_buf();
 
     loop {
@@ -145,4 +173,67 @@ pub fn find_project_root(start_dir: &Path) -> Result<PathBuf> {
 
     // Fallback to start_dir
     Ok(start_dir.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kungfu-project-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sub_package(ws: &Path) -> PathBuf {
+        let pkg = ws.join("crates/foo");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("Cargo.toml"), "[package]\n").unwrap();
+        pkg
+    }
+
+    #[test]
+    fn sub_package_resolves_to_indexed_root() {
+        let ws = temp_dir("subpkg");
+        std::fs::create_dir_all(ws.join(".git")).unwrap();
+        std::fs::create_dir_all(ws.join(".kungfu")).unwrap();
+        let pkg = sub_package(&ws);
+
+        assert_eq!(find_indexed_root(&pkg), Some(ws.clone()));
+        assert_eq!(find_project_root(&pkg).unwrap(), ws);
+    }
+
+    #[test]
+    fn kungfu_above_git_boundary_is_ignored() {
+        let outer = temp_dir("boundary");
+        std::fs::create_dir_all(outer.join(".kungfu")).unwrap();
+        let repo = outer.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let pkg = sub_package(&repo);
+
+        assert_eq!(find_indexed_root(&pkg), None);
+        assert_eq!(find_project_root(&pkg).unwrap(), pkg);
+    }
+
+    #[test]
+    fn git_file_is_a_boundary() {
+        let outer = temp_dir("gitfile");
+        std::fs::create_dir_all(outer.join(".kungfu")).unwrap();
+        let sub = outer.join("submodule");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+
+        assert_eq!(find_indexed_root(&sub), None);
+    }
+
+    #[test]
+    fn no_kungfu_keeps_marker_behavior() {
+        let ws = temp_dir("nomarker");
+        std::fs::create_dir_all(ws.join(".git")).unwrap();
+        let pkg = sub_package(&ws);
+
+        assert_eq!(find_indexed_root(&pkg), None);
+        assert_eq!(find_project_root(&pkg).unwrap(), pkg);
+    }
 }

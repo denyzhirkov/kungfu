@@ -2,7 +2,9 @@ use anyhow::Result;
 use kungfu_core::{EmptyCallGraphCause, KungfuService};
 use kungfu_memory::project_search::MemoryFilter;
 use kungfu_project::agent_health::{self, CheckStatus};
-use kungfu_project::{find_project_root, init_project, KUNGFU_VERSION};
+use kungfu_project::{
+    find_indexed_root, find_marker_root, find_project_root, init_project, KUNGFU_VERSION,
+};
 use kungfu_types::memory::ProjectMemoryKind;
 use kungfu_types::Budget;
 use std::env;
@@ -11,11 +13,25 @@ use crate::{EmbeddingsCommands, MemoryCommands};
 
 pub fn init(agent: Option<&str>, dry_run: bool, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
-    let root = find_project_root(&cwd)?;
 
     match agent {
         None => {
-            let project = init_project(&root)?;
+            if let Some(existing) = find_indexed_root(&cwd) {
+                if json {
+                    let info = serde_json::json!({
+                        "status": "already_initialized",
+                        "root": existing.to_string_lossy(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&info)?);
+                } else {
+                    println!(
+                        "Already initialized: {}",
+                        existing.join(".kungfu").display()
+                    );
+                }
+                return Ok(());
+            }
+            let project = init_project(&find_marker_root(&cwd)?)?;
             if json {
                 let info = serde_json::json!({
                     "status": "initialized",
@@ -31,7 +47,7 @@ pub fn init(agent: Option<&str>, dry_run: bool, json: bool) -> Result<()> {
             }
             Ok(())
         }
-        Some("claude") => init_agent_claude(&root, dry_run, json),
+        Some("claude") => init_agent_claude(&find_project_root(&cwd)?, dry_run, json),
         Some(other) => anyhow::bail!("unsupported agent '{}' (supported: claude)", other),
     }
 }
@@ -732,17 +748,12 @@ fn hook_file_path(input: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
-/// Nearest indexed project (an ancestor with `.kungfu/`) owning `file`, else
-/// the one around `cwd`. Deliberately not `find_project_root`: that stops at the
-/// first Cargo.toml / package.json, so a sub-package cwd or file would miss the
-/// workspace index.
+/// Nearest indexed project owning `file`, else the one around `cwd`
+/// (see `find_indexed_root` for the repository-boundary rule).
 fn hook_project_root(file: &std::path::Path, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     file.parent()
-        .into_iter()
-        .flat_map(std::path::Path::ancestors)
-        .chain(cwd.ancestors())
-        .find(|dir| dir.join(".kungfu").is_dir())
-        .map(std::path::Path::to_path_buf)
+        .and_then(find_indexed_root)
+        .or_else(|| find_indexed_root(cwd))
 }
 
 pub fn clean(json: bool) -> Result<()> {
