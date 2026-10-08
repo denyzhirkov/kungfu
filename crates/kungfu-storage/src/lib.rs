@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use kungfu_types::chunk::Chunk;
-use kungfu_types::file::FileEntry;
+use kungfu_types::file::{FileEntry, TreeState};
 use kungfu_types::memory::{MemoryEntry, ProjectMemoryEntry};
 use kungfu_types::relation::{CallGraphMeta, Relation};
 use kungfu_types::symbol::Symbol;
@@ -75,6 +75,8 @@ struct StoreMeta {
 const STORE_META_FILE: &str = "store_meta.json";
 
 const CALL_GRAPH_META_FILE: &str = "call_graph_meta.json";
+
+const TREE_STATE_FILE: &str = "tree_state.json";
 
 pub struct JsonStore {
     base_dir: std::path::PathBuf,
@@ -316,6 +318,29 @@ impl JsonStore {
             })?;
         *self.fingerprints_cache.borrow_mut() = Some(Arc::clone(&data));
         Ok(data.as_ref().clone())
+    }
+
+    /// Persist what the last scan saw (`tree_state.json`), read by the lazy
+    /// freshness check. Additive sidecar: an index written before it existed
+    /// simply lacks it, and the next full/incremental run creates it.
+    pub fn save_tree_state(&self, state: &TreeState) -> Result<()> {
+        let path = self.base_dir.join(TREE_STATE_FILE);
+        atomic_write(&path, &serde_json::to_string(state)?)?;
+        process_cache::TREE_STATE.clear();
+        Ok(())
+    }
+
+    /// Last saved tree state, shared process-wide (it is read on every MCP
+    /// call). `None` inside when absent or unreadable — both mean "rescan to
+    /// rebuild it".
+    pub fn tree_state(&self) -> Arc<Option<TreeState>> {
+        let path = self.base_dir.join(TREE_STATE_FILE);
+        process_cache::TREE_STATE
+            .get_or_load(&path, |s| Ok(Some(serde_json::from_str(s)?)))
+            .unwrap_or_else(|e| {
+                debug!("unreadable {}: {e:#}", path.display());
+                Arc::new(None)
+            })
     }
 
     /// Persist the current index schema version. Called at the end of every

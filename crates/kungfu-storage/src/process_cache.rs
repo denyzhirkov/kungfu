@@ -17,7 +17,7 @@
 //! concurrent requests for the same stale shard wait and then hit.
 
 use anyhow::{Context, Result};
-use kungfu_types::file::FileEntry;
+use kungfu_types::file::{FileEntry, TreeState};
 use kungfu_types::memory::MemoryEntry;
 use kungfu_types::relation::Relation;
 use kungfu_types::symbol::Symbol;
@@ -37,6 +37,7 @@ pub(crate) static SYMBOLS: Slot<Vec<Symbol>> = Slot::new("symbols");
 pub(crate) static RELATIONS: Slot<Vec<Relation>> = Slot::new("relations");
 pub(crate) static MEMORIES: Slot<Vec<MemoryEntry>> = Slot::new("memories");
 pub(crate) static FINGERPRINTS: Slot<HashMap<String, String>> = Slot::new("fingerprints");
+pub(crate) static TREE_STATE: Slot<Option<TreeState>> = Slot::new("tree_state");
 
 /// Cheap identity of a store file's on-disk state. `atomic_write` renames a
 /// fresh temp file over the target, so any rewrite changes the inode; mtime

@@ -19,6 +19,7 @@ mod edit;
 mod embeddings;
 mod explore;
 mod export;
+mod freshness;
 mod glossary;
 mod helpers;
 mod history;
@@ -78,84 +79,6 @@ impl KungfuService {
     /// the migration path is a full re-index.
     fn index_schema_current(&self) -> bool {
         self.store.load_schema_version() == Some(kungfu_storage::INDEX_SCHEMA_VERSION)
-    }
-
-    /// Check if index is stale and auto-reindex if needed.
-    /// Compares fingerprints.json mtime with project files.
-    pub fn ensure_fresh_index(&self) -> Result<bool> {
-        let fp_path = self.project.index_dir().join("fingerprints.json");
-        if !fp_path.exists() {
-            // No index at all — full index needed
-            info!("no index found, running full index");
-            self.index_full()?;
-            return Ok(true);
-        }
-
-        if !self.index_schema_current() {
-            info!("index schema is outdated, running full reindex");
-            self.index_full()?;
-            return Ok(true);
-        }
-
-        let fp_mtime = std::fs::metadata(&fp_path)?.modified()?;
-
-        // Sample a few key project files for staleness check (fast heuristic)
-        let root = &self.project.root;
-        let markers = [
-            "Cargo.toml",
-            "package.json",
-            "go.mod",
-            "pyproject.toml",
-            "Cargo.lock",
-            "package-lock.json",
-            "bun.lock",
-        ];
-        let mut stale = false;
-        for marker in &markers {
-            let p = root.join(marker);
-            if p.exists() {
-                if let Ok(meta) = std::fs::metadata(&p) {
-                    if let Ok(mtime) = meta.modified() {
-                        if mtime > fp_mtime {
-                            stale = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Also check src/ directory for any file newer than index
-        if !stale {
-            let src_dirs = [
-                "src", "crates", "packages", "lib", "app", "server", "client",
-            ];
-            'outer: for dir in &src_dirs {
-                let d = root.join(dir);
-                if d.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&d) {
-                        for entry in entries.take(20).flatten() {
-                            if let Ok(meta) = entry.metadata() {
-                                if let Ok(mtime) = meta.modified() {
-                                    if mtime > fp_mtime {
-                                        stale = true;
-                                        break 'outer;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if stale {
-            info!("index is stale, running incremental reindex");
-            self.index_incremental()?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 
     /// Version of the binary that last wrote the index (`store_meta.json`
