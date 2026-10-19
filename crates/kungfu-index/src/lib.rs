@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod delta;
 pub mod file_tags;
 pub mod indexer;
 pub mod scanner;

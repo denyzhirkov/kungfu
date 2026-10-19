@@ -7,11 +7,11 @@ use kungfu_types::file::{FileEntry, Language, TreeState};
 use kungfu_types::memory::{MemoryEntry, MemoryKind};
 use kungfu_types::relation::{CallGraphMeta, Relation, RelationKind};
 use kungfu_types::symbol::Symbol;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use crate::scanner;
+use crate::{delta, scanner};
 
 type ParsedFile = (
     FileEntry,
@@ -27,6 +27,45 @@ enum ReadOutcome {
     Full(Vec<u8>),
     /// Oversized or binary — record the file by name only, no content read/parse.
     Skipped { size: u64, reason: &'static str },
+}
+
+/// A file's state relative to the previous index, from [`Indexer::probe_all`].
+enum Probe {
+    Unchanged(String),
+    Changed,
+    Unreadable(std::io::Error),
+}
+
+/// Below this many files a thread spawn costs more than it saves.
+const PROBE_PARALLEL_MIN_FILES: usize = 1024;
+const PROBE_MAX_WORKERS: usize = 8;
+
+/// Decide whether to read a file's full content. Known binary/asset extensions
+/// and files over `max_file_bytes` are never read (cheap checks only); remaining
+/// files are read up to the cap and NUL-sniffed, dropping binary content. Either
+/// way they are still recorded by name.
+fn read_for_index(path: &Path, max_file_bytes: u64) -> std::io::Result<ReadOutcome> {
+    let size = std::fs::metadata(path)?.len();
+    if is_binary_extension(path) {
+        return Ok(ReadOutcome::Skipped {
+            size,
+            reason: "binary-ext",
+        });
+    }
+    if size > max_file_bytes {
+        return Ok(ReadOutcome::Skipped {
+            size,
+            reason: "oversized",
+        });
+    }
+    let content = std::fs::read(path)?;
+    if is_binary(&content) {
+        return Ok(ReadOutcome::Skipped {
+            size: content.len() as u64,
+            reason: "binary",
+        });
+    }
+    Ok(ReadOutcome::Full(content))
 }
 
 /// Heuristic: a NUL byte in the first 8 KiB means binary content.
@@ -112,6 +151,93 @@ fn is_binary_extension(path: &Path) -> bool {
         .is_some_and(|e| BINARY_EXTS.contains(&e.as_str()))
 }
 
+/// Parse output of the files a run (re)indexed.
+#[derive(Default)]
+struct Reparsed {
+    symbols: Vec<Symbol>,
+    imports: Vec<(String, Vec<RawImport>)>,
+    comments: Vec<(String, Vec<RawComment>)>,
+    calls: Vec<(String, Vec<RawCall>)>,
+}
+
+impl Reparsed {
+    fn absorb(
+        &mut self,
+        path: &str,
+        symbols: Vec<Symbol>,
+        imports: Vec<RawImport>,
+        comments: Vec<RawComment>,
+        calls: Vec<RawCall>,
+    ) {
+        self.symbols.extend(symbols);
+        if !imports.is_empty() {
+            self.imports.push((path.to_string(), imports));
+        }
+        if !comments.is_empty() {
+            self.comments.push((path.to_string(), comments));
+        }
+        if !calls.is_empty() {
+            self.calls.push((path.to_string(), calls));
+        }
+    }
+}
+
+/// Sizes of the index a targeted run saved.
+struct Merged {
+    symbols: usize,
+    relations: usize,
+    call_edges_filtered: usize,
+}
+
+/// What the call-graph frequency cutoff removed.
+struct Cut {
+    /// Dropped edges, persisted so a targeted run can recount exactly.
+    edges: Vec<Relation>,
+    /// Sorted, deduplicated names of the dropped callees.
+    names: Vec<String>,
+}
+
+/// One symbol per id, first wins — the set the store keeps. Byte-identical
+/// files share symbol ids; resolving calls over the duplicates would count
+/// one definition twice and diverge from what targeted runs see.
+fn dedup_symbols(symbols: &mut Vec<Symbol>) {
+    let mut seen = HashSet::with_capacity(symbols.len());
+    symbols.retain(|s| seen.insert(s.id.clone()));
+}
+
+/// A symbol shared by byte-identical files (one id, see [`dedup_symbols`])
+/// names the lexicographically first of those paths. Scan order is not
+/// stable, and a carried-over path may belong to a copy since deleted.
+fn canonical_symbol_paths(symbols: &mut [Symbol], files: &[FileEntry]) {
+    let mut first_path: HashMap<&str, &str> = HashMap::with_capacity(files.len());
+    for f in files {
+        first_path
+            .entry(f.id.as_str())
+            .and_modify(|path| {
+                if f.path.as_str() < *path {
+                    *path = f.path.as_str();
+                }
+            })
+            .or_insert(f.path.as_str());
+    }
+    for s in symbols.iter_mut() {
+        if let Some(path) = first_path.get(s.file_id.as_str()) {
+            if s.path != *path {
+                s.path = (*path).to_string();
+            }
+        }
+    }
+}
+
+fn dedup_relations(relations: &mut Vec<Relation>) {
+    relations.sort_by(|a, b| {
+        (&a.source_id, &a.target_id, &a.kind).cmp(&(&b.source_id, &b.target_id, &b.kind))
+    });
+    relations.dedup_by(|a, b| {
+        a.source_id == b.source_id && a.target_id == b.target_id && a.kind == b.kind
+    });
+}
+
 pub struct Indexer<'a> {
     root: std::path::PathBuf,
     config: KungfuConfig,
@@ -148,25 +274,13 @@ impl<'a> Indexer<'a> {
         let paths = tree.files;
         let mut files = Vec::new();
         let mut fingerprints = HashMap::new();
-        let mut all_symbols = Vec::new();
-        let mut all_imports: Vec<(String, Vec<RawImport>)> = Vec::new();
-        let mut all_comments: Vec<(String, Vec<RawComment>)> = Vec::new();
-        let mut all_calls: Vec<(String, Vec<RawCall>)> = Vec::new();
+        let mut parsed = Reparsed::default();
 
         for path in &paths {
             match self.index_file(path) {
                 Ok((entry, symbols, imports, comments, calls)) => {
                     fingerprints.insert(entry.path.clone(), entry.hash.clone());
-                    if !imports.is_empty() {
-                        all_imports.push((entry.path.clone(), imports));
-                    }
-                    if !comments.is_empty() {
-                        all_comments.push((entry.path.clone(), comments));
-                    }
-                    if !calls.is_empty() {
-                        all_calls.push((entry.path.clone(), calls));
-                    }
-                    all_symbols.extend(symbols);
+                    parsed.absorb(&entry.path, symbols, imports, comments, calls);
                     files.push(entry);
                 }
                 Err(e) => {
@@ -174,17 +288,21 @@ impl<'a> Indexer<'a> {
                 }
             }
         }
+        let mut all_symbols = parsed.symbols;
+        dedup_symbols(&mut all_symbols);
+        canonical_symbol_paths(&mut all_symbols, &files);
 
-        let mut relations = Self::build_relations(&files, &all_imports);
+        let mut relations = Self::build_import_relations(&files, &parsed.imports);
+        relations.extend(Self::build_layout_relations(&files));
         relations.extend(Self::build_call_relations(
             &self.config.call_graph,
             &files,
             &all_symbols,
-            &all_calls,
+            &parsed.calls,
         ));
-        let (call_edges_filtered, dropped_callees) =
+        let cut =
             Self::filter_call_graph_noise(&self.config.call_graph, &mut relations, &all_symbols);
-        let mut memories = Self::build_memories(&all_comments);
+        let mut memories = Self::build_memories(&parsed.comments);
         let doc_memories = self.scan_docs();
         memories.extend(doc_memories);
 
@@ -194,16 +312,18 @@ impl<'a> Indexer<'a> {
             changed_files: 0,
             removed_files: 0,
             symbols_extracted: all_symbols.len(),
-            call_edges_filtered,
+            call_edges_filtered: cut.edges.len(),
         };
 
         self.apply_annotations(&mut files);
         self.store.save_files(&files)?;
-        self.store.save_symbols(&all_symbols)?;
+        self.store.save_symbols(all_symbols)?;
         self.store.save_relations(&relations)?;
-        self.persist_call_graph_meta(dropped_callees, false)?;
+        self.store.save_dropped_calls(&cut.edges)?;
+        self.persist_call_graph_meta(cut.names, false)?;
         self.store.save_fingerprints(&fingerprints)?;
-        self.store.save_memories(&memories)?;
+        let memory_count = memories.len();
+        self.store.save_memories(memories)?;
         self.store.save_schema_version()?;
         self.save_scanned_tree_state(scan_started, &tree.dirs)?;
 
@@ -212,23 +332,16 @@ impl<'a> Indexer<'a> {
             stats.total_files,
             stats.symbols_extracted,
             relations.len(),
-            memories.len()
+            memory_count
         );
         Ok(stats)
     }
 
     pub fn index_incremental(&mut self) -> Result<IndexStats> {
         let old_fingerprints = self.store.load_fingerprints()?;
-        let old_files = self.store.load_files()?;
-        let old_symbols = self.store.load_symbols()?;
-        let old_relations = self.store.load_relations()?;
-        // Files re-parsed this run; their old relations/memories are dropped and rebuilt.
-        // Unchanged files keep theirs — otherwise a no-op reindex would wipe the whole
-        // graph and all comment/doc memories, since both are only collected for
-        // re-parsed files.
-        let mut changed_file_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut changed_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let old_files = self.store.files_arc()?;
+        let old_by_path: HashMap<&str, &FileEntry> =
+            old_files.iter().map(|f| (f.path.as_str(), f)).collect();
 
         let scan_started = Utc::now();
         let tree = scanner::scan_tree(&self.root, &self.config)?;
@@ -236,10 +349,8 @@ impl<'a> Indexer<'a> {
 
         let mut new_fingerprints = HashMap::new();
         let mut new_files = Vec::new();
-        let mut new_symbols = Vec::new();
-        let mut all_imports: Vec<(String, Vec<RawImport>)> = Vec::new();
-        let mut all_comments: Vec<(String, Vec<RawComment>)> = Vec::new();
-        let mut all_calls: Vec<(String, Vec<RawCall>)> = Vec::new();
+        let mut dirty: HashSet<String> = HashSet::new();
+        let mut reparsed = Reparsed::default();
 
         let mut stats = IndexStats {
             total_files: 0,
@@ -251,67 +362,51 @@ impl<'a> Indexer<'a> {
         };
 
         // Build set of current paths
-        let current_paths: std::collections::HashSet<String> = paths
+        let current_paths: HashSet<String> = paths
             .iter()
             .filter_map(|p| p.strip_prefix(&self.root).ok())
             .map(|p| p.to_string_lossy().to_string())
             .collect();
 
-        for path in &paths {
-            let rel_path = path
-                .strip_prefix(&self.root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
-
-            let read = match self.read_for_index(path) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("cannot read {}: {}", path.display(), e);
-                    continue;
-                }
-            };
-            let hash = match &read {
-                ReadOutcome::Full(content) => blake3::hash(content).to_hex().to_string(),
-                ReadOutcome::Skipped { size, .. } => format!("skip:{size}"),
-            };
-
-            if let Some(old_hash) = old_fingerprints.get(&rel_path) {
-                if *old_hash == hash {
-                    // Unchanged — keep old data
-                    if let Some(old_file) = old_files.iter().find(|f| f.path == rel_path) {
-                        new_files.push(old_file.clone());
-                        let file_symbols: Vec<_> = old_symbols
-                            .iter()
-                            .filter(|s| s.file_id == old_file.id)
-                            .cloned()
-                            .collect();
-                        new_symbols.extend(file_symbols);
+        let probes = self.probe_all(&paths, &old_fingerprints);
+        for (path, (rel_path, probe)) in paths.iter().zip(probes) {
+            match probe {
+                Probe::Unchanged(hash) => {
+                    if let Some(old_file) = old_by_path.get(rel_path.as_str()) {
+                        new_files.push((*old_file).clone());
                     }
                     new_fingerprints.insert(rel_path, hash);
                     continue;
                 }
+                Probe::Changed => {}
+                Probe::Unreadable(e) => {
+                    warn!("cannot read {}: {}", path.display(), e);
+                    dirty.insert(rel_path);
+                    continue;
+                }
+            }
+            // Read again: the probe drops content so a mass change (a branch
+            // switch) does not hold the whole tree in memory.
+            let read = match self.read_for_index(path) {
+                Ok(read) => read,
+                Err(e) => {
+                    warn!("cannot read {}: {}", path.display(), e);
+                    dirty.insert(rel_path);
+                    continue;
+                }
+            };
+            if old_fingerprints.contains_key(&rel_path) {
                 stats.changed_files += 1;
             } else {
                 stats.new_files += 1;
             }
+            dirty.insert(rel_path);
 
             match read {
                 ReadOutcome::Full(content) => match self.index_file_with_content(path, content) {
                     Ok((entry, symbols, imports, comments, calls)) => {
                         new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
-                        if !imports.is_empty() {
-                            all_imports.push((entry.path.clone(), imports));
-                        }
-                        if !comments.is_empty() {
-                            all_comments.push((entry.path.clone(), comments));
-                        }
-                        if !calls.is_empty() {
-                            all_calls.push((entry.path.clone(), calls));
-                        }
-                        changed_file_ids.insert(entry.id.clone());
-                        changed_paths.insert(entry.path.clone());
-                        new_symbols.extend(symbols);
+                        reparsed.absorb(&entry.path, symbols, imports, comments, calls);
                         new_files.push(entry);
                     }
                     Err(e) => {
@@ -322,8 +417,6 @@ impl<'a> Indexer<'a> {
                     debug!("indexing {} by name only ({})", path.display(), reason);
                     let entry = self.name_only_entry(path, size);
                     new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
-                    changed_file_ids.insert(entry.id.clone());
-                    changed_paths.insert(entry.path.clone());
                     new_files.push(entry);
                 }
             }
@@ -335,62 +428,25 @@ impl<'a> Indexer<'a> {
                 stats.removed_files += 1;
             }
         }
-
-        stats.total_files = new_files.len();
-        stats.symbols_extracted = new_symbols.len();
-
-        // Merge: keep relations whose source is an unchanged file, rebuild the rest.
-        // Source ids are file-level (imports/test/config) or symbol-level (`s:{file_id}:…`, calls).
-        let changed_sym_prefixes: Vec<String> = changed_file_ids
-            .iter()
-            .map(|fid| format!("s:{fid}:"))
-            .collect();
-        let mut relations: Vec<Relation> = old_relations
-            .into_iter()
-            .filter(|r| {
-                !changed_file_ids.contains(r.source_id.as_str())
-                    && !changed_sym_prefixes
-                        .iter()
-                        .any(|p| r.source_id.starts_with(p))
-            })
-            .collect();
-        let mut fresh = Self::build_relations(&new_files, &all_imports);
-        fresh.extend(Self::build_call_relations(
-            &self.config.call_graph,
-            &new_files,
-            &new_symbols,
-            &all_calls,
-        ));
-        relations.extend(fresh);
-        // Post-merge so the noise rules also govern edges kept from unchanged files
-        // (a config change takes effect without waiting for a full reindex).
-        let (edges_filtered, dropped_callees) =
-            Self::filter_call_graph_noise(&self.config.call_graph, &mut relations, &new_symbols);
-        stats.call_edges_filtered = edges_filtered;
-
-        // Merge memories the same way: keep entries from unchanged still-existing files,
-        // rebuild from re-parsed ones. Changed doc files are re-parsed explicitly — doc
-        // memories come from scan_docs, which only runs on full index.
-        let old_memories = self.store.load_memories().unwrap_or_default();
-        let mut memories: Vec<MemoryEntry> = old_memories
-            .into_iter()
-            .filter(|m| !changed_paths.contains(m.path.as_str()) && current_paths.contains(&m.path))
-            .collect();
-        memories.extend(Self::build_memories(&all_comments));
-        for path in &changed_paths {
-            if is_doc_memory_source(path) {
-                self.parse_md_file(&self.root.join(path), &mut memories);
+        for f in old_files.iter() {
+            if !current_paths.contains(&f.path) {
+                dirty.insert(f.path.clone());
             }
         }
 
-        self.apply_annotations(&mut new_files);
-        self.store.save_files(&new_files)?;
-        self.store.save_symbols(&new_symbols)?;
-        self.store.save_relations(&relations)?;
-        self.persist_call_graph_meta(dropped_callees, true)?;
-        self.store.save_fingerprints(&new_fingerprints)?;
-        self.store.save_memories(&memories)?;
-        self.store.save_schema_version()?;
+        stats.total_files = new_files.len();
+        self.reparse_orphaned_importers(
+            &mut new_files,
+            &mut dirty,
+            &mut reparsed,
+            &mut new_fingerprints,
+        )?;
+        let merged =
+            self.save_targeted(&mut new_files, &dirty, reparsed, &new_fingerprints, |m| {
+                !dirty.contains(&m.path) && current_paths.contains(&m.path)
+            })?;
+        stats.symbols_extracted = merged.symbols;
+        stats.call_edges_filtered = merged.call_edges_filtered;
         self.save_scanned_tree_state(scan_started, &tree.dirs)?;
 
         info!(
@@ -400,7 +456,7 @@ impl<'a> Indexer<'a> {
             stats.changed_files,
             stats.removed_files,
             stats.symbols_extracted,
-            relations.len()
+            merged.relations
         );
         Ok(stats)
     }
@@ -409,17 +465,17 @@ impl<'a> Indexer<'a> {
     pub fn index_only(&mut self, changed_paths: &[String]) -> Result<IndexStats> {
         let started = Utc::now();
         let old_fingerprints = self.store.load_fingerprints()?;
-        let old_files = self.store.load_files()?;
-        let old_symbols = self.store.load_symbols()?;
-        let old_relations = self.store.load_relations()?;
-
-        let changed_set: std::collections::HashSet<&str> =
-            changed_paths.iter().map(|s| s.as_str()).collect();
+        let mut dirty: HashSet<String> = changed_paths.iter().cloned().collect();
 
         let mut new_fingerprints = old_fingerprints.clone();
-        let mut new_files: Vec<FileEntry> = Vec::new();
-        let mut new_symbols: Vec<Symbol> = Vec::new();
-        let mut all_imports: Vec<(String, Vec<RawImport>)> = Vec::new();
+        let mut new_files: Vec<FileEntry> = self
+            .store
+            .files_arc()?
+            .iter()
+            .filter(|f| !dirty.contains(&f.path))
+            .cloned()
+            .collect();
+        let mut reparsed = Reparsed::default();
 
         let mut stats = IndexStats {
             total_files: 0,
@@ -429,22 +485,6 @@ impl<'a> Indexer<'a> {
             symbols_extracted: 0,
             call_edges_filtered: 0,
         };
-
-        // Keep unchanged files
-        for f in &old_files {
-            if !changed_set.contains(f.path.as_str()) {
-                new_files.push(f.clone());
-                let file_syms: Vec<_> = old_symbols
-                    .iter()
-                    .filter(|s| s.file_id == f.id)
-                    .cloned()
-                    .collect();
-                new_symbols.extend(file_syms);
-            }
-        }
-
-        let mut all_comments: Vec<(String, Vec<RawComment>)> = Vec::new();
-        let mut all_calls: Vec<(String, Vec<RawCall>)> = Vec::new();
 
         // Re-index changed files
         for rel_path in changed_paths {
@@ -465,16 +505,7 @@ impl<'a> Indexer<'a> {
                 Ok((entry, symbols, imports, comments, calls)) => {
                     new_fingerprints.insert(entry.path.clone(), entry.hash.clone());
                     stats.symbols_extracted += symbols.len();
-                    if !imports.is_empty() {
-                        all_imports.push((entry.path.clone(), imports));
-                    }
-                    if !comments.is_empty() {
-                        all_comments.push((entry.path.clone(), comments));
-                    }
-                    if !calls.is_empty() {
-                        all_calls.push((entry.path.clone(), calls));
-                    }
-                    new_symbols.extend(symbols);
+                    reparsed.absorb(&entry.path, symbols, imports, comments, calls);
                     new_files.push(entry);
                 }
                 Err(e) => {
@@ -484,61 +515,17 @@ impl<'a> Indexer<'a> {
         }
 
         stats.total_files = new_files.len();
-
-        // Merge: keep old relations for unchanged files, add new ones for changed files.
-        // Imports/test/config relations are file-level (source_id = file id); Calls are
-        // symbol-level (source_id = `s:{file_id}:…`), so drop both shapes for changed files.
-        let changed_file_ids: std::collections::HashSet<&str> = new_files
-            .iter()
-            .filter(|f| changed_set.contains(f.path.as_str()))
-            .map(|f| f.id.as_str())
-            .collect();
-        let changed_sym_prefixes: Vec<String> = changed_file_ids
-            .iter()
-            .map(|fid| format!("s:{fid}:"))
-            .collect();
-        let mut relations: Vec<Relation> = old_relations
-            .into_iter()
-            .filter(|r| {
-                !changed_file_ids.contains(r.source_id.as_str())
-                    && !changed_sym_prefixes
-                        .iter()
-                        .any(|p| r.source_id.starts_with(p))
-            })
-            .collect();
-        let mut new_relations = Self::build_relations(&new_files, &all_imports);
-        new_relations.extend(Self::build_call_relations(
-            &self.config.call_graph,
-            &new_files,
-            &new_symbols,
-            &all_calls,
-        ));
-        relations.extend(new_relations);
-        let (edges_filtered, dropped_callees) =
-            Self::filter_call_graph_noise(&self.config.call_graph, &mut relations, &new_symbols);
-        stats.call_edges_filtered = edges_filtered;
-
-        // Merge memories: keep old for unchanged, add new for changed
-        let old_memories = self.store.load_memories().unwrap_or_default();
-        let mut memories: Vec<MemoryEntry> = old_memories
-            .into_iter()
-            .filter(|m| !changed_set.contains(m.path.as_str()))
-            .collect();
-        memories.extend(Self::build_memories(&all_comments));
-        for path in changed_paths {
-            if is_doc_memory_source(path) && self.root.join(path).exists() {
-                self.parse_md_file(&self.root.join(path), &mut memories);
-            }
-        }
-
-        self.apply_annotations(&mut new_files);
-        self.store.save_files(&new_files)?;
-        self.store.save_symbols(&new_symbols)?;
-        self.store.save_relations(&relations)?;
-        self.persist_call_graph_meta(dropped_callees, true)?;
-        self.store.save_fingerprints(&new_fingerprints)?;
-        self.store.save_memories(&memories)?;
-        self.store.save_schema_version()?;
+        self.reparse_orphaned_importers(
+            &mut new_files,
+            &mut dirty,
+            &mut reparsed,
+            &mut new_fingerprints,
+        )?;
+        let merged =
+            self.save_targeted(&mut new_files, &dirty, reparsed, &new_fingerprints, |m| {
+                !dirty.contains(&m.path)
+            })?;
+        stats.call_edges_filtered = merged.call_edges_filtered;
         self.refresh_tree_state(changed_paths, &new_files, started)?;
 
         info!(
@@ -546,6 +533,131 @@ impl<'a> Indexer<'a> {
             stats.changed_files, stats.new_files, stats.removed_files
         );
         Ok(stats)
+    }
+
+    /// Re-parse the untouched importers of files whose old id lost its single
+    /// successor (see [`delta::orphaned_importers`]), so their imports resolve
+    /// as a full index would. They join `dirty` and `reparsed`.
+    fn reparse_orphaned_importers(
+        &mut self,
+        new_files: &mut [FileEntry],
+        dirty: &mut HashSet<String>,
+        reparsed: &mut Reparsed,
+        fingerprints: &mut HashMap<String, String>,
+    ) -> Result<()> {
+        let old_files = self.store.files_arc()?;
+        let old_relations = self.store.relations_arc()?;
+        let paths = delta::orphaned_importers(&old_files, &old_relations, new_files, dirty);
+        for path in paths {
+            let abs = self.root.join(&path);
+            let (entry, symbols, imports, comments, calls) = match self.index_file(&abs) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    warn!("failed to index {}: {}", abs.display(), e);
+                    continue;
+                }
+            };
+            let Some(slot) = new_files.iter_mut().find(|f| f.path == path) else {
+                continue;
+            };
+            fingerprints.insert(entry.path.clone(), entry.hash.clone());
+            reparsed.absorb(&entry.path, symbols, imports, comments, calls);
+            *slot = entry;
+            dirty.insert(path);
+        }
+        Ok(())
+    }
+
+    /// Merge a targeted reindex into the stored index and save it. Untouched
+    /// files keep their symbols, edges and memories; dirty paths are rebuilt
+    /// from `reparsed`. See [`delta`] for how carried edges follow the renamed
+    /// (content-hashed) ids of dirty files.
+    fn save_targeted(
+        &self,
+        new_files: &mut [FileEntry],
+        dirty: &HashSet<String>,
+        reparsed: Reparsed,
+        fingerprints: &HashMap<String, String>,
+        keep_memory: impl Fn(&MemoryEntry) -> bool,
+    ) -> Result<Merged> {
+        let cfg = &self.config.call_graph;
+        let old_files = self.store.files_arc()?;
+        let old_symbols = self.store.symbols_arc()?;
+        let old_relations = self.store.relations_arc()?;
+        let old_dropped = self.store.load_dropped_calls();
+
+        let mut symbols =
+            delta::kept_symbols(&old_symbols, &delta::kept_file_ids(new_files, dirty));
+        symbols.extend(reparsed.symbols);
+        dedup_symbols(&mut symbols);
+        canonical_symbol_paths(&mut symbols, new_files);
+
+        let transition = delta::Transition {
+            old_files: &old_files,
+            old_symbols: &old_symbols,
+            new_files,
+            new_symbols: &symbols,
+            dirty,
+        };
+        let mut relations = delta::carry_relations(
+            &transition,
+            old_relations.iter().chain(old_dropped.iter().flatten()),
+        );
+        relations.extend(Self::build_import_relations(new_files, &reparsed.imports));
+        relations.extend(Self::build_layout_relations(new_files));
+        relations.extend(Self::build_call_relations(
+            cfg,
+            new_files,
+            &symbols,
+            &reparsed.calls,
+        ));
+        dedup_relations(&mut relations);
+        // Post-merge so the noise rules also govern edges kept from untouched
+        // files (a config change takes effect without waiting for a full reindex).
+        let cut = Self::filter_call_graph_noise(cfg, &mut relations, &symbols);
+
+        let old_memories = self.store.memories_arc().unwrap_or_default();
+        let (kept_memories, replaced): (Vec<&MemoryEntry>, Vec<&MemoryEntry>) =
+            old_memories.iter().partition(|m| keep_memory(m));
+        // Doc memories come from scan_docs, which only runs on a full index.
+        let mut fresh_memories = Self::build_memories(&reparsed.comments);
+        for path in dirty {
+            let abs = self.root.join(path);
+            if is_doc_memory_source(path) && abs.is_file() {
+                self.parse_md_file(&abs, &mut fresh_memories);
+            }
+        }
+        // Skip rewriting the memories shard when the dirty files' memories came
+        // out identical. Attached doc comments carry the content-hashed symbol
+        // id, so this holds mostly for files without such comments.
+        let memories_unchanged = replaced.len() == fresh_memories.len()
+            && serde_json::to_string(&replaced)? == serde_json::to_string(&fresh_memories)?;
+
+        self.apply_annotations(new_files);
+        self.store.save_files(new_files)?;
+        let symbol_count = symbols.len();
+        self.store.save_symbols(symbols)?;
+        self.store.save_relations(&relations)?;
+        // Without the dropped-calls sidecar (index from an older binary) the
+        // earlier cutoff victims are unknown: keep their names and leave the
+        // sidecar to the next full index, which can write a complete one.
+        if old_dropped.is_some() {
+            self.store.save_dropped_calls(&cut.edges)?;
+        }
+        self.persist_call_graph_meta(cut.names, old_dropped.is_none())?;
+        self.store.save_fingerprints(fingerprints)?;
+        if !memories_unchanged {
+            let mut memories: Vec<MemoryEntry> = kept_memories.into_iter().cloned().collect();
+            memories.extend(fresh_memories);
+            self.store.save_memories(memories)?;
+        }
+        self.store.save_schema_version()?;
+
+        Ok(Merged {
+            symbols: symbol_count,
+            relations: relations.len(),
+            call_edges_filtered: cut.edges.len(),
+        })
     }
 
     fn rel_path(&self, path: &Path) -> String {
@@ -649,32 +761,68 @@ impl<'a> Indexer<'a> {
         }
     }
 
-    /// Decide whether to read a file's full content. Known binary/asset extensions
-    /// and files over `max_file_bytes` are never read (cheap checks only); remaining
-    /// files are read up to the cap and NUL-sniffed, dropping binary content. Either
-    /// way they are still recorded by name.
     fn read_for_index(&self, path: &Path) -> std::io::Result<ReadOutcome> {
-        let size = std::fs::metadata(path)?.len();
-        if is_binary_extension(path) {
-            return Ok(ReadOutcome::Skipped {
-                size,
-                reason: "binary-ext",
-            });
+        read_for_index(path, self.config.index.max_file_bytes)
+    }
+
+    /// Read and fingerprint every path against the previous fingerprints, in
+    /// scan order. Reading and hashing the whole tree dominates an incremental
+    /// run, so it is spread over threads. No content is kept; the sequential
+    /// parse (one parser) re-reads the changed files.
+    fn probe_all(
+        &self,
+        paths: &[std::path::PathBuf],
+        old_fingerprints: &HashMap<String, String>,
+    ) -> Vec<(String, Probe)> {
+        let max_bytes = self.config.index.max_file_bytes;
+        let root = self.root.as_path();
+        let probe_chunk = |chunk: &[std::path::PathBuf]| -> Vec<(String, Probe)> {
+            chunk
+                .iter()
+                .map(|path| {
+                    let rel_path = path
+                        .strip_prefix(root)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .to_string();
+                    let probe = match read_for_index(path, max_bytes) {
+                        Err(e) => Probe::Unreadable(e),
+                        Ok(read) => {
+                            let hash = match &read {
+                                ReadOutcome::Full(content) => {
+                                    blake3::hash(content).to_hex().to_string()
+                                }
+                                ReadOutcome::Skipped { size, .. } => format!("skip:{size}"),
+                            };
+                            if old_fingerprints.get(&rel_path) == Some(&hash) {
+                                Probe::Unchanged(hash)
+                            } else {
+                                Probe::Changed
+                            }
+                        }
+                    };
+                    (rel_path, probe)
+                })
+                .collect()
+        };
+
+        let workers = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(PROBE_MAX_WORKERS);
+        if workers < 2 || paths.len() < PROBE_PARALLEL_MIN_FILES {
+            return probe_chunk(paths);
         }
-        if size > self.config.index.max_file_bytes {
-            return Ok(ReadOutcome::Skipped {
-                size,
-                reason: "oversized",
-            });
-        }
-        let content = std::fs::read(path)?;
-        if is_binary(&content) {
-            return Ok(ReadOutcome::Skipped {
-                size: content.len() as u64,
-                reason: "binary",
-            });
-        }
-        Ok(ReadOutcome::Full(content))
+        let probe_chunk = &probe_chunk;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = paths
+                .chunks(paths.len().div_ceil(workers))
+                .map(|chunk| scope.spawn(move || probe_chunk(chunk)))
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                .collect()
+        })
     }
 
     /// Merge agent annotations (`.kungfu/annotations.json`) into the file
@@ -831,8 +979,8 @@ impl<'a> Indexer<'a> {
         Ok((entry, symbols, imports, comments, calls))
     }
 
-    /// Resolve collected imports into Relations.
-    fn build_relations(
+    /// Resolve the collected imports of `file_imports` against all `files`.
+    fn build_import_relations(
         files: &[FileEntry],
         file_imports: &[(String, Vec<RawImport>)],
     ) -> Vec<Relation> {
@@ -938,18 +1086,17 @@ impl<'a> Indexer<'a> {
             }
         }
 
-        // Add test/config relations
+        dedup_relations(&mut relations);
+        relations
+    }
+
+    /// `TestFor` and `ConfigFor` relations. They derive from the file list
+    /// alone, so every run rebuilds them in full.
+    fn build_layout_relations(files: &[FileEntry]) -> Vec<Relation> {
+        let mut relations = Vec::new();
         Self::build_test_relations(files, &mut relations);
         Self::build_config_relations(files, &mut relations);
-
-        // Deduplicate
-        relations.sort_by(|a, b| {
-            (&a.source_id, &a.target_id, &a.kind).cmp(&(&b.source_id, &b.target_id, &b.kind))
-        });
-        relations.dedup_by(|a, b| {
-            a.source_id == b.source_id && a.target_id == b.target_id && a.kind == b.kind
-        });
-
+        dedup_relations(&mut relations);
         relations
     }
 
@@ -1055,7 +1202,7 @@ impl<'a> Indexer<'a> {
     /// - `max_caller_files = N` → a callee invoked from more than N distinct
     ///   files is utility-noise: drop its incoming edges.
     ///
-    /// Returns how many edges the frequency cutoff dropped (surfaced in
+    /// Returns the edges the frequency cutoff dropped (their count is
     /// `IndexStats::call_edges_filtered`) plus the sorted, deduplicated names
     /// of the dropped callees — persisted via [`Self::persist_call_graph_meta`]
     /// so an empty callers result can honestly say the cutoff fired.
@@ -1063,10 +1210,14 @@ impl<'a> Indexer<'a> {
         cfg: &kungfu_config::CallGraphConfig,
         relations: &mut Vec<Relation>,
         symbols: &[Symbol],
-    ) -> (usize, Vec<String>) {
+    ) -> Cut {
+        let none = || Cut {
+            edges: Vec::new(),
+            names: Vec::new(),
+        };
         if !cfg.enabled {
             relations.retain(|r| r.kind != RelationKind::Calls);
-            return (0, Vec::new());
+            return none();
         }
 
         let file_of: HashMap<&str, &str> = symbols
@@ -1097,7 +1248,7 @@ impl<'a> Indexer<'a> {
         }
 
         if cfg.max_caller_files == 0 {
-            return (0, Vec::new());
+            return none();
         }
 
         let mut caller_files: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
@@ -1118,7 +1269,7 @@ impl<'a> Indexer<'a> {
             .map(|(id, _)| (*id).to_string())
             .collect();
         if noisy.is_empty() {
-            return (0, Vec::new());
+            return none();
         }
 
         let name_of: HashMap<&str, &str> = symbols
@@ -1130,17 +1281,20 @@ impl<'a> Indexer<'a> {
             .filter_map(|id| name_of.get(id.as_str()).map(|n| (*n).to_string()))
             .collect();
 
-        let before = relations.len();
-        relations
-            .retain(|r| r.kind != RelationKind::Calls || !noisy.contains(r.target_id.as_str()));
-        let dropped = before - relations.len();
+        let (kept, dropped): (Vec<Relation>, Vec<Relation>) = std::mem::take(relations)
+            .into_iter()
+            .partition(|r| r.kind != RelationKind::Calls || !noisy.contains(r.target_id.as_str()));
+        *relations = kept;
         debug!(
             "call graph: dropped {} edges to {} utility-noise callees (called from > {} files)",
-            dropped,
+            dropped.len(),
             noisy.len(),
             cfg.max_caller_files
         );
-        (dropped, dropped_names.into_iter().collect())
+        Cut {
+            edges: dropped,
+            names: dropped_names.into_iter().collect(),
+        }
     }
 
     /// Persist the names of frequency-dropped callees (`call_graph_meta.json`).
@@ -1271,13 +1425,36 @@ impl<'a> Indexer<'a> {
     /// Detect test files and create TestFor relations to their source files.
     /// Only links when test and source are in nearby directories to avoid explosion.
     fn build_test_relations(files: &[FileEntry], relations: &mut Vec<Relation>) {
+        // Directory and grandparent directory of a path, computed once per
+        // file: popular stems (`main`, `mod`) pair hundreds of tests with
+        // hundreds of sources.
+        type Dirs = (String, Option<String>);
+        fn dirs(path: &str) -> Dirs {
+            let dir = Path::new(path)
+                .parent()
+                .unwrap_or(Path::new(""))
+                .to_string_lossy()
+                .to_string();
+            let up = Path::new(&dir)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string());
+            (dir, up)
+        }
+        // `child` lies strictly below `dir`.
+        fn is_under(child: &str, dir: &str) -> bool {
+            child.len() > dir.len() && child.starts_with(dir) && child.as_bytes()[dir.len()] == b'/'
+        }
+
         // Build stem→file lookup (only non-test source files)
-        let mut source_by_stem: HashMap<String, Vec<&FileEntry>> = HashMap::new();
+        let mut source_by_stem: HashMap<String, Vec<(&FileEntry, Dirs)>> = HashMap::new();
         for f in files {
             if !is_test_file(&f.path) {
                 let stem = extract_stem(&f.path);
                 if !stem.is_empty() {
-                    source_by_stem.entry(stem).or_default().push(f);
+                    source_by_stem
+                        .entry(stem)
+                        .or_default()
+                        .push((f, dirs(&f.path)));
                 }
             }
         }
@@ -1292,32 +1469,24 @@ impl<'a> Indexer<'a> {
             }
 
             if let Some(sources) = source_by_stem.get(&stem) {
-                let test_dir = Path::new(&f.path)
-                    .parent()
-                    .unwrap_or(Path::new(""))
-                    .to_string_lossy();
+                let (test_dir, test_up) = dirs(&f.path);
 
                 // Score candidates by directory proximity, only keep close ones
                 let mut scored: Vec<(&FileEntry, u8)> = Vec::new();
-                for source in sources {
-                    let src_dir = Path::new(&source.path)
-                        .parent()
-                        .unwrap_or(Path::new(""))
-                        .to_string_lossy();
-
+                for (source, (src_dir, src_up)) in sources {
                     // Same directory (e.g. foo.rs + foo_test.rs)
-                    if src_dir == test_dir {
+                    if *src_dir == test_dir {
                         scored.push((source, 0));
                     // Sibling: tests/test_foo.py ↔ src/foo.py (share parent)
-                    } else if dirs_share_parent(&test_dir, &src_dir) {
+                    } else if matches!((&test_up, src_up), (Some(a), Some(b)) if !a.is_empty() && a == b)
+                    {
                         scored.push((source, 1));
                     // Test dir is child of source dir (e.g. src/foo.rs + src/__tests__/foo.test.ts)
-                    } else if test_dir.starts_with(&format!("{}/", src_dir)) {
+                    } else if is_under(&test_dir, src_dir) {
                         scored.push((source, 2));
                     // Source dir is child of test dir parent
-                    } else if let Some(test_parent) = Path::new(test_dir.as_ref()).parent() {
-                        let tp = test_parent.to_string_lossy();
-                        if !tp.is_empty() && src_dir.starts_with(&format!("{}/", tp)) {
+                    } else if let Some(tp) = &test_up {
+                        if !tp.is_empty() && is_under(src_dir, tp) {
                             scored.push((source, 3));
                         }
                     }
@@ -1357,40 +1526,44 @@ impl<'a> Indexer<'a> {
             return;
         }
 
-        for config in &config_files {
-            let config_dir = Path::new(&config.path)
+        let parent_dir = |path: &str| {
+            Path::new(path)
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
+                .unwrap_or_default()
+        };
+        // Code files by directory, so each config looks at its own dir only.
+        let mut code_by_dir: HashMap<String, Vec<&FileEntry>> = HashMap::new();
+        for f in files {
+            if is_config_file(&f.path) {
+                continue;
+            }
+            let ext = Path::new(&f.path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            if Language::from_extension(ext).is_code() {
+                code_by_dir.entry(parent_dir(&f.path)).or_default().push(f);
+            }
+        }
+
+        for config in &config_files {
+            let config_dir = parent_dir(&config.path);
 
             // Skip root-level configs — they relate to everything, which means nothing
             if config_dir.is_empty() {
                 continue;
             }
 
-            for f in files {
-                if f.id == config.id || is_config_file(&f.path) {
-                    continue;
-                }
-                let f_dir = Path::new(&f.path)
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                // Same directory only — no recursive descent
-                if f_dir == config_dir {
-                    let ext = Path::new(&f.path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("");
-                    if Language::from_extension(ext).is_code() {
-                        relations.push(Relation {
-                            source_id: config.id.clone(),
-                            target_id: f.id.clone(),
-                            kind: RelationKind::ConfigFor,
-                            weight: 0.5,
-                        });
-                    }
+            // Same directory only — no recursive descent
+            for f in code_by_dir.get(&config_dir).into_iter().flatten() {
+                if f.id != config.id {
+                    relations.push(Relation {
+                        source_id: config.id.clone(),
+                        target_id: f.id.clone(),
+                        kind: RelationKind::ConfigFor,
+                        weight: 0.5,
+                    });
                 }
             }
         }
@@ -1753,16 +1926,6 @@ fn extract_test_base_stem(path: &str) -> String {
         return stem;
     }
     String::new()
-}
-
-/// Check if two directory paths share the same parent (are siblings).
-fn dirs_share_parent(a: &str, b: &str) -> bool {
-    let pa = Path::new(a).parent();
-    let pb = Path::new(b).parent();
-    match (pa, pb) {
-        (Some(pa), Some(pb)) => !pa.as_os_str().is_empty() && pa == pb,
-        _ => false,
-    }
 }
 
 /// Extract keyword anchors from comment text for matching.
@@ -2243,6 +2406,46 @@ mod tests {
             "call_graph.enabled = false must strip Calls relations on any indexing run"
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn probe_all_pairs_each_path_with_its_own_content_across_threads() {
+        // Above PROBE_PARALLEL_MIN_FILES, so the threaded branch runs (given
+        // more than one core); results must stay in path order.
+        let root = temp_indexer_root();
+        let n = PROBE_PARALLEL_MIN_FILES + 100;
+        let mut paths = Vec::with_capacity(n);
+        let mut old = HashMap::new();
+        for i in 0..n {
+            let path = root.join(format!("f{i:05}.txt"));
+            let content = format!("file number {i}\n");
+            std::fs::write(&path, &content).unwrap();
+            // Even files keep their fingerprint, odd ones changed.
+            let hash = if i % 2 == 0 {
+                blake3::hash(content.as_bytes()).to_hex().to_string()
+            } else {
+                "stale".to_string()
+            };
+            old.insert(format!("f{i:05}.txt"), hash);
+            paths.push(path);
+        }
+        let store = JsonStore::new(&root.join(".kungfu").join("index"));
+        let indexer = Indexer::new(&root, KungfuConfig::default(), &store);
+
+        let probes = indexer.probe_all(&paths, &old);
+        assert_eq!(probes.len(), n);
+        for (i, (rel, probe)) in probes.iter().enumerate() {
+            assert_eq!(rel, &format!("f{i:05}.txt"));
+            match probe {
+                Probe::Unchanged(hash) => {
+                    assert_eq!(i % 2, 0, "{rel} reported unchanged");
+                    assert_eq!(hash, &old[rel]);
+                }
+                Probe::Changed => assert_eq!(i % 2, 1, "{rel} reported changed"),
+                Probe::Unreadable(e) => panic!("{rel}: {e}"),
+            }
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 

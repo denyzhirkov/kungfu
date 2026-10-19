@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 mod annotations;
 mod process_cache;
@@ -49,19 +49,23 @@ pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Clone `items` keeping the first entry per key, preserving order. Enforces
-/// per-shard identity invariants on save (one symbol per id, one file per path)
-/// — the last line of defence against index blow-ups from duplicate symbol
-/// accumulation. Runs once per save, so owned keys over a borrow-checker dance.
-fn dedup_by<T: Clone>(items: &[T], key: impl Fn(&T) -> String) -> Vec<T> {
-    let mut seen = std::collections::HashSet::with_capacity(items.len());
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        if seen.insert(key(item)) {
-            out.push(item.clone());
-        }
+/// Keep the first entry per key, preserving order. Enforces per-shard identity
+/// invariants on save (one symbol per id, one file per path) — the last line of
+/// defence against index blow-ups from duplicate symbol accumulation. Takes the
+/// items by value: the saved shard becomes the cached snapshot without a copy.
+fn dedup_by<T>(items: Vec<T>, key: impl Fn(&T) -> &str) -> Vec<T> {
+    let keep: Vec<bool> = {
+        let mut seen = std::collections::HashSet::with_capacity(items.len());
+        items.iter().map(|item| seen.insert(key(item))).collect()
+    };
+    if keep.iter().all(|k| *k) {
+        return items;
     }
-    out
+    items
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(item, k)| k.then_some(item))
+        .collect()
 }
 
 /// Sidecar stamp naming the binary version that last wrote the index.
@@ -77,6 +81,8 @@ const STORE_META_FILE: &str = "store_meta.json";
 const CALL_GRAPH_META_FILE: &str = "call_graph_meta.json";
 
 const TREE_STATE_FILE: &str = "tree_state.json";
+
+const DROPPED_CALLS_FILE: &str = "calls_dropped.json";
 
 pub struct JsonStore {
     base_dir: std::path::PathBuf,
@@ -126,7 +132,7 @@ impl JsonStore {
         // Integrity invariant: one entry per path. A file's identity is its path;
         // duplicate path entries can only be redundant, and left unchecked they
         // feed the symbol-duplication blow-up (see dedup in `save_symbols`).
-        let files = dedup_by(files, |f| f.path.clone());
+        let files = dedup_by(files.to_vec(), |f| f.path.as_str());
         let path = self.base_dir.join("files.json");
         let json = serde_json::to_string_pretty(&files)?;
         atomic_write(&path, &json)?;
@@ -186,7 +192,7 @@ impl JsonStore {
         Ok(self.files_arc()?.as_ref().clone())
     }
 
-    pub fn save_symbols(&self, symbols: &[Symbol]) -> Result<()> {
+    pub fn save_symbols(&self, symbols: Vec<Symbol>) -> Result<()> {
         // Integrity invariant: one entry per symbol id (`s:{file_id}:{line}:{name}`).
         // Two symbols with the same id are the same logical symbol, so a duplicate
         // is always redundant. This is the load-bearing guard against index
@@ -194,7 +200,7 @@ impl JsonStore {
         // path-entry, and when identical-content files share a content-hash
         // file_id, that copy doubles the set every run (unbounded without this).
         let before = symbols.len();
-        let symbols = dedup_by(symbols, |s| s.id.clone());
+        let symbols = dedup_by(symbols, |s| s.id.as_str());
         if symbols.len() < before {
             debug!(
                 "dropped {} duplicate symbols before save ({} unique)",
@@ -283,6 +289,58 @@ impl JsonStore {
         })
     }
 
+    /// Persist the call edges the frequency cutoff dropped
+    /// (`calls_dropped.json`). They are not part of the graph, but a targeted
+    /// reindex needs them to recount a callee's caller files exactly.
+    pub fn save_dropped_calls(&self, edges: &[Relation]) -> Result<()> {
+        let path = self.base_dir.join(DROPPED_CALLS_FILE);
+        atomic_write(&path, &serde_json::to_string(edges)?)
+    }
+
+    /// Call edges dropped by the frequency cutoff on the last index run.
+    /// `None` when the sidecar is missing (index written by an older binary),
+    /// unreadable or corrupt: the dropped edges are then unknown, not absent.
+    /// A corrupt (unparsable or oversized) sidecar is removed so it reads as
+    /// missing from then on; the next full index writes a complete one.
+    pub fn load_dropped_calls(&self) -> Option<Vec<Relation>> {
+        let path = self.base_dir.join(DROPPED_CALLS_FILE);
+        let len = match std::fs::metadata(&path) {
+            Ok(m) => m.len(),
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!("cannot stat {}: {}", path.display(), e);
+                }
+                return None;
+            }
+        };
+        let parsed = if len > process_cache::MAX_SHARD_BYTES {
+            Err(format!("{len} bytes exceeds the shard size guard"))
+        } else {
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                // Unreadable is not corrupt (EMFILE, permissions): keep the file.
+                Err(e) => {
+                    warn!("cannot read {}: {}", path.display(), e);
+                    return None;
+                }
+            };
+            serde_json::from_str(&content).map_err(|e| e.to_string())
+        };
+        match parsed {
+            Ok(edges) => Some(edges),
+            Err(e) => {
+                warn!(
+                    "{} is corrupt ({e}); removing it, `kungfu index --full` rebuilds it",
+                    path.display()
+                );
+                if let Err(e) = std::fs::remove_file(&path) {
+                    warn!("cannot remove {}: {}", path.display(), e);
+                }
+                None
+            }
+        }
+    }
+
     pub fn save_chunks(&self, chunks: &[Chunk]) -> Result<()> {
         let path = self.base_dir.join("chunks.json");
         let json = serde_json::to_string(chunks)?;
@@ -359,13 +417,13 @@ impl JsonStore {
             .and_then(|s| s.trim().parse().ok())
     }
 
-    pub fn save_memories(&self, memories: &[MemoryEntry]) -> Result<()> {
+    pub fn save_memories(&self, memories: Vec<MemoryEntry>) -> Result<()> {
         let path = self.base_dir.join("memories.json");
-        let json = serde_json::to_string(memories)?;
+        let json = serde_json::to_string(&memories)?;
         atomic_write(&path, &json)?;
         debug!("saved {} memories to index", memories.len());
         process_cache::MEMORIES.clear();
-        *self.memories_cache.borrow_mut() = Some(Arc::new(memories.to_vec()));
+        *self.memories_cache.borrow_mut() = Some(Arc::new(memories));
         Ok(())
     }
 
@@ -511,7 +569,7 @@ mod tests {
     #[test]
     fn dedup_by_keeps_first_per_key_preserving_order() {
         let items = vec!["a1", "b1", "a2", "c1", "b2"];
-        let out = dedup_by(&items, |s| s.chars().next().unwrap().to_string());
+        let out = dedup_by(items, |s| &s[..1]);
         assert_eq!(out, vec!["a1", "b1", "c1"]);
     }
 
@@ -531,11 +589,50 @@ mod tests {
             symbol("s:f:aaaaaaaaaaaa:1:x"),
             symbol("s:f:aaaaaaaaaaaa:2:y"),
         ];
-        store.save_symbols(&dupes).unwrap();
+        store.save_symbols(dupes).unwrap();
         store.invalidate();
         process_cache::SYMBOLS.clear();
         let loaded = store.load_symbols().unwrap();
         assert_eq!(loaded.len(), 2, "duplicate symbol ids must collapse to one");
+    }
+
+    #[test]
+    fn dropped_calls_round_trip_and_corrupt_sidecar_reads_as_missing() {
+        let dir = temp_dir("dropped-calls");
+        let store = JsonStore::new(&dir);
+        assert!(store.load_dropped_calls().is_none(), "missing → unknown");
+
+        store.save_dropped_calls(&[relation("a", "b")]).unwrap();
+        assert_eq!(store.load_dropped_calls().map(|e| e.len()), Some(1));
+
+        std::fs::write(dir.join(DROPPED_CALLS_FILE), "{not json").unwrap();
+        assert!(store.load_dropped_calls().is_none(), "corrupt → unknown");
+        assert!(
+            !dir.join(DROPPED_CALLS_FILE).exists(),
+            "corrupt sidecar is removed so it reads as missing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_dropped_calls_sidecar_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("dropped-calls-unreadable");
+        let store = JsonStore::new(&dir);
+        store.save_dropped_calls(&[relation("a", "b")]).unwrap();
+        let path = dir.join(DROPPED_CALLS_FILE);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // running with privileges that bypass permissions
+        }
+        assert!(store.load_dropped_calls().is_none(), "unreadable → unknown");
+        assert!(
+            path.exists(),
+            "an I/O error is not corruption: keep the file"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

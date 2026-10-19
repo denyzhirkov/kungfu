@@ -74,6 +74,11 @@ impl KungfuService {
                 cfg.max_caller_files
             ));
         }
+        parts.push(
+            "edges from files not re-parsed since the last full index may be missing — \
+             `kungfu index --full` rebuilds them"
+                .to_string(),
+        );
         parts.join("; ")
     }
 

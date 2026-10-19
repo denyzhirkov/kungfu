@@ -30,7 +30,7 @@ use tracing::debug;
 /// A JSON index shard larger than this is corrupt, not big: even a huge repo's
 /// symbols shard stays in the low hundreds of MB. Reading past this hangs every
 /// tool call (the blow-up symptom), so loads refuse it with a rebuild hint.
-const MAX_SHARD_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const MAX_SHARD_BYTES: u64 = 1024 * 1024 * 1024;
 
 pub(crate) static FILES: Slot<Vec<FileEntry>> = Slot::new("files");
 pub(crate) static SYMBOLS: Slot<Vec<Symbol>> = Slot::new("symbols");
