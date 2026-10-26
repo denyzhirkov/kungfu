@@ -1,7 +1,9 @@
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    Implementation, ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo,
+};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -355,7 +357,10 @@ impl KungfuMcp {
 #[tool_handler]
 impl ServerHandler for KungfuMcp {
     fn get_info(&self) -> ServerInfo {
+        // rmcp's default server_info is built from rmcp's own build env ("rmcp" + its
+        // version); clients show this in /mcp, so report kungfu's name and version.
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("kungfu", env!("CARGO_PKG_VERSION")))
             .with_instructions(kungfu_project::templates::MCP_INSTRUCTIONS)
     }
 }
@@ -428,4 +433,16 @@ pub async fn run_stdio_server(project_root: PathBuf) -> Result<()> {
     service.waiting().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_info_reports_kungfu_version() {
+        let info = KungfuMcp::new(PathBuf::from(".")).get_info();
+        assert_eq!(info.server_info.name, "kungfu");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    }
 }
