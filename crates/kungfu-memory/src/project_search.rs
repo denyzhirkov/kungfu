@@ -1,11 +1,11 @@
 use kungfu_types::memory::{MemoryStatus, ProjectMemoryEntry, ProjectMemoryKind};
 use std::collections::HashMap;
 
-/// A conflict between two or more active memory entries that look like they cover the same topic
-/// but disagree. Heuristic only — used to surface, not to auto-resolve.
+/// A conflict between two or more active memory entries that look like they cover the same code
+/// symbol but disagree. Heuristic only — used to surface, not to auto-resolve.
 #[derive(Debug, Clone)]
 pub struct MemoryConflict {
-    /// Common signal that grouped these entries: a shared tag or anchor.
+    /// Common signal that grouped these entries: `symbol:<name>`.
     pub on: String,
     /// Entries in the conflict cluster, sorted by `updated_at` descending.
     pub entries: Vec<ProjectMemoryEntry>,
@@ -14,7 +14,8 @@ pub struct MemoryConflict {
 /// Detect potential conflicts between active memory entries.
 ///
 /// Conflict rules:
-/// - Group active entries by shared tag (and by shared related_symbol).
+/// - Group active entries by shared related_symbol. A shared tag is a category, not evidence
+///   of contradiction, so tags are deliberately not a grouping signal.
 /// - A group with ≥2 entries is a conflict candidate.
 /// - Drop entries that are linked by `supersedes` (the older one is intentional history).
 /// - Require entries to differ in `content` — same content = redundant copy, not conflict.
@@ -28,14 +29,11 @@ pub fn detect_conflicts(entries: &[ProjectMemoryEntry]) -> Vec<MemoryConflict> {
     let superseded: std::collections::HashSet<String> =
         active.iter().filter_map(|e| e.supersedes.clone()).collect();
 
-    // Index entries by shared signals (tags + related_symbols).
+    // Index entries by shared related_symbol.
     let mut by_signal: HashMap<String, Vec<&ProjectMemoryEntry>> = HashMap::new();
     for e in &active {
         if superseded.contains(&e.id) {
             continue;
-        }
-        for tag in &e.tags {
-            by_signal.entry(format!("tag:{}", tag)).or_default().push(e);
         }
         for sym in &e.related_symbols {
             by_signal
@@ -79,7 +77,7 @@ pub fn detect_conflicts(entries: &[ProjectMemoryEntry]) -> Vec<MemoryConflict> {
         });
     }
 
-    // Stable ordering: by signal then by oldest updated_at desc.
+    // Stable ordering by signal.
     out.sort_by(|a, b| a.on.cmp(&b.on));
     out
 }
@@ -456,23 +454,37 @@ mod tests {
         }
     }
 
+    fn with_symbols(mut e: ProjectMemoryEntry, syms: &[&str]) -> ProjectMemoryEntry {
+        e.related_symbols = syms.iter().map(|s| s.to_string()).collect();
+        e
+    }
+
     #[test]
-    fn conflict_detected_on_shared_tag_differing_content() {
+    fn conflict_detected_on_shared_symbol_differing_content() {
+        let entries = vec![
+            with_symbols(entry("a", "use sqlite", &[], None), &["Store"]),
+            with_symbols(entry("b", "use json", &[], None), &["Store"]),
+        ];
+        let conflicts = detect_conflicts(&entries);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].on, "symbol:Store");
+        assert_eq!(conflicts[0].entries.len(), 2);
+    }
+
+    #[test]
+    fn shared_tag_alone_is_not_conflict() {
         let entries = vec![
             entry("a", "use sqlite", &["storage"], None),
             entry("b", "use json", &["storage"], None),
         ];
-        let conflicts = detect_conflicts(&entries);
-        assert_eq!(conflicts.len(), 1);
-        assert!(conflicts[0].on.contains("storage"));
-        assert_eq!(conflicts[0].entries.len(), 2);
+        assert!(detect_conflicts(&entries).is_empty());
     }
 
     #[test]
     fn supersedes_pair_is_not_conflict() {
         let entries = vec![
-            entry("old", "use json", &["storage"], None),
-            entry("new", "use sqlite", &["storage"], Some("old")),
+            with_symbols(entry("old", "use json", &[], None), &["Store"]),
+            with_symbols(entry("new", "use sqlite", &[], Some("old")), &["Store"]),
         ];
         let conflicts = detect_conflicts(&entries);
         assert!(conflicts.is_empty(), "supersedes pair surfaced as conflict");
@@ -481,23 +493,20 @@ mod tests {
     #[test]
     fn identical_content_is_not_conflict() {
         let entries = vec![
-            entry("a", "same text", &["topic"], None),
-            entry("b", "same text", &["topic"], None),
+            with_symbols(entry("a", "same text", &[], None), &["Store"]),
+            with_symbols(entry("b", "same text", &[], None), &["Store"]),
         ];
-        let conflicts = detect_conflicts(&entries);
-        assert!(conflicts.is_empty());
+        assert!(detect_conflicts(&entries).is_empty());
     }
 
     #[test]
-    fn cluster_dedup_across_multiple_signals() {
-        let mut a = entry("a", "use sqlite", &["storage", "perf"], None);
-        let mut b = entry("b", "use json", &["storage", "perf"], None);
-        a.related_symbols.push("Store".into());
-        b.related_symbols.push("Store".into());
-        let entries = vec![a, b];
-        let conflicts = detect_conflicts(&entries);
-        // Same pair appears under tag:storage, tag:perf, symbol:Store — but dedup → 1.
-        assert_eq!(conflicts.len(), 1);
+    fn cluster_dedup_across_multiple_symbols() {
+        let entries = vec![
+            with_symbols(entry("a", "use sqlite", &[], None), &["Store", "Db"]),
+            with_symbols(entry("b", "use json", &[], None), &["Store", "Db"]),
+        ];
+        // Same pair appears under symbol:Store and symbol:Db — dedup → 1.
+        assert_eq!(detect_conflicts(&entries).len(), 1);
     }
 
     #[test]

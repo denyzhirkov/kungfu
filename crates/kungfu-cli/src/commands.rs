@@ -1690,6 +1690,9 @@ pub fn ask_context(task: &str, budget: Budget, json: bool) -> Result<()> {
                 println!("  on {} — {}", c.on, c.entry_ids.join(", "));
             }
         }
+        if let Some(note) = &packet.memory_conflicts_note {
+            println!("  ({note})");
+        }
     }
     Ok(())
 }
@@ -2514,7 +2517,12 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 println!("{}", entry.content);
             }
         }
-        MemoryCommands::Search { query, kind, tag } => {
+        MemoryCommands::Search {
+            query,
+            kind,
+            tag,
+            budget,
+        } => {
             let filter = MemoryFilter {
                 kind: kind
                     .as_deref()
@@ -2523,13 +2531,15 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 tag,
                 ..Default::default()
             };
-            let results = service.memory_search(&query, &filter)?;
+            let budget: Budget = budget.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            let found = service.memory_search(&query, &filter, budget)?;
             service.track_call("memory_search", 0, None);
             if json {
                 // Mirror the MCP tool: full entry only for confident hits; below the
                 // threshold emit a stub + excerpt so weak matches don't flood context.
                 const FULL_CONTENT_THRESHOLD: f64 = 0.45;
-                let items: Vec<_> = results
+                let items: Vec<_> = found
+                    .results
                     .iter()
                     .map(|(score, e)| {
                         if *score >= FULL_CONTENT_THRESHOLD {
@@ -2546,11 +2556,24 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                         }
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&items)?);
-            } else if results.is_empty() {
+                let mut out = serde_json::json!({ "results": items, "total": found.total });
+                if let Some(note) = &found.note {
+                    out["note"] = serde_json::json!(note);
+                }
+                if let Some(status) = found.status {
+                    out["status"] = serde_json::json!(status);
+                }
+                if let Some(hint) = &found.hint {
+                    out["hint"] = serde_json::json!(hint);
+                }
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if found.results.is_empty() {
                 println!("No results for: {}", query);
+                if let Some(hint) = &found.hint {
+                    println!("{hint}");
+                }
             } else {
-                for (score, e) in &results {
+                for (score, e) in &found.results {
                     let pin_marker = if e.pinned { " [pinned]" } else { "" };
                     let title = e.title.as_deref().unwrap_or(&e.content);
                     println!(
@@ -2561,6 +2584,9 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                         pin_marker,
                         truncate_str(title, 50)
                     );
+                }
+                if let Some(note) = &found.note {
+                    println!("({note})");
                 }
             }
         }

@@ -48,6 +48,9 @@ pub struct ContextPacket {
     /// on the same topic. Surface, do not auto-resolve.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub memory_conflicts: Vec<MemoryConflictItem>,
+    /// Present iff `memory_conflicts` was truncated or clipped: what was cut and the next action.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub memory_conflicts_note: Option<String>,
     /// Which retrieval layers produced the candidate pool (retrieval honesty).
     /// `None` for packets built by paths that don't run layered retrieval
     /// (e.g. diff_context).
@@ -77,7 +80,7 @@ pub struct RetrievalInfo {
 /// A surfaced conflict between active memory entries — projected to the packet level.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConflictItem {
-    /// What groups them: shared tag or symbol.
+    /// What groups them: `symbol:<name>` (a shared related_symbol).
     pub on: String,
     /// IDs of the entries in the cluster, sorted by updated_at desc.
     pub entry_ids: Vec<String>,

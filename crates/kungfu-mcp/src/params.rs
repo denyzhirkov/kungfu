@@ -160,6 +160,8 @@ pub struct MemorySearchParam {
     pub kind: Option<String>,
     /// Filter by tag
     pub tag: Option<String>,
+    /// Result budget: "tiny" (3), "small" (5), "medium" (10), "full" (25), "auto" (= small). Default: auto
+    pub budget: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
