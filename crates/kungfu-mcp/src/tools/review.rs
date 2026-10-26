@@ -1,6 +1,7 @@
 use crate::cache::CACHE_CAPACITY;
 use crate::params::{AffectedParam, CouplingParam, HotspotsParam};
 use crate::KungfuMcp;
+use kungfu_types::stats::{compression_ratio, CommandStats};
 
 pub(crate) fn usage_stats(mcp: &KungfuMcp) -> Result<String, String> {
     let cache = mcp.cache.lock().map_err(|e| e.to_string())?;
@@ -11,40 +12,50 @@ pub(crate) fn usage_stats(mcp: &KungfuMcp) -> Result<String, String> {
         0.0
     };
 
-    // Real baseline: the on-disk size of the source files served results referenced — what an
-    // agent would have read by opening them directly — versus the distilled bytes kungfu returned.
+    // Ratio only over results that referenced source files (they have a baseline); path-less
+    // results are reported separately so they cannot drag the number down.
     let raw_bytes = cache.raw_bytes_baseline;
-    let kungfu_bytes = cache.bytes_served;
-    let savings_ratio = if kungfu_bytes > 0 {
-        raw_bytes as f64 / kungfu_bytes as f64
-    } else {
-        0.0
-    };
-    let estimated_tokens_saved = raw_bytes.saturating_sub(kungfu_bytes) / 4;
+    let fb_served = cache.file_backed_bytes_served;
+    let savings_ratio = compression_ratio(raw_bytes, fb_served);
+    let estimated_tokens_saved = raw_bytes.saturating_sub(fb_served) / 4;
 
     let persistent = mcp
         .service()
         .and_then(|svc| svc.usage_stats().map_err(|e| e.to_string()))
         .unwrap_or_default();
 
-    // Same savings math as the session block, but over the persisted cumulative counters.
-    let life_raw = persistent.total_raw_bytes_baseline;
-    let life_served = persistent.total_bytes_served;
-    let life_ratio = if life_served > 0 {
-        life_raw as f64 / life_served as f64
-    } else {
-        0.0
-    };
-    let life_tokens_saved = life_raw.saturating_sub(life_served) / 4;
+    let life_raw = persistent.file_backed_raw_baseline;
+    let life_fb = persistent.file_backed_bytes_served;
+    let life_ratio = persistent.file_backed_ratio();
+    let life_tokens_saved = persistent.file_backed_tokens_saved();
+
+    let mut cmds: Vec<(&String, &CommandStats)> = persistent.per_command.iter().collect();
+    cmds.sort_by(|a, b| b.1.bytes_served.cmp(&a.1.bytes_served).then(a.0.cmp(b.0)));
+    // One line per command (pretty-printed arrays would spend a line per number).
+    let per_command: Vec<String> = cmds
+        .into_iter()
+        .map(|(name, c)| {
+            format!(
+                "{name} {} {} {} {}",
+                c.calls, c.bytes_served, c.raw_bytes_baseline, c.unmeasured_bytes_served
+            )
+        })
+        .collect();
+
+    let fmt_ratio = |r: Option<f64>| r.map_or("n/a".to_string(), |r| format!("{:.1}x", r));
 
     serde_json::to_string_pretty(&serde_json::json!({
         "session": {
             "calls_served": cache.calls_served,
-            "bytes_served": kungfu_bytes,
+            "bytes_served": cache.bytes_served,
+            "file_backed_calls": cache.file_backed_calls,
+            "file_backed_bytes_served": fb_served,
             "raw_bytes_baseline": raw_bytes,
-            "compression_ratio": format!("{:.1}x", savings_ratio),
+            "pathless_calls": cache.pathless_calls,
+            "pathless_bytes_served": cache.pathless_bytes_served,
+            "compression_ratio": fmt_ratio(savings_ratio),
             "estimated_tokens_saved": estimated_tokens_saved,
-            "baseline_method": "sum of on-disk sizes of source files referenced by served results, vs bytes returned (~4 chars/token)",
+            "baseline_method": "referenced source files' on-disk size / bytes of those results; path-less results excluded",
             "cache": {
                 "entries": cache.entries.len(),
                 "capacity": CACHE_CAPACITY,
@@ -55,12 +66,20 @@ pub(crate) fn usage_stats(mcp: &KungfuMcp) -> Result<String, String> {
         },
         "lifetime": {
             "total_calls": persistent.total_calls,
-            "total_bytes_served": life_served,
-            "total_raw_bytes_baseline": life_raw,
-            "compression_ratio": format!("{:.1}x", life_ratio),
+            "total_bytes_served": persistent.total_bytes_served,
+            "file_backed_calls": persistent.file_backed_calls,
+            "file_backed_bytes_served": life_fb,
+            "file_backed_raw_baseline": life_raw,
+            "pathless_calls": persistent.pathless_calls,
+            "pathless_bytes_served": persistent.pathless_bytes_served,
+            "unmeasured_calls": persistent.unmeasured_calls,
+            "unmeasured_bytes_served": persistent.unmeasured_bytes_served,
+            "compression_ratio": fmt_ratio(life_ratio),
             "estimated_tokens_saved": life_tokens_saved,
-            "baseline_method": "cumulative across MCP-served results; CLI-served bytes don't accrue a baseline",
-            "per_command": persistent.per_command,
+            "counting_since": persistent.counting_since,
+            "baseline_method": "same, counted since counting_since; CLI calls are unmeasured and excluded",
+            "per_command_columns": "command calls bytes_served raw_bytes_baseline unmeasured_bytes_served",
+            "per_command": per_command,
             "first_used": persistent.first_used,
             "last_used": persistent.last_used,
         },

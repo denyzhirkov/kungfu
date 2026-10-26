@@ -21,6 +21,12 @@ pub(crate) struct CacheState {
     /// bytes an agent would have read by opening those files directly. This is the real baseline
     /// the served bytes are compared against, not a per-call constant.
     pub raw_bytes_baseline: u64,
+    /// Served results that referenced source files (baseline > 0); the ratio is over these only.
+    pub file_backed_calls: u64,
+    pub file_backed_bytes_served: u64,
+    /// Served results with no file baseline (memory_*, project_status, ...).
+    pub pathless_calls: u64,
+    pub pathless_bytes_served: u64,
     /// Cached path → file size map (from the index), reloaded after a reindex clears the cache.
     pub file_sizes: Option<HashMap<String, u64>>,
 }
@@ -36,6 +42,10 @@ impl CacheState {
             bytes_served: 0,
             calls_served: 0,
             raw_bytes_baseline: 0,
+            file_backed_calls: 0,
+            file_backed_bytes_served: 0,
+            pathless_calls: 0,
+            pathless_bytes_served: 0,
             file_sizes: None,
         }
     }
@@ -231,9 +241,16 @@ impl KungfuMcp {
             cache.bytes_served += result.len() as u64;
             cache.calls_served += 1;
             cache.raw_bytes_baseline += baseline;
+            if baseline > 0 {
+                cache.file_backed_calls += 1;
+                cache.file_backed_bytes_served += result.len() as u64;
+            } else {
+                cache.pathless_calls += 1;
+                cache.pathless_bytes_served += result.len() as u64;
+            }
         }
         if let Ok(svc) = self.service_untracked() {
-            svc.track_call(tool, result.len(), baseline as usize);
+            svc.track_call(tool, result.len(), Some(baseline as usize));
         }
     }
 
