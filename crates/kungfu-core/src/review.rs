@@ -5,7 +5,8 @@ use crate::types::{
 };
 use crate::KungfuService;
 use anyhow::{bail, Result};
-use kungfu_types::relation::RelationKind;
+use kungfu_types::file::FileEntry;
+use kungfu_types::relation::{Relation, RelationKind};
 use kungfu_types::symbol::Symbol;
 use std::collections::{HashMap, HashSet};
 
@@ -79,150 +80,30 @@ impl KungfuService {
     pub fn affected(&self, name: &str, depth: usize) -> Result<AffectedResult> {
         self.ensure_fresh_index()?;
         let store = self.store();
-        let files = store.load_files()?;
+        let files = store.files_arc()?;
         let relations = store.relations_arc()?;
-        let all_symbols = self.search().get_all_symbols()?;
+        let all_symbols = store.symbols_arc()?;
+        let graph = DepGraph::build(&files, &all_symbols, &relations);
 
-        // Find target symbol IDs
-        let target_ids: HashSet<String> = all_symbols
-            .iter()
-            .filter(|s| s.name == name)
-            .map(|s| s.id.clone())
-            .collect();
-
-        if target_ids.is_empty() {
+        let Some(mut walk) = graph.walk(name, depth) else {
             bail!("symbol '{}' not found", name);
-        }
-
-        // Build unified ID → path map (both file and symbol IDs)
-        let mut id_to_path: HashMap<&str, &str> = HashMap::new();
-        for f in &files {
-            id_to_path.insert(&f.id, &f.path);
-        }
-        let symbol_map: HashMap<&str, &Symbol> = all_symbols
-            .iter()
-            .map(|s| {
-                id_to_path.insert(&s.id, &s.path);
-                (s.id.as_str(), s)
-            })
-            .collect();
-
-        // Build reverse dependency graph: target_id → source_ids (Calls + Imports)
-        // Only include high-confidence relations (weight >= 0.7) to avoid false positives
-        let mut reverse_deps: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
-        for r in relations.iter() {
-            match r.kind {
-                RelationKind::Calls if r.weight >= 0.7 => {
-                    reverse_deps
-                        .entry(r.target_id.as_str())
-                        .or_default()
-                        .push((r.source_id.as_str(), "calls"));
-                }
-                RelationKind::Imports => {
-                    reverse_deps
-                        .entry(r.target_id.as_str())
-                        .or_default()
-                        .push((r.source_id.as_str(), "imports"));
-                }
-                _ => {}
-            }
-        }
-
-        // BFS through reverse dependency graph
-        let mut entries: Vec<AffectedEntry> = Vec::new();
-        let mut visited: HashSet<String> = target_ids.clone();
-        let mut frontier: Vec<(String, usize)> =
-            target_ids.iter().map(|id| (id.clone(), 0)).collect();
-
-        // Also collect target file IDs (for file-level relation matching)
-        let target_paths: HashSet<&str> = target_ids
-            .iter()
-            .filter_map(|id| id_to_path.get(id.as_str()).copied())
-            .collect();
-        // Add file IDs that map to target paths
-        for f in &files {
-            if target_paths.contains(f.path.as_str()) && !visited.contains(&f.id) {
-                frontier.push((f.id.clone(), 0));
-                visited.insert(f.id.clone());
-            }
-        }
-
-        while let Some((current_id, current_depth)) = frontier.pop() {
-            if current_depth >= depth {
-                continue;
-            }
-            if let Some(deps) = reverse_deps.get(current_id.as_str()) {
-                for &(dep_id, reason_kind) in deps {
-                    if visited.insert(dep_id.to_string()) {
-                        let (entry_name, entry_path, entry_kind) =
-                            if let Some(sym) = symbol_map.get(dep_id) {
-                                (sym.name.clone(), sym.path.clone(), sym.kind.to_string())
-                            } else if let Some(&path) = id_to_path.get(dep_id) {
-                                let fname = path.rsplit('/').next().unwrap_or(path).to_string();
-                                (fname, path.to_string(), "file".to_string())
-                            } else {
-                                continue;
-                            };
-                        entries.push(AffectedEntry {
-                            name: entry_name,
-                            path: entry_path,
-                            kind: entry_kind,
-                            depth: current_depth + 1,
-                            reason: format!(
-                                "{} {} (depth {})",
-                                reason_kind,
-                                name,
-                                current_depth + 1
-                            ),
-                        });
-                        frontier.push((dep_id.to_string(), current_depth + 1));
-                    }
-                }
-            }
-        }
-
-        // Find affected test files via TestFor relations (file-level)
-        let affected_paths: HashSet<&str> = entries
-            .iter()
-            .map(|e| e.path.as_str())
-            .chain(target_paths.iter().copied())
-            .collect();
-        let mut test_files: Vec<String> = Vec::new();
-        for r in relations.iter() {
-            if r.kind == RelationKind::TestFor {
-                let source_path = id_to_path.get(r.source_id.as_str()).copied().unwrap_or("");
-                let target_path = id_to_path.get(r.target_id.as_str()).copied().unwrap_or("");
-                if !target_path.is_empty()
-                    && affected_paths.contains(target_path)
-                    && !source_path.is_empty()
-                    && !test_files.contains(&source_path.to_string())
-                {
-                    test_files.push(source_path.to_string());
-                }
-            }
-        }
-
-        // Risk assessment
-        let risk = if entries.len() > 20 || test_files.len() > 5 {
-            "HIGH".to_string()
-        } else if entries.len() > 5 || test_files.len() > 2 {
-            "MEDIUM".to_string()
-        } else {
-            "LOW".to_string()
         };
-
-        entries.sort_by_key(|e| e.depth);
-
+        walk.test_files.sort();
         Ok(AffectedResult {
             symbol: name.to_string(),
-            entries,
-            test_files,
-            risk,
-            provenance: format!(
-                "reverse deps over imports + call edges; call edges: {}",
-                self.call_graph_provenance()
-            ),
+            risk: risk_level(walk.entries.len(), walk.test_files.len()).to_string(),
+            entries: walk.entries,
+            test_files: walk.test_files,
+            provenance: self.affected_provenance(),
+            note: None,
         })
+    }
+
+    fn affected_provenance(&self) -> String {
+        format!(
+            "reverse deps over imports + call edges; call edges: {}",
+            self.call_graph_provenance()
+        )
     }
 
     /// Reverse of smart_test: given a test symbol name, return the production code it exercises.
@@ -306,23 +187,50 @@ impl KungfuService {
         if !kungfu_git::is_git_repo(&self.project.root) {
             bail!("not a git repository");
         }
+        let base = kungfu_git::diff_base(&self.project.root)?;
+        let changed_lines = kungfu_git::diff_changed_lines(&self.project.root, &base)?;
+        let mut result = self.affected_for_lines(depth, &changed_lines)?;
+        if !base.has_commits {
+            push_note(&mut result.note, NO_COMMITS_NOTE);
+        }
+        Ok(result)
+    }
 
-        let all_symbols = self.store().load_symbols()?;
-        let changed_lines = kungfu_git::diff_changed_lines(&self.project.root)?;
+    /// `affected_staged` over an explicit change set (verify_change adds
+    /// untracked files, which `git diff` cannot see). The graph is built once
+    /// and walked per changed symbol; the walk is capped at
+    /// `MAX_WALKED_SYMBOLS` names, declared in `note` when it bites.
+    pub(crate) fn affected_for_lines(
+        &self,
+        depth: usize,
+        changed_lines: &[kungfu_git::FileChangedLines],
+    ) -> Result<AffectedResult> {
+        let store = self.store();
+        let files = store.files_arc()?;
+        let relations = store.relations_arc()?;
+        let all_symbols = store.symbols_arc()?;
+        let mut symbols_by_path: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+        for sym in all_symbols.iter() {
+            symbols_by_path
+                .entry(sym.path.as_str())
+                .or_default()
+                .push(sym);
+        }
 
         // Collect unique changed symbol names overlapping diff hunks.
-        let mut changed_names: Vec<String> = Vec::new();
-        let mut seen_names: HashSet<String> = HashSet::new();
-        for (file_path, ranges) in &changed_lines {
-            for sym in &all_symbols {
-                if sym.path != *file_path {
-                    continue;
-                }
+        let mut changed_names: Vec<&str> = Vec::new();
+        let mut seen_names: HashSet<&str> = HashSet::new();
+        for (file_path, ranges) in changed_lines {
+            for sym in symbols_by_path
+                .get(file_path.as_str())
+                .into_iter()
+                .flatten()
+            {
                 let overlaps = ranges
                     .iter()
                     .any(|&(start, end)| sym.span.start_line <= end && sym.span.end_line >= start);
-                if overlaps && seen_names.insert(sym.name.clone()) {
-                    changed_names.push(sym.name.clone());
+                if overlaps && seen_names.insert(sym.name.as_str()) {
+                    changed_names.push(sym.name.as_str());
                 }
             }
         }
@@ -333,23 +241,22 @@ impl KungfuService {
                 entries: Vec::new(),
                 test_files: Vec::new(),
                 risk: "NONE".to_string(),
-                provenance: format!(
-                    "reverse deps over imports + call edges; call edges: {}",
-                    self.call_graph_provenance()
-                ),
+                provenance: self.affected_provenance(),
+                note: None,
             });
         }
 
-        // Run affected per name, merge.
+        // One graph, one walk per name (bounded), merge.
+        let graph = DepGraph::build(&files, &all_symbols, &relations);
+        let walked = changed_names.len().min(MAX_WALKED_SYMBOLS);
         let mut merged_entries: HashMap<(String, String), AffectedEntry> = HashMap::new();
         let mut merged_tests: HashSet<String> = HashSet::new();
 
-        for name in &changed_names {
-            let r = match self.affected(name, depth) {
-                Ok(r) => r,
-                Err(_) => continue, // symbol may resolve via duplicate name; skip if missing
+        for name in &changed_names[..walked] {
+            let Some(walk) = graph.walk(name, depth) else {
+                continue;
             };
-            for e in r.entries {
+            for e in walk.entries {
                 let key = (e.path.clone(), e.name.clone());
                 merged_entries
                     .entry(key)
@@ -361,9 +268,7 @@ impl KungfuService {
                     })
                     .or_insert(e);
             }
-            for t in r.test_files {
-                merged_tests.insert(t);
-            }
+            merged_tests.extend(walk.test_files);
         }
 
         let mut entries: Vec<AffectedEntry> = merged_entries.into_values().collect();
@@ -371,23 +276,30 @@ impl KungfuService {
         let mut test_files: Vec<String> = merged_tests.into_iter().collect();
         test_files.sort();
 
-        let risk = if entries.len() > 20 || test_files.len() > 5 {
-            "HIGH"
-        } else if entries.len() > 5 || test_files.len() > 2 {
-            "MEDIUM"
-        } else {
-            "LOW"
-        };
+        let mut note = None;
+        if walked < changed_names.len() {
+            push_note(
+                &mut note,
+                &format!(
+                    "blast radius computed for {walked} of {} changed symbols — run affected(<name>) for the rest",
+                    changed_names.len()
+                ),
+            );
+        }
+
+        let shown = changed_names.len().min(MAX_NAMES_IN_LABEL);
+        let mut label = changed_names[..shown].join(", ");
+        if shown < changed_names.len() {
+            label.push_str(&format!(", … +{} more", changed_names.len() - shown));
+        }
 
         Ok(AffectedResult {
-            symbol: format!("<staged: {}>", changed_names.join(", ")),
+            symbol: format!("<staged: {label}>"),
+            risk: risk_level(entries.len(), test_files.len()).to_string(),
             entries,
             test_files,
-            risk: risk.to_string(),
-            provenance: format!(
-                "reverse deps over imports + call edges; call edges: {}",
-                self.call_graph_provenance()
-            ),
+            provenance: self.affected_provenance(),
+            note,
         })
     }
 
@@ -397,13 +309,27 @@ impl KungfuService {
         if !kungfu_git::is_git_repo(&self.project.root) {
             bail!("not a git repository");
         }
+        let base = kungfu_git::diff_base(&self.project.root)?;
+        let changed_lines = kungfu_git::diff_changed_lines(&self.project.root, &base)?;
+        self.smart_test_for_lines(&changed_lines)
+    }
 
+    /// `smart_test` over an explicit change set (see `affected_for_lines`).
+    pub(crate) fn smart_test_for_lines(
+        &self,
+        changed_lines: &[kungfu_git::FileChangedLines],
+    ) -> Result<SmartTestResult> {
         let store = self.store();
-        let all_symbols = store.load_symbols()?;
+        let all_symbols = store.symbols_arc()?;
         let relations = store.relations_arc()?;
+        let mut symbols_by_path: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+        for sym in all_symbols.iter() {
+            symbols_by_path
+                .entry(sym.path.as_str())
+                .or_default()
+                .push(sym);
+        }
 
-        // Get changed line ranges
-        let changed_lines = kungfu_git::diff_changed_lines(&self.project.root)?;
         if changed_lines.is_empty() {
             return Ok(SmartTestResult {
                 changed_symbols: vec![],
@@ -417,17 +343,19 @@ impl KungfuService {
         let mut changed_symbol_ids: HashSet<String> = HashSet::new();
         let mut changed_file_paths: HashSet<String> = HashSet::new();
 
-        for (file_path, ranges) in &changed_lines {
+        for (file_path, ranges) in changed_lines {
             changed_file_paths.insert(file_path.clone());
-            for sym in &all_symbols {
-                if sym.path == *file_path {
-                    for &(start, end) in ranges {
-                        if sym.span.start_line <= end
-                            && sym.span.end_line >= start
-                            && changed_symbol_ids.insert(sym.id.clone())
-                        {
-                            changed_symbols.push(format!("{}::{}", sym.path, sym.name));
-                        }
+            for sym in symbols_by_path
+                .get(file_path.as_str())
+                .into_iter()
+                .flatten()
+            {
+                for &(start, end) in ranges {
+                    if sym.span.start_line <= end
+                        && sym.span.end_line >= start
+                        && changed_symbol_ids.insert(sym.id.clone())
+                    {
+                        changed_symbols.push(format!("{}::{}", sym.path, sym.name));
                     }
                 }
             }
@@ -501,7 +429,7 @@ impl KungfuService {
             .filter_map(|p| p.rsplit_once('/').map(|(dir, _)| dir))
             .collect();
 
-        for sym in &all_symbols {
+        for sym in all_symbols.iter() {
             if is_test_symbol(sym) {
                 if let Some((dir, _)) = sym.path.rsplit_once('/') {
                     if changed_dirs.contains(dir) {
@@ -536,8 +464,9 @@ impl KungfuService {
         let all_symbols = store.load_symbols()?;
         let relations = store.relations_arc()?;
 
-        // Changed files
-        let changed_files = kungfu_git::diff_files(&self.project.root)?;
+        // Changed files (content, mode, binary, deletion — anything tracked that differs)
+        let base = kungfu_git::diff_base(&self.project.root)?;
+        let changed_files = kungfu_git::changed_paths(&self.project.root, &base)?;
         if changed_files.is_empty() {
             return Ok(ReviewResult {
                 changed_files: vec![],
@@ -545,12 +474,16 @@ impl KungfuService {
                 missing_co_changes: vec![],
                 untested_changes: vec![],
                 risk: "NONE".to_string(),
-                summary: "No changes detected".to_string(),
+                summary: if base.has_commits {
+                    "No changes detected".to_string()
+                } else {
+                    format!("No changes detected; {NO_COMMITS_NOTE}")
+                },
             });
         }
 
         // Changed symbols
-        let changed_lines = kungfu_git::diff_changed_lines(&self.project.root)?;
+        let changed_lines = kungfu_git::diff_changed_lines(&self.project.root, &base)?;
         let mut changed_symbols: Vec<String> = Vec::new();
         let changed_file_set: HashSet<&str> = changed_files.iter().map(|s| s.as_str()).collect();
 
@@ -623,13 +556,17 @@ impl KungfuService {
             "LOW"
         };
 
-        let summary = format!(
+        let mut summary = format!(
             "{} files changed, {} symbols modified, {} missing co-changes, {} untested",
             changed_files.len(),
             changed_symbols.len(),
             missing_co_changes.len(),
             untested_changes.len()
         );
+        if !base.has_commits {
+            summary.push_str("; ");
+            summary.push_str(NO_COMMITS_NOTE);
+        }
 
         Ok(ReviewResult {
             changed_files,
@@ -716,4 +653,186 @@ impl KungfuService {
 
 pub(crate) fn count_test_symbols(symbols: &[Symbol]) -> usize {
     symbols.iter().filter(|s| is_test_symbol(s)).count()
+}
+
+/// How many changed symbol names a staged blast radius walks before it stops
+/// and says so. 3k untracked files (12k symbols) walked in full took 90s;
+/// the cap keeps the composite tools interactive.
+const MAX_WALKED_SYMBOLS: usize = 200;
+/// How many changed names the `<staged: …>` label spells out.
+const MAX_NAMES_IN_LABEL: usize = 20;
+
+/// Honesty note shared by every diff-based tool on a repository without commits.
+pub(crate) const NO_COMMITS_NOTE: &str =
+    "repository has no commits — changes are measured against the empty tree, so every staged file counts as added";
+
+pub(crate) fn push_note(note: &mut Option<String>, text: &str) {
+    match note {
+        Some(existing) => {
+            existing.push_str("; ");
+            existing.push_str(text);
+        }
+        None => *note = Some(text.to_string()),
+    }
+}
+
+fn risk_level(entries: usize, test_files: usize) -> &'static str {
+    if entries > 20 || test_files > 5 {
+        "HIGH"
+    } else if entries > 5 || test_files > 2 {
+        "MEDIUM"
+    } else {
+        "LOW"
+    }
+}
+
+/// Result of one reverse-dependency walk from a symbol name.
+struct Walk {
+    entries: Vec<AffectedEntry>,
+    test_files: Vec<String>,
+}
+
+/// Reverse-dependency graph over the index, built once per request so a
+/// walk per changed symbol costs a BFS, not a reload of files + relations.
+struct DepGraph<'a> {
+    /// file id or symbol id → path
+    id_to_path: HashMap<&'a str, &'a str>,
+    symbol_map: HashMap<&'a str, &'a Symbol>,
+    ids_by_name: HashMap<&'a str, Vec<&'a str>>,
+    file_ids_by_path: HashMap<&'a str, &'a str>,
+    /// target id → (source id, "calls" | "imports"); Calls kept at weight >= 0.7
+    /// to avoid false positives.
+    reverse_deps: HashMap<&'a str, Vec<(&'a str, &'static str)>>,
+    /// TestFor: tested path → test file paths
+    tests_for_path: HashMap<&'a str, Vec<&'a str>>,
+}
+
+impl<'a> DepGraph<'a> {
+    fn build(files: &'a [FileEntry], symbols: &'a [Symbol], relations: &'a [Relation]) -> Self {
+        let mut id_to_path: HashMap<&str, &str> =
+            HashMap::with_capacity(files.len() + symbols.len());
+        let mut file_ids_by_path: HashMap<&str, &str> = HashMap::with_capacity(files.len());
+        for f in files {
+            id_to_path.insert(&f.id, &f.path);
+            file_ids_by_path.insert(&f.path, &f.id);
+        }
+        let mut symbol_map: HashMap<&str, &Symbol> = HashMap::with_capacity(symbols.len());
+        let mut ids_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+        for s in symbols {
+            id_to_path.insert(&s.id, &s.path);
+            symbol_map.insert(&s.id, s);
+            ids_by_name.entry(s.name.as_str()).or_default().push(&s.id);
+        }
+
+        let mut reverse_deps: HashMap<&str, Vec<(&str, &'static str)>> = HashMap::new();
+        let mut tests_for_path: HashMap<&str, Vec<&str>> = HashMap::new();
+        for r in relations {
+            match r.kind {
+                RelationKind::Calls if r.weight >= 0.7 => reverse_deps
+                    .entry(r.target_id.as_str())
+                    .or_default()
+                    .push((r.source_id.as_str(), "calls")),
+                RelationKind::Imports => reverse_deps
+                    .entry(r.target_id.as_str())
+                    .or_default()
+                    .push((r.source_id.as_str(), "imports")),
+                RelationKind::TestFor => {
+                    if let (Some(&test_path), Some(&tested_path)) = (
+                        id_to_path.get(r.source_id.as_str()),
+                        id_to_path.get(r.target_id.as_str()),
+                    ) {
+                        tests_for_path
+                            .entry(tested_path)
+                            .or_default()
+                            .push(test_path);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            id_to_path,
+            symbol_map,
+            ids_by_name,
+            file_ids_by_path,
+            reverse_deps,
+            tests_for_path,
+        }
+    }
+
+    /// BFS over reverse deps from every symbol called `name`, up to `depth`
+    /// hops. `None` when no symbol has that name.
+    fn walk(&self, name: &str, depth: usize) -> Option<Walk> {
+        let target_ids = self.ids_by_name.get(name)?;
+
+        let mut visited: HashSet<&str> = target_ids.iter().copied().collect();
+        let mut frontier: Vec<(&str, usize)> = target_ids.iter().map(|&id| (id, 0)).collect();
+
+        // File-level relations attach to the file id, so seed the files too.
+        let target_paths: HashSet<&str> = target_ids
+            .iter()
+            .filter_map(|id| self.id_to_path.get(id).copied())
+            .collect();
+        for &path in &target_paths {
+            if let Some(&file_id) = self.file_ids_by_path.get(path) {
+                if visited.insert(file_id) {
+                    frontier.push((file_id, 0));
+                }
+            }
+        }
+
+        let mut entries: Vec<AffectedEntry> = Vec::new();
+        while let Some((current_id, current_depth)) = frontier.pop() {
+            if current_depth >= depth {
+                continue;
+            }
+            let Some(deps) = self.reverse_deps.get(current_id) else {
+                continue;
+            };
+            for &(dep_id, reason_kind) in deps {
+                if !visited.insert(dep_id) {
+                    continue;
+                }
+                let (entry_name, entry_path, entry_kind) =
+                    if let Some(sym) = self.symbol_map.get(dep_id) {
+                        (sym.name.clone(), sym.path.clone(), sym.kind.to_string())
+                    } else if let Some(&path) = self.id_to_path.get(dep_id) {
+                        let fname = path.rsplit('/').next().unwrap_or(path).to_string();
+                        (fname, path.to_string(), "file".to_string())
+                    } else {
+                        continue;
+                    };
+                entries.push(AffectedEntry {
+                    name: entry_name,
+                    path: entry_path,
+                    kind: entry_kind,
+                    depth: current_depth + 1,
+                    reason: format!("{} {} (depth {})", reason_kind, name, current_depth + 1),
+                });
+                frontier.push((dep_id, current_depth + 1));
+            }
+        }
+
+        // Test files covering the targets or anything in the radius (file-level).
+        let mut test_files: Vec<String> = Vec::new();
+        let mut seen_tests: HashSet<&str> = HashSet::new();
+        let affected_paths = entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .chain(target_paths.iter().copied());
+        for path in affected_paths {
+            for &test in self.tests_for_path.get(path).into_iter().flatten() {
+                if seen_tests.insert(test) {
+                    test_files.push(test.to_string());
+                }
+            }
+        }
+
+        entries.sort_by_key(|e| e.depth);
+        Some(Walk {
+            entries,
+            test_files,
+        })
+    }
 }

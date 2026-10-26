@@ -1126,6 +1126,10 @@ pub fn affected(name: &str, depth: usize, staged: bool, json: bool) -> Result<()
                 println!("  {}", t);
             }
         }
+        if let Some(note) = &result.note {
+            println!();
+            println!("note: {}", note);
+        }
     }
     Ok(())
 }
@@ -1140,13 +1144,26 @@ pub fn verify_change(depth: usize, json: bool) -> Result<()> {
         return Ok(());
     }
     if result["status"].as_str() == Some("clean") {
-        println!("Working tree matches HEAD — nothing to verify.");
+        println!(
+            "{}.",
+            result["hint"]
+                .as_str()
+                .unwrap_or("working tree matches HEAD — nothing to verify")
+        );
         return Ok(());
     }
+    let truncated = ["changed_symbols_note", "changed_files_note"]
+        .iter()
+        .any(|k| result[*k].is_string());
     println!(
-        "Changed: {} symbols in {} files  |  risk: {}",
+        "Changed: {} symbols in {} files{}  |  risk: {}",
         result["changed_symbols"].as_array().map_or(0, |a| a.len()),
         result["changed_files"].as_array().map_or(0, |a| a.len()),
+        if truncated {
+            " (shown — lists truncated, see notes)"
+        } else {
+            ""
+        },
         result["affected"]["risk"].as_str().unwrap_or("?"),
     );
     if let Some(contracts) = result["touched_contracts"].as_array() {
@@ -1192,8 +1209,29 @@ pub fn verify_change(depth: usize, json: bool) -> Result<()> {
             }
         }
     }
-    if let Some(note) = result["note"].as_str() {
-        println!("note: {}", note);
+    if let Some(note) = result["affected"]["note"].as_str() {
+        println!("affected note: {}", note);
+    }
+    for key in [
+        "changed_files_note",
+        "changed_symbols_note",
+        "touched_contracts_note",
+        "suggested_tests_note",
+        "deleted_files_note",
+        "untracked_files_note",
+        "no_hunk_files_note",
+        "deleted_note",
+        "no_hunk_note",
+        "base_note",
+        "note",
+    ] {
+        if let Some(note) = result[key].as_str() {
+            println!(
+                "{}: {}",
+                key.trim_end_matches("_note").replace('_', " "),
+                note
+            );
+        }
     }
     Ok(())
 }

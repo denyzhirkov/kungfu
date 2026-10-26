@@ -258,41 +258,143 @@ pub fn co_change_pairs(
     Ok(result)
 }
 
-/// Get files changed in the current diff (staged + unstaged + untracked).
-pub fn diff_files(root: &Path) -> Result<Vec<String>> {
+/// Run a git query and return stdout; any failure is reported, never
+/// swallowed (a silent empty result would pass for a clean tree).
+fn git_query(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
-        .args(["diff", "--name-only", "HEAD"])
+        .args(args)
         .current_dir(root)
         .output()
-        .context("failed to run git diff")?;
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!("git {} failed: {}", args.join(" "), stderr.trim())
+}
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    let staged = Command::new("git")
-        .args(["diff", "--cached", "--name-only"])
+/// What the working tree is diffed against. A repository without commits has
+/// no `HEAD`; the base is then the empty tree, so every staged file shows up
+/// as added instead of the diff failing or passing for clean.
+#[derive(Debug, Clone)]
+pub struct DiffBase {
+    rev: String,
+    pub has_commits: bool,
+}
+
+impl DiffBase {
+    /// Revision to pass to `git diff`.
+    pub fn rev(&self) -> &str {
+        &self.rev
+    }
+}
+
+/// Resolve the diff base for `root`. HEAD is detected by exit status, not by
+/// matching git's (localised) error text.
+pub fn diff_base(root: &Path) -> Result<DiffBase> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "-q", "HEAD"])
         .current_dir(root)
         .output()
-        .context("failed to run git diff --cached")?;
-    let staged_text = String::from_utf8_lossy(&staged.stdout);
-
-    let mut files: Vec<String> = text
-        .lines()
-        .chain(staged_text.lines())
-        .map(String::from)
-        .filter(|s| !s.is_empty())
-        .collect();
-    files.sort();
-    files.dedup();
-    Ok(files)
+        .context("failed to run git rev-parse")?;
+    if output.status.success() {
+        return Ok(DiffBase {
+            rev: "HEAD".to_string(),
+            has_commits: true,
+        });
+    }
+    // `--verify -q` turns an unresolvable ref into a silent exit 1; anything
+    // louder (not a repository, corrupt object store) is a real failure.
+    if output.status.code() != Some(1) || !output.stderr.is_empty() {
+        anyhow::bail!(
+            "git rev-parse HEAD failed in {}: {}",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    // The empty tree's id depends on the repository's hash algorithm
+    // (SHA-1: 4b825dc…, SHA-256 differs), so ask git rather than hard-code it.
+    // Hash empty input as a tree without `-w`: read-only, nothing is written to
+    // the user's object store. `output()` gives the child a closed stdin.
+    let out = git_query(root, &["hash-object", "-t", "tree", "--stdin"])?;
+    let rev = String::from_utf8_lossy(&out).trim().to_string();
+    anyhow::ensure!(
+        !rev.is_empty() && rev.chars().all(|c| c.is_ascii_hexdigit()),
+        "git hash-object returned no empty-tree id in {}",
+        root.display()
+    );
+    Ok(DiffBase {
+        rev,
+        has_commits: false,
+    })
 }
 
 /// Get symbols changed in git diff by parsing diff output for modified line ranges.
-pub fn diff_changed_lines(root: &Path) -> Result<Vec<FileChangedLines>> {
-    let output = Command::new("git")
-        .args(["diff", "-U0", "HEAD"])
-        .current_dir(root)
-        .output()
-        .context("failed to run git diff -U0")?;
-    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
+/// Paths are relative to `root` and limited to it (`--relative`), so a project
+/// nested inside a larger repository sees only its own files. Renames are
+/// reported as delete + add (`--no-renames`) so the new path carries hunks.
+pub fn diff_changed_lines(root: &Path, base: &DiffBase) -> Result<Vec<FileChangedLines>> {
+    let out = git_query(
+        root,
+        &[
+            "diff",
+            "-U0",
+            "--relative",
+            "--no-renames",
+            base.rev(),
+            "--",
+        ],
+    )?;
+    Ok(parse_unified_diff(&String::from_utf8_lossy(&out)))
+}
+
+/// Tracked files deleted relative to the base (staged or not).
+/// `diff_changed_lines` cannot see them: a deletion has no added lines.
+pub fn deleted_files(root: &Path, base: &DiffBase) -> Result<Vec<String>> {
+    diff_names(root, base, Some("--diff-filter=D"))
+}
+
+/// Every tracked file that differs from the base in any way: content, mode
+/// bits, binary payload or deletion. Binary and mode-only changes carry no
+/// `@@` hunks, so this is the only place they show up.
+pub fn changed_paths(root: &Path, base: &DiffBase) -> Result<Vec<String>> {
+    diff_names(root, base, None)
+}
+
+fn diff_names(root: &Path, base: &DiffBase, filter: Option<&str>) -> Result<Vec<String>> {
+    let mut args = vec!["diff", "--name-only", "-z", "--relative", "--no-renames"];
+    args.extend(filter);
+    args.extend([base.rev(), "--"]);
+    Ok(split_nul(&git_query(root, &args)?))
+}
+
+/// New files git does not track yet (ignored ones and kungfu's own `.kungfu`
+/// state excluded, at any depth). `git diff HEAD` never lists these.
+pub fn untracked_files(root: &Path) -> Result<Vec<String>> {
+    let out = git_query(
+        root,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+            ":(exclude).kungfu",
+            ":(exclude)**/.kungfu/**",
+        ],
+    )?;
+    Ok(split_nul(&out))
+}
+
+fn split_nul(bytes: &[u8]) -> Vec<String> {
+    let mut files: Vec<String> = bytes
+        .split(|&b| b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    files.sort();
+    files
 }
 
 /// Reject anything but a bare hex hash. `hash` lands as a positional arg to
@@ -382,20 +484,22 @@ pub fn commit_meta(root: &Path, hash: &str) -> Result<LogEntry> {
 
 /// Shared parser for `git diff -U0` / `git show -U0` output: collects per-file
 /// (path, [(start, end)]) ranges from the `+++ b/` headers and `@@` hunks.
+/// A hunk that only removes lines (`+N,0`) is recorded as the single line N so
+/// the file is not lost; deleted files (`+++ /dev/null`) carry no hunks.
 fn parse_unified_diff(text: &str) -> Vec<FileChangedLines> {
     let mut result: Vec<FileChangedLines> = Vec::new();
     let mut current_file: Option<String> = None;
     let mut current_ranges: Vec<LineRange> = Vec::new();
 
     for line in text.lines() {
-        if let Some(file_path) = line.strip_prefix("+++ b/") {
-            if let Some(ref file) = current_file {
+        if let Some(header) = line.strip_prefix("+++ ") {
+            if let Some(file) = current_file.take() {
                 if !current_ranges.is_empty() {
-                    result.push((file.clone(), std::mem::take(&mut current_ranges)));
+                    result.push((file, std::mem::take(&mut current_ranges)));
                 }
             }
-            current_file = Some(file_path.to_string());
             current_ranges.clear();
+            current_file = header.strip_prefix("b/").map(String::from);
         } else if line.starts_with("@@ ") {
             // Parse @@ -old +new,count @@
             if let Some(plus_part) = line.split(' ').nth(2) {
@@ -407,7 +511,10 @@ fn parse_unified_diff(text: &str) -> Vec<FileChangedLines> {
                         .and_then(|c| c.parse::<usize>().ok())
                         .unwrap_or(1);
                     if count > 0 {
-                        current_ranges.push((start, start + count.saturating_sub(1)));
+                        current_ranges.push((start, start + count - 1));
+                    } else {
+                        let at = start.max(1);
+                        current_ranges.push((at, at));
                     }
                 }
             }
@@ -507,6 +614,169 @@ mod tests {
         assert!(commit_files(&repo, &hash).is_err());
         assert!(commit_changed_lines(&repo, &hash).is_err());
         assert!(!target.exists(), "git show wrote {}", target.display());
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    fn base(dir: &Path) -> DiffBase {
+        diff_base(dir).unwrap()
+    }
+
+    fn write(repo: &Path, rel: &str, body: &str) {
+        let path = repo.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn commit_all(repo: &Path) {
+        git_in(repo, &["add", "."]);
+        git_in(repo, &["commit", "-q", "-m", "files"]);
+    }
+
+    #[test]
+    fn deleted_and_untracked_files_are_listed() {
+        let repo = temp_repo("deleted");
+        write(&repo, "gone.rs", "fn a() {}\n");
+        write(&repo, "kept.rs", "fn b() {}\n");
+        commit_all(&repo);
+        std::fs::remove_file(repo.join("gone.rs")).unwrap();
+        write(&repo, "fresh.rs", "fn c() {}\n");
+
+        assert_eq!(deleted_files(&repo, &base(&repo)).unwrap(), vec!["gone.rs"]);
+        assert_eq!(untracked_files(&repo).unwrap(), vec!["fresh.rs"]);
+        assert!(diff_changed_lines(&repo, &base(&repo)).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn untracked_files_skip_kungfu_state_at_any_depth() {
+        let repo = temp_repo("state");
+        write(&repo, ".kungfu/index/files.json", "[]");
+        write(&repo, "sub/.kungfu/index/files.json", "[]");
+        write(&repo, "sub/real.rs", "fn r() {}\n");
+
+        assert_eq!(untracked_files(&repo).unwrap(), vec!["sub/real.rs"]);
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn removed_lines_only_keep_the_file_in_the_diff() {
+        let repo = temp_repo("rmlines");
+        write(&repo, "a.rs", "one\ntwo\nthree\n");
+        commit_all(&repo);
+        write(&repo, "a.rs", "one\nthree\n");
+
+        let lines = diff_changed_lines(&repo, &base(&repo)).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "a.rs");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn staged_rename_is_a_delete_plus_an_add() {
+        let repo = temp_repo("rename");
+        write(&repo, "old.rs", "fn a() {}\nfn b() {}\n");
+        commit_all(&repo);
+        git_in(&repo, &["mv", "old.rs", "new.rs"]);
+
+        assert_eq!(deleted_files(&repo, &base(&repo)).unwrap(), vec!["old.rs"]);
+        let lines = diff_changed_lines(&repo, &base(&repo)).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "new.rs");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn nested_project_sees_only_its_own_files_root_relative() {
+        let repo = temp_repo("nested");
+        write(&repo, "sub/a.rs", "fn a() {}\n");
+        write(&repo, "sub/gone.rs", "fn g() {}\n");
+        write(&repo, "outside.rs", "fn o() {}\n");
+        commit_all(&repo);
+        write(&repo, "sub/a.rs", "fn a() { 1; }\n");
+        write(&repo, "outside.rs", "fn o() { 1; }\n");
+        std::fs::remove_file(repo.join("sub/gone.rs")).unwrap();
+        write(&repo, "sub/new.rs", "fn n() {}\n");
+        let sub = repo.join("sub");
+
+        let lines = diff_changed_lines(&sub, &base(&sub)).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "a.rs");
+        assert_eq!(deleted_files(&sub, &base(&sub)).unwrap(), vec!["gone.rs"]);
+        assert_eq!(untracked_files(&sub).unwrap(), vec!["new.rs"]);
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Repository without commits: staged files diff against the empty tree,
+    /// so they are reported as added; a directory that is not a repository is
+    /// an error, not an empty diff.
+    #[test]
+    fn repo_without_commits_diffs_against_the_empty_tree() {
+        let dir = std::env::temp_dir().join(format!("kungfu-git-nohead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        write(&dir, "staged.rs", "fn s() {}\n");
+        write(&dir, "loose.rs", "fn l() {}\n");
+        git_in(&dir, &["add", "staged.rs"]);
+
+        let b = base(&dir);
+        assert!(!b.has_commits);
+        assert_eq!(b.rev(), "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+        assert!(deleted_files(&dir, &b).unwrap().is_empty());
+        let lines = diff_changed_lines(&dir, &b).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "staged.rs");
+        assert_eq!(changed_paths(&dir, &b).unwrap(), vec!["staged.rs"]);
+        assert_eq!(untracked_files(&dir).unwrap(), vec!["loose.rs"]);
+
+        let not_a_repo = dir.join("plain");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+        std::fs::remove_dir_all(dir.join(".git")).unwrap();
+        assert!(diff_base(&not_a_repo).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn binary_and_mode_only_changes_are_changed_paths_without_hunks() {
+        let repo = temp_repo("binary");
+        std::fs::write(repo.join("logo.png"), [0x89, b'P', b'N', b'G', 0, 1, 2]).unwrap();
+        write(&repo, "run.sh", "#!/bin/sh\n");
+        commit_all(&repo);
+        std::fs::write(repo.join("logo.png"), [0x89, b'P', b'N', b'G', 9, 9, 9]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(repo.join("run.sh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let b = base(&repo);
+        let mut expected = vec!["logo.png"];
+        if cfg!(unix) {
+            expected.push("run.sh");
+        }
+        assert_eq!(changed_paths(&repo, &b).unwrap(), expected);
+        assert!(diff_changed_lines(&repo, &b).unwrap().is_empty());
+        assert!(deleted_files(&repo, &b).unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(&repo);
     }
