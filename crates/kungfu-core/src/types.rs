@@ -80,6 +80,10 @@ pub struct AffectedResult {
     /// How the dependency edges were derived and what was filtered out —
     /// a bounded result must never look exhaustive (retrieval honesty).
     pub provenance: String,
+    /// Declared limits of this particular result (symbols skipped by the
+    /// walk cap, repository without commits); absent when the walk was complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
