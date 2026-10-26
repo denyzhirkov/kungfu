@@ -448,6 +448,10 @@ pub enum MemoryCommands {
         /// Filter by tag
         #[arg(long)]
         tag: Option<String>,
+
+        /// Result budget: tiny (3), small (5), medium (10), full (25), auto (= small)
+        #[arg(long, default_value = "small")]
+        budget: String,
     },
 
     /// Update a memory entry

@@ -1,6 +1,59 @@
 use crate::KungfuService;
 use anyhow::Result;
+use kungfu_types::budget::Budget;
 use kungfu_types::memory::{MemoryStatus, ProjectMemoryEntry};
+
+/// Budget-capped project-memory search result. `total` is the match count before
+/// the cap; `note` is set iff results were cut, `status`/`hint` iff nothing matched.
+#[derive(Debug, Clone)]
+pub struct MemorySearchResult {
+    pub results: Vec<(f64, ProjectMemoryEntry)>,
+    pub total: usize,
+    pub note: Option<String>,
+    pub status: Option<&'static str>,
+    pub hint: Option<String>,
+}
+
+impl MemorySearchResult {
+    /// Cap scored matches to the budget (auto resolves to small).
+    pub fn from_scored(mut results: Vec<(f64, ProjectMemoryEntry)>, budget: Budget) -> Self {
+        let total = results.len();
+        if total == 0 {
+            return Self {
+                results,
+                total,
+                note: None,
+                status: Some("no_match"),
+                hint: Some(
+                    "no memory matched — try broader terms, drop the kind/tag filter, or list entries with memory_list"
+                        .to_string(),
+                ),
+            };
+        }
+        let limit = match budget {
+            Budget::Tiny => 3,
+            Budget::Small | Budget::Auto => 5,
+            Budget::Medium => 10,
+            Budget::Full => 25,
+        };
+        let note = (total > limit).then(|| {
+            let action = if budget == Budget::Full {
+                "narrow with kind/tag"
+            } else {
+                "raise budget or narrow with kind/tag"
+            };
+            format!("showing {limit} of {total} — {action}")
+        });
+        results.truncate(limit);
+        Self {
+            results,
+            total,
+            note,
+            status: None,
+            hint: None,
+        }
+    }
+}
 
 /// Health + repair summary for the manual memory store (`kungfu doctor`).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -77,7 +130,8 @@ impl KungfuService {
         &self,
         query: &str,
         filter: &kungfu_memory::project_search::MemoryFilter,
-    ) -> Result<Vec<(f64, ProjectMemoryEntry)>> {
+        budget: Budget,
+    ) -> Result<MemorySearchResult> {
         // Generate candidates from the inverted index, then read and score only
         // those bodies. An empty query degenerates to a filtered list, so load
         // all (rare path). Scoring semantics are unchanged from the full scan.
@@ -87,8 +141,9 @@ impl KungfuService {
             let ids = self.store().project_memory_candidates(query)?;
             self.store().load_project_memory_bodies(&ids)?
         };
-        Ok(kungfu_memory::project_search::search_project_memory(
-            query, &entries, filter,
+        Ok(MemorySearchResult::from_scored(
+            kungfu_memory::project_search::search_project_memory(query, &entries, filter),
+            budget,
         ))
     }
 

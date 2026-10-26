@@ -701,22 +701,64 @@ impl KungfuService {
                 })
                 .collect();
 
-            // Surface contradictions across active memory. Conflicts can only form
-            // between entries sharing a tag/symbol, so cluster on metadata first and
-            // load bodies only for entries in a cluster of ≥2.
-            let cluster_ids = conflict_cluster_ids(&metas);
+            // Surface contradictions only where they touch the memory returned above:
+            // clusters are grounded in a shared related_symbol and must contain at
+            // least one returned entry. Cluster on metadata; load bodies only for those.
+            let rank: HashMap<&str, usize> = packet
+                .project_memory
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (m.id.as_str(), i))
+                .collect();
+            let (cluster_ids, clipped) = conflict_cluster_ids(&metas, &rank);
             if !cluster_ids.is_empty() {
                 let cluster_pool = store
                     .load_project_memory_bodies(&cluster_ids)
                     .unwrap_or_default();
-                let conflicts = kungfu_memory::project_search::detect_conflicts(&cluster_pool);
+                let mut conflicts = kungfu_memory::project_search::detect_conflicts(&cluster_pool);
+                // Best (lowest) position in project_memory of any member = relevance.
+                let best = |c: &kungfu_memory::project_search::MemoryConflict| {
+                    c.entries
+                        .iter()
+                        .filter_map(|e| rank.get(e.id.as_str()).copied())
+                        .min()
+                };
+                conflicts.retain(|c| best(c).is_some());
+                conflicts.sort_by_key(best);
+                let cap = match budget {
+                    Budget::Tiny => 1,
+                    Budget::Small | Budget::Auto => 2,
+                    Budget::Medium => 3,
+                    Budget::Full => 5,
+                };
+                let total = conflicts.len();
                 packet.memory_conflicts = conflicts
                     .into_iter()
+                    .take(cap)
                     .map(|c| kungfu_types::context::MemoryConflictItem {
                         on: c.on,
                         entry_ids: c.entries.iter().map(|e| e.id.clone()).collect(),
                     })
                     .collect();
+                let mut notes: Vec<String> = Vec::new();
+                if total > cap {
+                    let action = if budget == Budget::Full {
+                        "inspect via memory_get / memory_search"
+                    } else {
+                        "raise budget to see the rest"
+                    };
+                    notes.push(format!(
+                        "showing {cap} of {total} conflict clusters — {action}"
+                    ));
+                }
+                if clipped {
+                    notes.push(format!(
+                        "symbol groups clipped to {MAX_CONFLICT_GROUP} entries — conflicts may be incomplete; inspect via memory_search"
+                    ));
+                }
+                if !notes.is_empty() {
+                    packet.memory_conflicts_note = Some(notes.join("; "));
+                }
             }
         }
 
@@ -999,36 +1041,49 @@ fn meta_path_overlap(a: &str, b: &str) -> bool {
     base(a) == base(b)
 }
 
-/// Ids of active entries that share a tag or related-symbol with at least one
-/// other active entry — the only entries that can take part in a conflict.
-/// Computed from metadata so bodies are read only for genuine clusters.
-fn conflict_cluster_ids(metas: &[kungfu_storage::MemoryMeta]) -> Vec<String> {
+/// Max entries taken from one symbol group when clustering conflicts, so a popular
+/// symbol cannot pull the whole store's bodies.
+const MAX_CONFLICT_GROUP: usize = 20;
+
+/// Ids of active entries that share a related-symbol with at least one other
+/// active entry, restricted to symbol groups containing a returned entry (a key
+/// of `returned`) — the only entries that can form a surfaced conflict. Groups
+/// are clipped to `MAX_CONFLICT_GROUP` (returned members kept first); the bool
+/// says whether any group was clipped. Computed from metadata so bodies are read
+/// only for relevant clusters.
+fn conflict_cluster_ids(
+    metas: &[kungfu_storage::MemoryMeta],
+    returned: &HashMap<&str, usize>,
+) -> (Vec<String>, bool) {
     use kungfu_types::memory::MemoryStatus;
-    let mut by_signal: HashMap<String, Vec<String>> = HashMap::new();
+    if returned.is_empty() {
+        return (Vec::new(), false);
+    }
+    let mut by_symbol: HashMap<&str, Vec<&str>> = HashMap::new();
     for m in metas {
         if m.status != MemoryStatus::Active {
             continue;
         }
-        for tag in &m.tags {
-            by_signal
-                .entry(format!("tag:{tag}"))
-                .or_default()
-                .push(m.id.clone());
-        }
         for sym in &m.related_symbols {
-            by_signal
-                .entry(format!("sym:{sym}"))
-                .or_default()
-                .push(m.id.clone());
+            by_symbol.entry(sym).or_default().push(&m.id);
         }
     }
     let mut ids: HashSet<String> = HashSet::new();
-    for group in by_signal.values() {
-        if group.len() >= 2 {
-            ids.extend(group.iter().cloned());
+    let mut clipped = false;
+    for group in by_symbol.values() {
+        if group.len() < 2 || !group.iter().any(|id| returned.contains_key(*id)) {
+            continue;
         }
+        let (mine, others): (Vec<&str>, Vec<&str>) = group
+            .iter()
+            .copied()
+            .partition(|id| returned.contains_key(*id));
+        let room = MAX_CONFLICT_GROUP.saturating_sub(mine.len());
+        clipped |= others.len() > room;
+        ids.extend(mine.into_iter().map(String::from));
+        ids.extend(others.into_iter().take(room).map(String::from));
     }
-    ids.into_iter().collect()
+    (ids.into_iter().collect(), clipped)
 }
 
 /// Extract lines from a symbol body that contain query keywords, with 1 line of context.

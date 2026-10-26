@@ -311,7 +311,7 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Search project memory by query. Returns scored results matching facts, decisions, warnings, and session summaries"
+        description = "Search project memory by query. Returns {results,total} (scored facts, decisions, warnings, session summaries), capped by budget with a truncation note"
     )]
     fn memory_search(
         &self,
