@@ -977,19 +977,29 @@ pub fn stats(json: bool) -> Result<()> {
         );
         let tokens = stats.total_bytes_served / 4;
         println!("  Est. tokens served: {}", tokens);
-        if stats.total_raw_bytes_baseline > 0 {
-            let ratio =
-                stats.total_raw_bytes_baseline as f64 / stats.total_bytes_served.max(1) as f64;
-            let saved = stats
-                .total_raw_bytes_baseline
-                .saturating_sub(stats.total_bytes_served)
-                / 4;
-            println!("  Compression:        {:.1}x", ratio);
-            println!(
-                "  Est. tokens saved:  {} (vs reading referenced files)",
-                saved
-            );
+        match stats.file_backed_ratio() {
+            Some(ratio) => {
+                let saved = stats.file_backed_tokens_saved();
+                println!(
+                    "  Compression:        {:.1}x (file-backed results only, since {})",
+                    ratio,
+                    stats.counting_since.as_deref().unwrap_or("?")
+                );
+                println!(
+                    "  Est. tokens saved:  {} (vs reading referenced files)",
+                    saved
+                );
+            }
+            None => println!("  Compression:        n/a (no file-backed results counted)"),
         }
+        println!(
+            "  Path-less served:   {} calls, {} bytes (not in ratio)",
+            stats.pathless_calls, stats.pathless_bytes_served
+        );
+        println!(
+            "  Unmeasured (CLI):   {} calls, {} bytes (no baseline, not in ratio)",
+            stats.unmeasured_calls, stats.unmeasured_bytes_served
+        );
         if let Some(ref first) = stats.first_used {
             println!("  First used:         {}", first);
         }
@@ -1000,9 +1010,14 @@ pub fn stats(json: bool) -> Result<()> {
             println!();
             println!("  Per command:");
             let mut cmds: Vec<_> = stats.per_command.iter().collect();
-            cmds.sort_by(|a, b| b.1.cmp(a.1));
-            for (cmd, count) in cmds {
-                println!("    {:<25} {:>6} calls", cmd, count);
+            cmds.sort_by(|a, b| b.1.bytes_served.cmp(&a.1.bytes_served).then(a.0.cmp(b.0)));
+            for (cmd, c) in cmds {
+                println!(
+                    "    {:<25} {:>6} calls {:>10} bytes",
+                    cmd,
+                    c.calls,
+                    c.bytes_served + c.unmeasured_bytes_served
+                );
             }
         }
         if stats.total_calls == 0 {
@@ -1626,7 +1641,7 @@ pub fn ask_context(task: &str, budget: Budget, json: bool) -> Result<()> {
     let service = KungfuService::open(&cwd)?;
     let packet = service.ask_context(task, budget)?;
     let output = serde_json::to_string_pretty(&packet)?;
-    service.track_call("ask_context", output.len(), 0);
+    service.track_call("ask_context", output.len(), None);
 
     if json {
         println!("{}", output);
@@ -1684,7 +1699,7 @@ pub fn diff_context(budget: Budget, json: bool) -> Result<()> {
     let service = KungfuService::open(&cwd)?;
     let packet = service.diff_context(budget)?;
     let output = serde_json::to_string_pretty(&packet)?;
-    service.track_call("diff_context", output.len(), 0);
+    service.track_call("diff_context", output.len(), None);
 
     if json {
         println!("{}", output);
@@ -2398,7 +2413,7 @@ pub fn change_timeline(name: &str, budget: Budget, json: bool) -> Result<()> {
     let service = KungfuService::open(&cwd)?;
     let events = service.change_timeline(name, budget)?;
     let output = serde_json::to_string_pretty(&events)?;
-    service.track_call("change_timeline", output.len(), 0);
+    service.track_call("change_timeline", output.len(), None);
 
     if json {
         println!("{}", output);
@@ -2432,7 +2447,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
             let kind: ProjectMemoryKind = kind.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let entry =
                 service.memory_add(kind, &content, title.as_deref(), tags, files, symbols, pin)?;
-            service.track_call("memory_add", 0, 0);
+            service.track_call("memory_add", 0, None);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -2453,7 +2468,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 ..Default::default()
             };
             let entries = service.memory_list(&filter)?;
-            service.track_call("memory_list", 0, 0);
+            service.track_call("memory_list", 0, None);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else if entries.is_empty() {
@@ -2470,7 +2485,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
         }
         MemoryCommands::Show { id } => {
             let entry = service.memory_show(&id)?;
-            service.track_call("memory_show", 0, 0);
+            service.track_call("memory_show", 0, None);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -2509,7 +2524,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 ..Default::default()
             };
             let results = service.memory_search(&query, &filter)?;
-            service.track_call("memory_search", 0, 0);
+            service.track_call("memory_search", 0, None);
             if json {
                 // Mirror the MCP tool: full entry only for confident hits; below the
                 // threshold emit a stub + excerpt so weak matches don't flood context.
@@ -2559,7 +2574,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
             let tags_opt = if tags.is_empty() { None } else { Some(tags) };
             let entry =
                 service.memory_update(&id, content.as_deref(), title.as_deref(), tags_opt, pin)?;
-            service.track_call("memory_update", 0, 0);
+            service.track_call("memory_update", 0, None);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -2568,7 +2583,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
         }
         MemoryCommands::Archive { id } => {
             let entry = service.memory_archive(&id)?;
-            service.track_call("memory_archive", 0, 0);
+            service.track_call("memory_archive", 0, None);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -2581,7 +2596,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 std::process::exit(1);
             }
             service.memory_remove(&id)?;
-            service.track_call("memory_remove", 0, 0);
+            service.track_call("memory_remove", 0, None);
             if json {
                 println!("{}", serde_json::json!({"removed": id}));
             } else {
@@ -2590,7 +2605,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
         }
         MemoryCommands::Pin { id } => {
             let entry = service.memory_pin(&id)?;
-            service.track_call("memory_pin", 0, 0);
+            service.track_call("memory_pin", 0, None);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -2599,7 +2614,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
         }
         MemoryCommands::Unpin { id } => {
             let entry = service.memory_unpin(&id)?;
-            service.track_call("memory_unpin", 0, 0);
+            service.track_call("memory_unpin", 0, None);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
