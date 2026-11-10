@@ -225,7 +225,7 @@ fn detect_test_pattern(files: &[FileEntry]) -> String {
     let test_files: Vec<&str> = files
         .iter()
         .map(|f| f.path.as_str())
-        .filter(|p| p.contains("test") || p.contains("spec"))
+        .filter(|p| crate::helpers::is_test_path(p))
         .collect();
 
     if test_files.is_empty() {

@@ -32,7 +32,9 @@ pub use project_memory::{AbsorbReport, MemoryMeta, ProjectMemoryStore};
 ///   (tests, entrypoint, config, database, http, cli, auth, types).
 /// - 5: FileEntry.purpose_source (doc | agent | agent-stale) + agent
 ///   annotations merged from `.kungfu/annotations.json` at index time.
-pub const INDEX_SCHEMA_VERSION: u32 = 5;
+/// - 6: one shared test-path predicate (`kungfu_types::test_paths`) drives
+///   TestFor relations and the `tests` file tag; stale indexes rebuild once.
+pub const INDEX_SCHEMA_VERSION: u32 = 6;
 
 /// Atomically replace `path` with `contents`: write a sibling temp file, then
 /// rename it over the target. Rename is atomic on the same filesystem, so a

@@ -1,4 +1,4 @@
-use crate::helpers::{is_code_language, is_test_symbol};
+use crate::helpers::{is_code_language, is_test_path};
 use crate::types::{
     AffectedEntry, AffectedResult, CouplingEntry, HotspotEntry, ReviewResult, SmartTestEntry,
     SmartTestKind, SmartTestResult,
@@ -115,9 +115,10 @@ impl KungfuService {
         let all_symbols = self.search().get_all_symbols()?;
 
         // Find test symbol candidates by exact name. There may be several if duplicated.
+        let is_test = crate::helpers::test_symbol_ids(&all_symbols);
         let test_ids: HashSet<&str> = all_symbols
             .iter()
-            .filter(|s| s.name == test_name && is_test_symbol(s))
+            .filter(|s| s.name == test_name && is_test.contains(&s.id))
             .map(|s| s.id.as_str())
             .collect();
 
@@ -153,7 +154,7 @@ impl KungfuService {
 
         for id in &direct {
             if let Some(sym) = symbol_map.get(id) {
-                if is_test_symbol(sym) {
+                if is_test.contains(&sym.id) {
                     continue;
                 }
                 if seen.insert(*id) {
@@ -164,7 +165,7 @@ impl KungfuService {
 
         for (id, via_id) in &transitive {
             if let Some(sym) = symbol_map.get(id) {
-                if is_test_symbol(sym) {
+                if is_test.contains(&sym.id) {
                     continue;
                 }
                 let via_name = symbol_map
@@ -323,6 +324,7 @@ impl KungfuService {
         let all_symbols = store.symbols_arc()?;
         let relations = store.relations_arc()?;
         let files = store.files_arc()?;
+        let is_test = crate::helpers::test_fn_ids(&all_symbols);
         let mut symbols_by_path: HashMap<&str, Vec<&Symbol>> = HashMap::new();
         for sym in all_symbols.iter() {
             symbols_by_path
@@ -335,7 +337,7 @@ impl KungfuService {
             return Ok(SmartTestResult {
                 changed_symbols: vec![],
                 tests: vec![],
-                total_tests_in_project: count_test_symbols(&all_symbols),
+                total_tests_in_project: count_test_symbols(&is_test),
             });
         }
 
@@ -400,7 +402,7 @@ impl KungfuService {
             if let Some(callers) = reverse_calls.get(changed_id.as_str()) {
                 for &caller_id in callers {
                     if let Some(caller) = symbol_map.get(caller_id) {
-                        if is_test_symbol(caller) {
+                        if is_test.contains(&caller.id) {
                             let key = format!("{}::{}", caller.path, caller.name);
                             if seen_tests.insert(key) {
                                 let changed_name = symbol_map
@@ -427,27 +429,31 @@ impl KungfuService {
             .collect();
 
         for sym in all_symbols.iter() {
-            if is_test_symbol(sym) {
-                if let Some((dir, _)) = sym.path.rsplit_once('/') {
-                    if changed_dirs.contains(dir) {
-                        let key = format!("{}::{}", sym.path, sym.name);
-                        if seen_tests.insert(key) {
-                            test_entries.push(SmartTestEntry {
-                                test_name: sym.name.clone(),
-                                test_path: sym.path.clone(),
-                                reason: "co-located test".to_string(),
-                                kind: SmartTestKind::Test,
-                            });
-                        }
-                    }
-                }
+            if !is_test.contains(&sym.id) {
+                continue;
+            }
+            // An inline test module is co-located only with its own file; the
+            // directory rule is for path-matched test files.
+            let colocated = changed_file_paths.contains(sym.path.as_str())
+                || is_test_path(&sym.path)
+                    && sym
+                        .path
+                        .rsplit_once('/')
+                        .is_some_and(|(dir, _)| changed_dirs.contains(dir));
+            if colocated && seen_tests.insert(format!("{}::{}", sym.path, sym.name)) {
+                test_entries.push(SmartTestEntry {
+                    test_name: sym.name.clone(),
+                    test_path: sym.path.clone(),
+                    reason: "co-located test".to_string(),
+                    kind: SmartTestKind::Test,
+                });
             }
         }
 
         Ok(SmartTestResult {
             changed_symbols,
             tests: test_entries,
-            total_tests_in_project: count_test_symbols(&all_symbols),
+            total_tests_in_project: count_test_symbols(&is_test),
         })
     }
 
@@ -524,7 +530,7 @@ impl KungfuService {
                     || f.ends_with(".js")
                     || f.ends_with(".py")
                     || f.ends_with(".go");
-                let is_test = f.contains("test") || f.contains("spec");
+                let is_test = is_test_path(f);
                 is_code && !is_test && !tested_paths.contains(f.as_str())
             })
             .cloned()
@@ -639,8 +645,8 @@ impl KungfuService {
     }
 }
 
-pub(crate) fn count_test_symbols(symbols: &[Symbol]) -> usize {
-    symbols.iter().filter(|s| is_test_symbol(s)).count()
+pub(crate) fn count_test_symbols(test_ids: &HashSet<String>) -> usize {
+    test_ids.len()
 }
 
 /// How many changed symbol names a staged blast radius walks before it stops

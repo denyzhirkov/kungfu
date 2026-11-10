@@ -10,5 +10,6 @@ pub mod project;
 pub mod relation;
 pub mod stats;
 pub mod symbol;
+pub mod test_paths;
 
 pub use budget::Budget;

@@ -333,10 +333,8 @@ impl<'a> SearchEngine<'a> {
 
                 // 4. Test file pattern
                 if f_stem.contains(&target_stem) || target_stem.contains(&f_stem) {
-                    let is_test_pair = f.path.contains("test")
-                        || f.path.contains("spec")
-                        || target_path.contains("test")
-                        || target_path.contains("spec");
+                    let is_test_pair = kungfu_types::test_paths::is_test_path(&f.path)
+                        || kungfu_types::test_paths::is_test_path(target_path);
                     score += if is_test_pair { 0.3 } else { 0.1 };
                 }
 

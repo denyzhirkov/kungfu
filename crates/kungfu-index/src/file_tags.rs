@@ -105,7 +105,7 @@ pub fn derive_tags(rel_path: &str, imports: &[RawImport], symbols: &[Symbol]) ->
     let dirs = &segments[..segments.len().saturating_sub(1)];
 
     // -- path rules ---------------------------------------------------------
-    if is_test_path(dirs, stem, file_name) {
+    if kungfu_types::test_paths::is_test_path(rel_path) {
         add("tests", &mut tags);
     }
     if is_entrypoint_file(file_name) {
@@ -147,22 +147,6 @@ pub fn derive_tags(rel_path: &str, imports: &[RawImport], symbols: &[Symbol]) ->
     }
 
     tags
-}
-
-/// Test markers: test directories (this also covers the JVM `src/test/java`
-/// layout), `test_*` / `*_test` stems, and `.test.` / `.spec.` infixes.
-/// A bare `*test` suffix is deliberately NOT a marker — "contest.rs" is not a test.
-fn is_test_path(dirs: &[&str], stem: &str, file_name: &str) -> bool {
-    dirs.iter().any(|d| {
-        matches!(
-            *d,
-            "tests" | "test" | "__tests__" | "spec" | "specs" | "testdata"
-        )
-    }) || stem.starts_with("test_")
-        || stem.ends_with("_test")
-        || stem.ends_with("_tests")
-        || file_name.contains(".test.")
-        || file_name.contains(".spec.")
 }
 
 fn is_entrypoint_file(file_name: &str) -> bool {
