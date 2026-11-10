@@ -238,3 +238,214 @@ fn staged_rename_is_not_clean() {
     assert_eq!(strings(&out["deleted_files"]), ["keep.rs"]);
     std::fs::remove_dir_all(&tmp).ok();
 }
+
+/// Commit `files` together `times` times, each round with new content.
+fn co_commit(dir: &Path, files: &[&str], times: usize) {
+    let group = files.join(",");
+    for round in 0..times {
+        for f in files {
+            std::fs::write(dir.join(f), format!("pub fn r{round}() {{}}\n// {group}\n")).unwrap();
+        }
+        // Explicit paths: `.kungfu/` is deliberately not ignored (see temp_repo).
+        let mut add = vec!["add", "--"];
+        add.extend_from_slice(files);
+        git(dir, &add);
+        git(dir, &["commit", "-q", "-m", &format!("round {round}")]);
+    }
+}
+
+#[test]
+fn file_that_always_co_changes_is_reported_missing() {
+    let (tmp, svc) = temp_repo("cochange");
+    co_commit(&tmp, &["a.rs", "b.rs"], 5);
+    svc.index_full().unwrap();
+    std::fs::write(tmp.join("a.rs"), "pub fn r9() {}\n").unwrap();
+
+    let out = svc.verify_change(1).unwrap();
+    let missing = out["missing_co_changes"].as_array().unwrap();
+    assert_eq!(missing.len(), 1, "{out}");
+    assert_eq!(missing[0]["file"], "b.rs");
+    assert_eq!(missing[0]["co_changed_with"], "a.rs");
+    assert_eq!(missing[0]["count"], 5);
+    assert_eq!(missing[0]["confidence"], 1.0);
+    assert!(out["co_change_window"]
+        .as_str()
+        .unwrap()
+        .contains("last 500 commits"));
+    assert!(strings(&out["risk_reasons"])
+        .iter()
+        .any(|r| r.contains("missing co-changes")));
+    assert_ne!(out["risk"], "LOW");
+
+    // Changing both clears it.
+    std::fs::write(tmp.join("b.rs"), "pub fn r9() {}\n").unwrap();
+    let out = svc.verify_change(1).unwrap();
+    assert!(out["missing_co_changes"].as_array().unwrap().is_empty());
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// Three shared commits out of three is confidence 1.0 and still noise.
+#[test]
+fn file_with_too_little_history_has_no_partners() {
+    let (tmp, svc) = temp_repo("cothin");
+    co_commit(&tmp, &["a.rs", "b.rs"], 3);
+    svc.index_full().unwrap();
+    std::fs::write(tmp.join("a.rs"), "pub fn r9() {}\n").unwrap();
+
+    let out = svc.verify_change(1).unwrap();
+    assert!(
+        out["missing_co_changes"].as_array().unwrap().is_empty(),
+        "{out}"
+    );
+    assert!(out["co_change_window"]
+        .as_str()
+        .unwrap()
+        .contains("≥5 commits"));
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn changed_function_without_a_test_is_untested() {
+    let (tmp, svc) = temp_repo("untested");
+    std::fs::write(tmp.join("keep.rs"), "pub fn keep_fn() { let _x = 1; }\n").unwrap();
+    std::fs::write(
+        tmp.join("pkg/covered.rs"),
+        "pub fn covered_fn() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn it_works() { super::covered_fn(); }\n}\n",
+    )
+    .unwrap();
+
+    let out = svc.verify_change(1).unwrap();
+    let untested = strings(&out["untested"]);
+    assert!(untested.contains(&"keep.rs::keep_fn"), "{out}");
+    assert!(
+        !untested.iter().any(|s| s.starts_with("pkg/covered.rs")),
+        "inline-tested file and its test must not be listed: {out}"
+    );
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn co_change_and_untested_lists_are_capped() {
+    let (tmp, svc) = temp_repo("cocap");
+    // 11 groups, each one changed file with 5 partners: 55 missing co-changes.
+    for g in 0..11 {
+        let group: Vec<String> = std::iter::once(format!("c{g}.rs"))
+            .chain((0..5).map(|p| format!("p{g}_{p}.rs")))
+            .collect();
+        let refs: Vec<&str> = group.iter().map(String::as_str).collect();
+        co_commit(&tmp, &refs, 5);
+    }
+    svc.index_full().unwrap();
+    for g in 0..11 {
+        std::fs::write(
+            tmp.join(format!("c{g}.rs")),
+            format!("pub fn edited_{g}() {{}}\n"),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(tmp.join("gen")).unwrap();
+    for i in 0..60 {
+        std::fs::write(
+            tmp.join(format!("gen/u{i}.rs")),
+            format!("pub fn bare_{i}() {{}}\n"),
+        )
+        .unwrap();
+    }
+
+    let out = svc.verify_change(1).unwrap();
+    assert_eq!(out["missing_co_changes"].as_array().unwrap().len(), 50);
+    assert!(out["missing_co_changes_note"]
+        .as_str()
+        .unwrap()
+        .contains("50 of 55"));
+    assert_eq!(out["untested"].as_array().unwrap().len(), 50);
+    assert!(
+        out["untested_note"].as_str().unwrap().contains("50 of 71"),
+        "{out}"
+    );
+    // 71 changed files with no blast radius: LOW, raised once by co-changes;
+    // untested code adds a reason, never a level.
+    assert_eq!(out["risk"], "MEDIUM", "{out}");
+    assert!(out["untested_note"]
+        .as_str()
+        .unwrap()
+        .starts_with("heuristic"));
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn weak_lockfile_and_hub_co_changes_are_dropped() {
+    let (tmp, svc) = temp_repo("conoise");
+    // hub.rs is in nearly every commit: a registration list, not a real partner.
+    for i in 0..20 {
+        let x = format!("x{i}.rs");
+        co_commit(&tmp, &["hub.rs", &x], 1);
+    }
+    co_commit(&tmp, &["a.rs", "b.rs", "Cargo.lock", "hub.rs"], 4);
+    co_commit(&tmp, &["a.rs", "weak.rs"], 3);
+    svc.index_full().unwrap();
+    std::fs::write(tmp.join("a.rs"), "pub fn changed_a() {}\n").unwrap();
+
+    let out = svc.verify_change(1).unwrap();
+    let missing = out["missing_co_changes"].as_array().unwrap();
+    // b.rs: 4 of a.rs's 7 commits; weak.rs: 3 of 7 (< 0.5).
+    assert_eq!(missing.len(), 1, "{out}");
+    assert_eq!(missing[0]["file"], "b.rs");
+    assert_eq!(missing[0]["confidence"], 0.57);
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn paired_test_file_is_suggested_for_its_changed_source() {
+    let (tmp, svc) = temp_repo("testfor");
+    std::fs::create_dir_all(tmp.join("app/src")).unwrap();
+    std::fs::create_dir_all(tmp.join("app/tests")).unwrap();
+    std::fs::write(tmp.join("app/src/calc.rs"), "pub fn add() {}\n").unwrap();
+    std::fs::write(tmp.join("app/tests/calc.rs"), "fn checks_add() {}\n").unwrap();
+    co_commit(&tmp, &["app/src/calc.rs", "app/tests/calc.rs"], 1);
+    svc.index_full().unwrap();
+    std::fs::write(
+        tmp.join("app/src/calc.rs"),
+        "pub fn add() { let _y = 2; }\n",
+    )
+    .unwrap();
+
+    let out = svc.verify_change(1).unwrap();
+    let tests = out["suggested_tests"].as_array().unwrap();
+    assert!(
+        tests.iter().any(|t| t["path"] == "app/tests/calc.rs"
+            && t["name"] == ""
+            && t["kind"] == "file"
+            && t["reason"] == "test_for app/src/calc.rs"),
+        "{out}"
+    );
+    // The pairing also counts as coverage.
+    assert!(strings(&out["untested"]).is_empty(), "{out}");
+    assert!(svc
+        .smart_test()
+        .unwrap()
+        .tests
+        .iter()
+        .any(|t| t.test_path == "app/tests/calc.rs"));
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn no_commits_declares_missing_co_change_history() {
+    let tmp = std::env::temp_dir().join(format!("kungfu_verify_nohist_{}", std::process::id()));
+    std::fs::remove_dir_all(&tmp).ok();
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("one.rs"), "pub fn one_fn() {}\n").unwrap();
+    git(&tmp, &["init", "-q"]);
+    kungfu_project::init_project(&tmp).unwrap();
+    let svc = KungfuService::open(&tmp).unwrap();
+    svc.index_full().unwrap();
+
+    let out = svc.verify_change(1).unwrap();
+    assert!(out.get("missing_co_changes").is_none(), "{out}");
+    assert!(out["co_change_note"]
+        .as_str()
+        .unwrap()
+        .contains("no commits"));
+    std::fs::remove_dir_all(&tmp).ok();
+}

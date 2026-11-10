@@ -1,5 +1,5 @@
 use anyhow::Result;
-use kungfu_core::{EmptyCallGraphCause, KungfuService};
+use kungfu_core::{EmptyCallGraphCause, KungfuService, SmartTestKind};
 use kungfu_memory::project_search::MemoryFilter;
 use kungfu_project::agent_health::{self, CheckStatus};
 use kungfu_project::{
@@ -1170,8 +1170,14 @@ pub fn verify_change(depth: usize, json: bool) -> Result<()> {
     let truncated = ["changed_symbols_note", "changed_files_note"]
         .iter()
         .any(|k| result[*k].is_string());
+    let reasons: Vec<&str> = result["risk_reasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.as_str())
+        .collect();
     println!(
-        "Changed: {} symbols in {} files{}  |  risk: {}",
+        "Changed: {} symbols in {} files{}  |  risk: {}{}",
         result["changed_symbols"].as_array().map_or(0, |a| a.len()),
         result["changed_files"].as_array().map_or(0, |a| a.len()),
         if truncated {
@@ -1179,7 +1185,12 @@ pub fn verify_change(depth: usize, json: bool) -> Result<()> {
         } else {
             ""
         },
-        result["affected"]["risk"].as_str().unwrap_or("?"),
+        result["risk"].as_str().unwrap_or("?"),
+        if reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", reasons.join("; "))
+        },
     );
     if let Some(contracts) = result["touched_contracts"].as_array() {
         if !contracts.is_empty() {
@@ -1216,11 +1227,33 @@ pub fn verify_change(depth: usize, json: bool) -> Result<()> {
         } else {
             println!("Suggested tests:");
             for t in tests.iter().take(15) {
+                let name = match t["kind"].as_str() {
+                    Some("file") => "(whole file)",
+                    _ => t["name"].as_str().unwrap_or(""),
+                };
+                println!("  {}  {}", t["path"].as_str().unwrap_or(""), name);
+            }
+        }
+    }
+    if let Some(missing) = result["missing_co_changes"].as_array() {
+        if !missing.is_empty() {
+            println!("Missing co-changes ({}):", missing.len());
+            for m in missing.iter().take(5) {
                 println!(
-                    "  {}  {}",
-                    t["path"].as_str().unwrap_or(""),
-                    t["name"].as_str().unwrap_or(""),
+                    "  {}  (with {}, {}x, confidence {})",
+                    m["file"].as_str().unwrap_or(""),
+                    m["co_changed_with"].as_str().unwrap_or(""),
+                    m["count"].as_u64().unwrap_or(0),
+                    m["confidence"].as_f64().unwrap_or(0.0),
                 );
+            }
+        }
+    }
+    if let Some(untested) = result["untested"].as_array() {
+        if !untested.is_empty() {
+            println!("Untested ({}):", untested.len());
+            for u in untested.iter().take(5) {
+                println!("  {}", u.as_str().unwrap_or(""));
             }
         }
     }
@@ -1232,6 +1265,9 @@ pub fn verify_change(depth: usize, json: bool) -> Result<()> {
         "changed_symbols_note",
         "touched_contracts_note",
         "suggested_tests_note",
+        "missing_co_changes_note",
+        "co_change_note",
+        "untested_note",
         "deleted_files_note",
         "untracked_files_note",
         "no_hunk_files_note",
@@ -1278,7 +1314,10 @@ pub fn smart_test(json: bool) -> Result<()> {
             );
             println!();
             for t in &result.tests {
-                println!("  {}::{}", t.test_path, t.test_name);
+                match t.kind {
+                    SmartTestKind::File => println!("  {}  (whole file)", t.test_path),
+                    SmartTestKind::Test => println!("  {}::{}", t.test_path, t.test_name),
+                }
                 println!("    reason: {}", t.reason);
             }
         }

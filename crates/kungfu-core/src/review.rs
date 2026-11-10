@@ -1,13 +1,13 @@
 use crate::helpers::{is_code_language, is_test_symbol};
 use crate::types::{
     AffectedEntry, AffectedResult, CouplingEntry, HotspotEntry, ReviewResult, SmartTestEntry,
-    SmartTestResult,
+    SmartTestKind, SmartTestResult,
 };
 use crate::KungfuService;
 use anyhow::{bail, Result};
 use kungfu_types::file::FileEntry;
 use kungfu_types::relation::{Relation, RelationKind};
-use kungfu_types::symbol::Symbol;
+use kungfu_types::symbol::{Symbol, SymbolKind};
 use std::collections::{HashMap, HashSet};
 
 impl KungfuService {
@@ -322,6 +322,7 @@ impl KungfuService {
         let store = self.store();
         let all_symbols = store.symbols_arc()?;
         let relations = store.relations_arc()?;
+        let files = store.files_arc()?;
         let mut symbols_by_path: HashMap<&str, Vec<&Symbol>> = HashMap::new();
         for sym in all_symbols.iter() {
             symbols_by_path
@@ -379,23 +380,18 @@ impl KungfuService {
         let symbol_map: HashMap<&str, &Symbol> =
             all_symbols.iter().map(|s| (s.id.as_str(), s)).collect();
 
-        // Direct: test_for relations pointing to changed files
-        for r in relations.iter() {
-            if r.kind == RelationKind::TestFor {
-                if let Some(target_sym) = symbol_map.get(r.target_id.as_str()) {
-                    if changed_file_paths.contains(&target_sym.path) {
-                        if let Some(source_sym) = symbol_map.get(r.source_id.as_str()) {
-                            let key = format!("{}::{}", source_sym.path, source_sym.name);
-                            if seen_tests.insert(key) {
-                                test_entries.push(SmartTestEntry {
-                                    test_name: source_sym.name.clone(),
-                                    test_path: source_sym.path.clone(),
-                                    reason: format!("test_for {}", target_sym.path),
-                                });
-                            }
-                        }
-                    }
-                }
+        // Direct: test files paired with a changed file. The pairing is
+        // file-level, so the entry is the whole test file with no test name.
+        for (test_path, source_path) in test_for_pairs(&files, &relations) {
+            if changed_file_paths.contains(source_path)
+                && seen_tests.insert(format!("{test_path}::"))
+            {
+                test_entries.push(SmartTestEntry {
+                    test_name: String::new(),
+                    test_path: test_path.to_string(),
+                    reason: format!("test_for {source_path}"),
+                    kind: SmartTestKind::File,
+                });
             }
         }
 
@@ -415,6 +411,7 @@ impl KungfuService {
                                     test_name: caller.name.clone(),
                                     test_path: caller.path.clone(),
                                     reason: format!("calls changed symbol {}", changed_name),
+                                    kind: SmartTestKind::Test,
                                 });
                             }
                         }
@@ -439,6 +436,7 @@ impl KungfuService {
                                 test_name: sym.name.clone(),
                                 test_path: sym.path.clone(),
                                 reason: "co-located test".to_string(),
+                                kind: SmartTestKind::Test,
                             });
                         }
                     }
@@ -463,6 +461,7 @@ impl KungfuService {
         let store = self.store();
         let all_symbols = store.load_symbols()?;
         let relations = store.relations_arc()?;
+        let files = store.files_arc()?;
 
         // Changed files (content, mode, binary, deletion — anything tracked that differs)
         let base = kungfu_git::diff_base(&self.project.root)?;
@@ -501,33 +500,22 @@ impl KungfuService {
         }
 
         // Co-change analysis: find files that usually change together
-        let co_changes = kungfu_git::co_change_pairs(&self.project.root, 3).unwrap_or_default();
-        let mut missing_co_changes: Vec<String> = Vec::new();
-        for file in &changed_files {
-            if let Some(partners) = co_changes.get(file) {
-                for (partner, count) in partners.iter().take(5) {
-                    if !changed_file_set.contains(partner.as_str()) {
-                        missing_co_changes
-                            .push(format!("{} (co-changed {}x with {})", partner, count, file));
-                    }
-                }
-            }
-        }
+        let mut missing_co_changes: Vec<String> =
+            missing_co_changes(&self.project.root, &changed_file_set)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|m| {
+                    format!(
+                        "{} (co-changed {}x with {})",
+                        m.file, m.count, m.co_changed_with
+                    )
+                })
+                .collect();
         missing_co_changes.sort();
         missing_co_changes.dedup();
 
         // Find untested changes
-        let symbol_map: HashMap<&str, &Symbol> =
-            all_symbols.iter().map(|s| (s.id.as_str(), s)).collect();
-        let mut tested_paths: HashSet<&str> = HashSet::new();
-        for r in relations.iter() {
-            if r.kind == RelationKind::TestFor {
-                if let Some(target) = symbol_map.get(r.target_id.as_str()) {
-                    tested_paths.insert(&target.path);
-                }
-            }
-        }
-
+        let tested_paths = tested_paths(&files, &relations);
         let untested_changes: Vec<String> = changed_files
             .iter()
             .filter(|f| {
@@ -684,6 +672,183 @@ fn risk_level(entries: usize, test_files: usize) -> &'static str {
     } else {
         "LOW"
     }
+}
+
+/// Co-change pairs seen fewer times than this are noise.
+const CO_CHANGE_MIN_COUNT: usize = 3;
+/// Share of the changed file's commits that also touched the partner.
+const CO_CHANGE_MIN_CONFIDENCE: f64 = 0.5;
+/// A partner touched by more than this share of all commits is a hub
+/// (registration list, manifest) that co-changes with everything.
+const CO_CHANGE_UBIQUITOUS_SHARE: f64 = 0.25;
+/// Below this many commits every active file looks ubiquitous, so the hub
+/// filter is off.
+const CO_CHANGE_UBIQUITY_MIN_COMMITS: usize = 20;
+/// A changed file with fewer commits than this has no meaningful partners:
+/// three shared commits out of three read as confidence 1.0.
+const CO_CHANGE_MIN_FILE_COMMITS: usize = 5;
+/// Strongest partners reported per changed file.
+const CO_CHANGE_PARTNERS: usize = 5;
+/// Regenerated with their manifest, never edited by hand.
+const LOCKFILES: &[&str] = &[
+    "Cargo.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lockb",
+    "poetry.lock",
+    "Pipfile.lock",
+    "uv.lock",
+    "go.sum",
+    "Gemfile.lock",
+    "composer.lock",
+    "mix.lock",
+    "pubspec.lock",
+    "Podfile.lock",
+    "flake.lock",
+    "packages.lock.json",
+];
+
+/// What `missing_co_changes` reads and keeps, for the response to declare.
+pub(crate) fn co_change_window() -> String {
+    format!(
+        "last {} commits (commits touching >{} files skipped); only changed files with ≥{} commits in the window are checked; kept: co-changed ≥{}x and in ≥{:.0}% of the changed file's commits, top {} per changed file; dropped: lockfiles, and files in >{:.0}% of all commits once history has ≥{} commits",
+        kungfu_git::CO_CHANGE_WINDOW,
+        kungfu_git::CO_CHANGE_MAX_FILES,
+        CO_CHANGE_MIN_FILE_COMMITS,
+        CO_CHANGE_MIN_COUNT,
+        CO_CHANGE_MIN_CONFIDENCE * 100.0,
+        CO_CHANGE_PARTNERS,
+        CO_CHANGE_UBIQUITOUS_SHARE * 100.0,
+        CO_CHANGE_UBIQUITY_MIN_COMMITS,
+    )
+}
+
+/// A file that historically changes together with a changed file but is
+/// absent from the change set.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct MissingCoChange {
+    pub file: String,
+    pub co_changed_with: String,
+    pub count: usize,
+    /// count / commits touching `co_changed_with`, two decimals
+    pub confidence: f64,
+}
+
+/// Files that usually change with `changed` but are not in it, filtered by
+/// the rules `co_change_window` states. One git log for the whole set;
+/// partners no longer on disk are dropped (renamed or deleted in history).
+/// Strongest first.
+pub(crate) fn missing_co_changes(
+    root: &std::path::Path,
+    changed: &HashSet<&str>,
+) -> Result<Vec<MissingCoChange>> {
+    let history = kungfu_git::co_change_history(root, CO_CHANGE_MIN_COUNT)?;
+    let ubiquitous = |path: &str| {
+        history.commits >= CO_CHANGE_UBIQUITY_MIN_COMMITS
+            && history.file_commits.get(path).copied().unwrap_or(0) as f64
+                > history.commits as f64 * CO_CHANGE_UBIQUITOUS_SHARE
+    };
+    let is_lockfile = |path: &str| LOCKFILES.contains(&path.rsplit('/').next().unwrap_or(path));
+
+    let mut out = Vec::new();
+    for file in changed {
+        let Some(partners) = history.partners.get(*file) else {
+            continue;
+        };
+        let own_commits = history.file_commits.get(*file).copied().unwrap_or(0);
+        if own_commits < CO_CHANGE_MIN_FILE_COMMITS {
+            continue;
+        }
+        let kept = partners
+            .iter()
+            .map(|(partner, count)| (partner, *count, *count as f64 / own_commits as f64))
+            .filter(|(partner, _, confidence)| {
+                *confidence >= CO_CHANGE_MIN_CONFIDENCE
+                    && !changed.contains(partner.as_str())
+                    && !is_lockfile(partner)
+                    && !ubiquitous(partner)
+                    && root.join(partner).exists()
+            })
+            .take(CO_CHANGE_PARTNERS);
+        for (partner, count, confidence) in kept {
+            out.push(MissingCoChange {
+                file: partner.clone(),
+                co_changed_with: (*file).to_string(),
+                count,
+                confidence: (confidence * 100.0).round() / 100.0,
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        b.confidence
+            .total_cmp(&a.confidence)
+            .then_with(|| b.count.cmp(&a.count))
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.co_changed_with.cmp(&b.co_changed_with))
+    });
+    Ok(out)
+}
+
+/// (test file, source file) path pairs. TestFor links file ids, not symbols.
+fn test_for_pairs<'a>(files: &'a [FileEntry], relations: &[Relation]) -> Vec<(&'a str, &'a str)> {
+    let path_by_id: HashMap<&str, &str> = files
+        .iter()
+        .map(|f| (f.id.as_str(), f.path.as_str()))
+        .collect();
+    relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::TestFor)
+        .filter_map(|r| {
+            Some((
+                *path_by_id.get(r.source_id.as_str())?,
+                *path_by_id.get(r.target_id.as_str())?,
+            ))
+        })
+        .collect()
+}
+
+/// Source files paired with a test file.
+fn tested_paths<'a>(files: &'a [FileEntry], relations: &[Relation]) -> HashSet<&'a str> {
+    test_for_pairs(files, relations)
+        .into_iter()
+        .map(|(_, source)| source)
+        .collect()
+}
+
+/// Changed functions and methods with no test evidence: no test file paired
+/// with their file (TestFor), no test calling them directly, no test in the
+/// same file (inline test module). Test code itself is never listed.
+pub(crate) fn untested_symbols<'s>(
+    changed: &[&'s Symbol],
+    all_symbols: &[Symbol],
+    files: &[FileEntry],
+    relations: &[Relation],
+) -> Vec<&'s Symbol> {
+    let test_ids = crate::helpers::test_symbol_ids(all_symbols);
+    let tested_files = tested_paths(files, relations);
+    let files_with_tests: HashSet<&str> = all_symbols
+        .iter()
+        .filter(|s| test_ids.contains(&s.id))
+        .map(|s| s.path.as_str())
+        .collect();
+    let test_called: HashSet<&str> = relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::Calls && test_ids.contains(&r.source_id))
+        .map(|r| r.target_id.as_str())
+        .collect();
+    changed
+        .iter()
+        .copied()
+        .filter(|s| {
+            matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
+                && !test_ids.contains(&s.id)
+                && !tested_files.contains(s.path.as_str())
+                && !files_with_tests.contains(s.path.as_str())
+                && !test_called.contains(s.id.as_str())
+        })
+        .collect()
 }
 
 /// Result of one reverse-dependency walk from a symbol name.

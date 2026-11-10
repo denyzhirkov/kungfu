@@ -88,9 +88,20 @@ pub struct AffectedResult {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SmartTestEntry {
+    /// Empty for `kind: file` — there is no single test to filter on.
     pub test_name: String,
     pub test_path: String,
     pub reason: String,
+    pub kind: SmartTestKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmartTestKind {
+    /// One test function.
+    Test,
+    /// A whole test file paired with a changed file (TestFor).
+    File,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
