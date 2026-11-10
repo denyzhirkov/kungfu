@@ -46,14 +46,6 @@ pub struct QueryParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SymbolNameParam {
-    /// Exact symbol name
-    pub name: String,
-    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "auto"
-    pub budget: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 pub struct FilePathBudgetParam {
     /// Path to the file (relative to project root)
     pub path: String,
@@ -111,18 +103,12 @@ pub struct AskContextParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct CommitContextParam {
-    /// Commit hash (full or short).
-    pub hash: String,
-    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "auto"
-    pub budget: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct PrContextParam {
-    /// PR number.
-    pub num: u32,
-    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "auto"
+pub struct HistoryParam {
+    /// File path (relative to project root). Exactly one of `path` / `symbol` is required.
+    pub path: Option<String>,
+    /// Exact symbol name. Exactly one of `path` / `symbol` is required.
+    pub symbol: Option<String>,
+    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "small"
     pub budget: Option<String>,
 }
 

@@ -73,15 +73,67 @@ pub fn file_log(root: &Path, file_path: &str, max_entries: usize) -> Result<Vec<
         .output()
         .context("failed to run git log")?;
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(text
-        .lines()
+    Ok(parse_log(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Like `file_log`, but a failing git invocation is an error instead of an empty log,
+/// so "no history" and "git failed" stay distinguishable.
+pub fn file_log_checked(root: &Path, file_path: &str, max_entries: usize) -> Result<Vec<LogEntry>> {
+    let output = Command::new("git")
+        .args([
+            "log",
+            "--follow",
+            &format!("-{}", max_entries),
+            "--format=%H|%ai|%an|%s",
+            "--",
+            file_path,
+        ])
+        .current_dir(root)
+        .output()
+        .context("failed to run git log")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git log failed for {}: {}",
+            file_path,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(parse_log(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The commit that first added the file (following renames): the oldest add event.
+/// Walks the file's full history — call it only when a capped log can't answer.
+pub fn file_introduced(root: &Path, file_path: &str) -> Result<Option<LogEntry>> {
+    let output = Command::new("git")
+        .args([
+            "log",
+            "--follow",
+            "--diff-filter=A",
+            "--format=%H|%ai|%an|%s",
+            "--",
+            file_path,
+        ])
+        .current_dir(root)
+        .output()
+        .context("failed to run git log")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git log failed for {}: {}",
+            file_path,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(parse_log(&String::from_utf8_lossy(&output.stdout)).pop())
+}
+
+fn parse_log(text: &str) -> Vec<LogEntry> {
+    text.lines()
         .filter(|l| !l.is_empty())
         .filter_map(|line| {
             let parts: Vec<&str> = line.splitn(4, '|').collect();
             if parts.len() == 4 {
                 Some(LogEntry {
-                    hash: parts[0][..8].to_string(),
+                    hash: parts[0].chars().take(8).collect(),
                     date: parts[1].to_string(),
                     author: parts[2].to_string(),
                     message: parts[3].to_string(),
@@ -90,7 +142,7 @@ pub fn file_log(root: &Path, file_path: &str, max_entries: usize) -> Result<Vec<
                 None
             }
         })
-        .collect())
+        .collect()
 }
 
 /// Git blame for a line range: who last changed each line.
@@ -172,8 +224,25 @@ fn format_timestamp(ts: i64) -> String {
 
 /// Count how many commits touched each file (git churn).
 pub fn file_commit_counts(root: &Path) -> Result<HashMap<String, usize>> {
-    let output = Command::new("git")
-        .args(["log", "--format=", "--name-only"])
+    commit_counts(root, None)
+}
+
+/// Commit counts over only the most recent `max_commits` commits.
+pub fn recent_file_commit_counts(
+    root: &Path,
+    max_commits: usize,
+) -> Result<HashMap<String, usize>> {
+    commit_counts(root, Some(max_commits))
+}
+
+fn commit_counts(root: &Path, max_commits: Option<usize>) -> Result<HashMap<String, usize>> {
+    let mut cmd = Command::new("git");
+    cmd.args(["log", "--format=", "--name-only"]);
+    if let Some(n) = max_commits {
+        // Project-relative paths, scoped to the project (it may be nested in the repo).
+        cmd.arg(format!("-n{n}")).arg("--relative");
+    }
+    let output = cmd
         .current_dir(root)
         .output()
         .context("failed to run git log --name-only")?;
