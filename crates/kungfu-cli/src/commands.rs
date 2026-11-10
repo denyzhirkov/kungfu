@@ -25,16 +25,21 @@ enum InitTarget {
 /// before; an index owned by an enclosing repository blocks it unless `here`.
 fn init_target(cwd: &std::path::Path, here: bool) -> Result<InitTarget> {
     let requested = find_marker_root(cwd)?;
-    if requested.join(".kungfu").exists() {
+    if kungfu_project::is_initialized(&requested) {
         return Ok(InitTarget::AlreadyHere(requested));
     }
-    match find_indexed_root(cwd) {
-        Some(index_root) if !here => Ok(InitTarget::InsideIndexed {
+    if here {
+        return Ok(InitTarget::Create(requested));
+    }
+    if let Some(index_root) = find_indexed_root(cwd) {
+        return Ok(InitTarget::InsideIndexed {
             requested,
             index_root,
-        }),
-        _ => Ok(InitTarget::Create(requested)),
+        });
     }
+    // A partial root above a sub-package is completed, not shadowed by a nested index.
+    let root = kungfu_project::find_partial_root(cwd).unwrap_or(requested);
+    Ok(InitTarget::Create(root))
 }
 
 pub fn init(agent: Option<&str>, dry_run: bool, here: bool, json: bool) -> Result<()> {
@@ -60,10 +65,16 @@ pub fn init(agent: Option<&str>, dry_run: bool, here: bool, json: bool) -> Resul
                     );
                 }
             };
+            let completed_partial = kungfu_project::is_partial(&root);
+            let removed: Vec<String> = kungfu_project::stale_derived_dirs(&root)
+                .iter()
+                .filter_map(|d| d.file_name().map(|n| format!("{}/", n.to_string_lossy())))
+                .collect();
             let project = init_project(&root)?;
             if json {
                 let info = serde_json::json!({
-                    "status": "initialized",
+                    "status": if completed_partial { "completed_partial" } else { "initialized" },
+                    "removed_stale": removed,
                     "requested_root": project.root.to_string_lossy(),
                     "index_root": project.root.to_string_lossy(),
                     "root": project.root.to_string_lossy(),
@@ -71,7 +82,20 @@ pub fn init(agent: Option<&str>, dry_run: bool, here: bool, json: bool) -> Resul
                 });
                 println!("{}", serde_json::to_string_pretty(&info)?);
             } else {
-                println!("Initialized kungfu in {}", project.root.display());
+                if completed_partial {
+                    println!(
+                        "Completed a partial kungfu directory in {} (project.json was missing); kept memory/, annotations, config.",
+                        project.root.display()
+                    );
+                    if !removed.is_empty() {
+                        println!(
+                            "  removed stale {} \u{2014} rebuilt on first use or by `kungfu index`.",
+                            removed.join(", ")
+                        );
+                    }
+                } else {
+                    println!("Initialized kungfu in {}", project.root.display());
+                }
                 println!("  project: {}", project.meta.name);
                 println!("  config:  .kungfu/config.toml");
                 println!("\nRun 'kungfu index' to build the project index.");
@@ -104,13 +128,18 @@ fn init_agent_claude(root: &std::path::Path, dry_run: bool, json: bool) -> Resul
     use kungfu_project::agent_init::{init_claude_integration, ActionStatus};
 
     // Ensure the kungfu project itself exists; don't fail if it already does.
-    let kungfu_status = if root.join(kungfu_project::KUNGFU_DIR).exists() {
+    let kungfu_status = if kungfu_project::is_initialized(root) {
         "already current"
-    } else if dry_run {
-        "created"
     } else {
-        init_project(root)?;
-        "created"
+        let status = if kungfu_project::is_partial(root) {
+            "completed"
+        } else {
+            "created"
+        };
+        if !dry_run {
+            init_project(root)?;
+        }
+        status
     };
 
     let actions = init_claude_integration(root, dry_run)?;
@@ -2457,8 +2486,11 @@ pub fn mcp() -> Result<()> {
     };
 
     // Auto-init if not initialized
-    if !root.join(".kungfu").exists() {
+    if !kungfu_project::is_initialized(&root) {
         eprintln!("kungfu: auto-initializing project...");
+        for d in kungfu_project::stale_derived_dirs(&root) {
+            eprintln!("kungfu: removing stale {}", d.display());
+        }
         if let Err(e) = kungfu_project::init_project(&root) {
             eprintln!("kungfu: warning: init failed: {}", e);
         }
@@ -2933,6 +2965,7 @@ mod tests {
     fn hook_root_skips_sub_package_markers() {
         let ws = temp_dir("subpkg");
         std::fs::create_dir_all(ws.join(".kungfu")).unwrap();
+        std::fs::write(ws.join(".kungfu/project.json"), "{}").unwrap();
         std::fs::write(ws.join("Cargo.toml"), "[workspace]\n").unwrap();
         let pkg = ws.join("crates/foo");
         std::fs::create_dir_all(pkg.join("src")).unwrap();
@@ -2949,6 +2982,8 @@ mod tests {
         let b = base.join("b");
         std::fs::create_dir_all(a.join(".kungfu")).unwrap();
         std::fs::create_dir_all(b.join(".kungfu")).unwrap();
+        std::fs::write(a.join(".kungfu/project.json"), "{}").unwrap();
+        std::fs::write(b.join(".kungfu/project.json"), "{}").unwrap();
         std::fs::create_dir_all(b.join("src")).unwrap();
 
         assert_eq!(hook_project_root(&b.join("src/x.rs"), &a), Some(b));
@@ -2959,6 +2994,7 @@ mod tests {
         let base = temp_dir("fallback");
         let proj = base.join("proj");
         std::fs::create_dir_all(proj.join(".kungfu")).unwrap();
+        std::fs::write(proj.join(".kungfu/project.json"), "{}").unwrap();
         let outside = base.join("loose/x.rs");
 
         assert_eq!(hook_project_root(&outside, &proj), Some(proj));
@@ -2979,6 +3015,21 @@ mod tests {
         );
 
         std::fs::create_dir_all(ws.join(".kungfu")).unwrap();
+        // Partial (no project.json): init completes it in place.
+        assert_eq!(
+            init_target(&ws, false).unwrap(),
+            InitTarget::Create(ws.clone())
+        );
+        // From a sub-package the partial root is completed, not shadowed by a nested index.
+        assert_eq!(
+            init_target(&pkg, false).unwrap(),
+            InitTarget::Create(ws.clone())
+        );
+        assert_eq!(
+            init_target(&pkg, true).unwrap(),
+            InitTarget::Create(pkg.clone())
+        );
+        std::fs::write(ws.join(".kungfu/project.json"), "{}").unwrap();
         assert_eq!(
             init_target(&ws, false).unwrap(),
             InitTarget::AlreadyHere(ws.clone())
@@ -3002,6 +3053,7 @@ mod tests {
         let outer = temp_dir("init-stray");
         std::fs::remove_dir_all(outer.join(".git")).unwrap();
         std::fs::create_dir_all(outer.join(".kungfu")).unwrap();
+        std::fs::write(outer.join(".kungfu/project.json"), "{}").unwrap();
         let proj = outer.join("proj");
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("Cargo.toml"), "[package]\n").unwrap();
