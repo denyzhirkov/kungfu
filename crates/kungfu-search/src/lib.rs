@@ -24,6 +24,31 @@ pub struct SearchResult<T> {
     pub score: f64,
 }
 
+/// Why a file matched [`SearchEngine::find_files`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileMatch {
+    /// The query matched the file path.
+    Path,
+    /// The query matched a symbol defined in the file (its best-scoring one).
+    Symbol(String),
+}
+
+impl std::fmt::Display for FileMatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileMatch::Path => write!(f, "path"),
+            FileMatch::Symbol(name) => write!(f, "symbol: {name}"),
+        }
+    }
+}
+
+/// A ranked file hit with the reason it matched.
+pub struct FileHit {
+    pub item: FileEntry,
+    pub score: f64,
+    pub matched: FileMatch,
+}
+
 impl<'a> SearchEngine<'a> {
     pub fn new(store: &'a JsonStore) -> Self {
         Self { store }
@@ -95,7 +120,28 @@ impl<'a> SearchEngine<'a> {
         Ok(None)
     }
 
+    /// [`find_files`](Self::find_files) without the match reasons.
     pub fn search_text(&self, query: &str, budget: Budget) -> Result<Vec<SearchResult<FileEntry>>> {
+        Ok(self
+            .find_files(query, budget, None)?
+            .into_iter()
+            .map(|h| SearchResult {
+                item: h.item,
+                score: h.score,
+            })
+            .collect())
+    }
+
+    /// Ranked file search: a file scores by the better of its path match and the
+    /// best-matching symbol it defines, so a keyword also finds files by contents.
+    /// `scope` (path prefix) filters before the top-k trim, so a scoped search keeps
+    /// its recall instead of filtering an already-trimmed global page.
+    pub fn find_files(
+        &self,
+        query: &str,
+        budget: Budget,
+        scope: Option<&str>,
+    ) -> Result<Vec<FileHit>> {
         let files = self.store.files_arc()?;
         let symbols = self.store.symbols_arc()?;
         let query_lower = query.to_lowercase();
@@ -103,33 +149,35 @@ impl<'a> SearchEngine<'a> {
         let words: Vec<&str> = query_lower.split_whitespace().collect();
         let eq = ExpandedQuery::new(&words);
 
-        // Build a map of file_id -> symbol relevance
-        let mut file_symbol_scores: std::collections::HashMap<String, f64> =
+        // file_id -> (best symbol score, index of that symbol)
+        let mut best_symbol: std::collections::HashMap<&str, (f64, usize)> =
             std::collections::HashMap::new();
         let scores = score_all_symbols(&symbols, &eq);
-        for (sym, sym_score) in symbols.iter().zip(scores) {
+        for (i, (sym, sym_score)) in symbols.iter().zip(scores).enumerate() {
             if sym_score > 0.0 {
-                let entry = file_symbol_scores.entry(sym.file_id.clone()).or_insert(0.0);
-                if sym_score > *entry {
-                    *entry = sym_score;
+                let entry = best_symbol.entry(sym.file_id.as_str()).or_insert((0.0, i));
+                if sym_score > entry.0 {
+                    *entry = (sym_score, i);
                 }
             }
         }
 
-        let mut results: Vec<SearchResult<FileEntry>> = files
+        let mut results: Vec<FileHit> = files
             .iter()
+            .filter(|f| scope.is_none_or(|s| f.path.starts_with(s)))
             .filter_map(|f| {
                 let path_score = score_path_match(&f.path, &query_lower, &eq);
-                let sym_score = file_symbol_scores.get(&f.id).copied().unwrap_or(0.0) * 0.8;
-                let combined = path_score.max(sym_score);
-                if combined > 0.0 {
-                    Some(SearchResult {
-                        item: f.clone(),
-                        score: combined,
-                    })
-                } else {
-                    None
-                }
+                let (score, matched) = match best_symbol.get(f.id.as_str()) {
+                    Some(&(s, i)) if s * 0.8 > path_score => {
+                        (s * 0.8, FileMatch::Symbol(symbols[i].name.clone()))
+                    }
+                    _ => (path_score, FileMatch::Path),
+                };
+                (score > 0.0).then(|| FileHit {
+                    item: f.clone(),
+                    score,
+                    matched,
+                })
             })
             .collect();
 
@@ -140,10 +188,6 @@ impl<'a> SearchEngine<'a> {
         });
         results.truncate(top_k);
         Ok(results)
-    }
-
-    pub fn find_files(&self, query: &str, budget: Budget) -> Result<Vec<SearchResult<FileEntry>>> {
-        self.search_text(query, budget)
     }
 
     /// Shared snapshot of every indexed file — no per-call clone.

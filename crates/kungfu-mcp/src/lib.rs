@@ -36,7 +36,9 @@ impl KungfuMcp {
 
 #[tool_router]
 impl KungfuMcp {
-    #[tool(description = "Show project status: file count, symbol count, languages, git status")]
+    #[tool(
+        description = "Show project status: file count, symbol count, languages, git status, update check, and an `embeddings` block (ready, feature, model, vectors, job_running, one-line `hint` with the next step). Cheap — safe to poll"
+    )]
     fn project_status(&self) -> Result<String, String> {
         tools::project::project_status(self)
     }
@@ -49,16 +51,21 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Return compact repo map: top directories, language distribution, entrypoints"
+        description = "Return compact repo map: top directories, language distribution, entrypoints. Set include_onboard=true to add the onboarding summary (architecture, key symbols, naming, test layout, glossary with provenance) — useful for system prompts and CLAUDE.md"
     )]
-    fn repo_outline(&self, Parameters(params): Parameters<BudgetParam>) -> Result<String, String> {
+    fn repo_outline(
+        &self,
+        Parameters(params): Parameters<RepoOutlineParam>,
+    ) -> Result<String, String> {
         tools::project::repo_outline(self, params)
     }
 
-    #[tool(description = "Return compact file structure: symbols, signatures, exports")]
+    #[tool(
+        description = "Return compact file structure: symbols, signatures, exports. Budget above tiny (default) also returns related files (imports, proximity, naming) and key symbols"
+    )]
     fn file_outline(
         &self,
-        Parameters(params): Parameters<FilePathParam>,
+        Parameters(params): Parameters<FileOutlineParam>,
     ) -> Result<String, String> {
         tools::project::file_outline(self, params)
     }
@@ -70,18 +77,15 @@ impl KungfuMcp {
         tools::search::find_symbol(self, params)
     }
 
-    #[tool(description = "Search text across indexed files by path and name matching")]
-    fn search_text(&self, Parameters(params): Parameters<QueryParam>) -> Result<String, String> {
-        tools::search::search_text(self, params)
-    }
-
-    #[tool(description = "Find files by path pattern or keywords")]
+    #[tool(
+        description = "Find files by path or keywords, ranked by the better of path match and the best-matching symbol each file defines — so a keyword also finds files by what they contain. Each hit carries `match`: \"path\" or \"symbol: <name>\". Not a literal content grep"
+    )]
     fn find_files(&self, Parameters(params): Parameters<QueryParam>) -> Result<String, String> {
         tools::search::find_files(self, params)
     }
 
     #[tool(
-        description = "Smart context retrieval: parse task intent, run multi-strategy search (symbols, text, related files, import chains), return ranked context packet. Use 'include' to select layers: code (default), rationale (design decisions, TODOs), history (evolution timeline)"
+        description = "Smart context retrieval: parse task intent, run multi-strategy search (symbols, text, related files, import chains), return ranked context packet. Diff-aware: lists uncommitted `changed_files` and marks items in them \"recently changed\" in `why`. Use 'include' to select layers: code (default), rationale (design decisions, TODOs), history (evolution timeline)"
     )]
     fn ask_context(
         &self,
@@ -111,23 +115,6 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Composite: explore a file in one call — outline + related files + key symbols. Replaces file_outline → find_related_files chain"
-    )]
-    fn explore_file(
-        &self,
-        Parameters(params): Parameters<FilePathBudgetParam>,
-    ) -> Result<String, String> {
-        tools::context::explore_file(self, params)
-    }
-
-    #[tool(
-        description = "Composite: investigate a query in one call — smart context retrieval + diff awareness + snippets. Replaces ask_context → diff_context chain"
-    )]
-    fn investigate(&self, Parameters(params): Parameters<QueryParam>) -> Result<String, String> {
-        tools::context::investigate(self, params)
-    }
-
-    #[tool(
         description = "Parse a stack trace, panic, or traceback and return a context packet of the involved symbols plus their siblings. Recognises Rust panic + backtrace, JS stack, Python traceback, Go panic"
     )]
     fn debug_trace(
@@ -152,7 +139,7 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Find symbols by concept rather than name. When local embeddings are built (`embeddings_status` shows ready), runs vector cosine top-K; otherwise falls back to keyword expansion. Use this when you do NOT know a likely symbol name — for known names, use `find_symbol`."
+        description = "Find symbols by concept rather than name. When local embeddings are built (`project_status` shows embeddings.ready), runs vector cosine top-K; otherwise falls back to keyword expansion. Use this when you do NOT know a likely symbol name — for known names, use `find_symbol`."
     )]
     fn semantic_search(
         &self,
@@ -217,13 +204,6 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Generate project onboarding summary: architecture, patterns, key symbols, naming conventions, test structure. Perfect for system prompts and CLAUDE.md"
-    )]
-    fn onboard(&self) -> Result<String, String> {
-        tools::review::onboard(self)
-    }
-
-    #[tool(
         description = "Blast radius analysis: find all transitive callers and dependents of a symbol. Shows affected code, test files, and risk level (LOW/MEDIUM/HIGH)"
     )]
     fn affected(&self, Parameters(params): Parameters<AffectedParam>) -> Result<String, String> {
@@ -269,13 +249,6 @@ impl KungfuMcp {
     )]
     fn coupling(&self, Parameters(params): Parameters<CouplingParam>) -> Result<String, String> {
         tools::review::coupling(self, params)
-    }
-
-    #[tool(
-        description = "Report whether semantic vector search is ready end-to-end: feature compiled, model installed, vectors built. Includes a one-line `hint` field with the next step if anything is missing. Always safe to call."
-    )]
-    fn embeddings_status(&self) -> Result<String, String> {
-        tools::review::embeddings_status(self)
     }
 
     #[tool(
@@ -444,5 +417,220 @@ mod tests {
         let info = KungfuMcp::new(PathBuf::from(".")).get_info();
         assert_eq!(info.server_info.name, "kungfu");
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn merged_tools_are_gone_and_survivors_registered() {
+        let names: Vec<String> = KungfuMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for kept in [
+            "project_status",
+            "repo_outline",
+            "file_outline",
+            "find_files",
+            "ask_context",
+        ] {
+            assert!(names.iter().any(|n| n == kept), "missing {kept}");
+        }
+        for gone in [
+            "embeddings_status",
+            "onboard",
+            "explore_file",
+            "search_text",
+            "investigate",
+        ] {
+            assert!(!names.iter().any(|n| n == gone), "{gone} still registered");
+        }
+    }
+
+    fn temp_project(tag: &str) -> PathBuf {
+        let tmp = std::env::temp_dir().join(format!("kungfu_mcp_{tag}_{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::write(
+            tmp.join("src/engine.rs"),
+            "pub fn compute_widget_total() -> u32 { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("src/widget.rs"),
+            "//! Widget helpers.\n\npub fn make() {}\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.join("src/bare.rs"), "pub fn bare() {}\n").unwrap();
+        kungfu_project::init_project(&tmp).unwrap();
+        kungfu_core::KungfuService::open(&tmp)
+            .unwrap()
+            .index_full()
+            .unwrap();
+        tmp
+    }
+
+    fn json(s: Result<String, String>) -> serde_json::Value {
+        serde_json::from_str(&s.unwrap()).unwrap()
+    }
+
+    #[test]
+    fn project_status_has_embeddings_block() {
+        let tmp = temp_project("status");
+        let mcp = KungfuMcp::new(tmp.clone());
+        let v = json(tools::project::project_status(&mcp));
+        let emb = &v["embeddings"];
+        for field in [
+            "ready",
+            "feature",
+            "model",
+            "vectors",
+            "job_running",
+            "hint",
+        ] {
+            assert!(!emb[field].is_null(), "embeddings.{field} missing: {emb}");
+        }
+        // Nothing was built in the fixture, so it cannot claim readiness.
+        assert_eq!(emb["ready"], false);
+        assert_eq!(emb["vectors"], 0);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn repo_outline_onboard_is_opt_in() {
+        let tmp = temp_project("outline");
+        let mcp = KungfuMcp::new(tmp.clone());
+        let plain = json(tools::project::repo_outline(
+            &mcp,
+            RepoOutlineParam {
+                budget: None,
+                include_onboard: None,
+            },
+        ));
+        assert!(plain.get("onboard").is_none());
+        assert!(plain["directories"].is_array());
+
+        let full = json(tools::project::repo_outline(
+            &mcp,
+            RepoOutlineParam {
+                budget: None,
+                include_onboard: Some(true),
+            },
+        ));
+        let onboard = &full["onboard"];
+        for field in [
+            "architecture",
+            "key_symbols",
+            "naming_style",
+            "test_pattern",
+            "glossary",
+        ] {
+            assert!(!onboard[field].is_null(), "onboard.{field} missing");
+        }
+        assert!(full["directories"].is_array());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn file_outline_budget_adds_related_files() {
+        let tmp = temp_project("file");
+        let mcp = KungfuMcp::new(tmp.clone());
+        let tiny = json(tools::project::file_outline(
+            &mcp,
+            FileOutlineParam {
+                path: "src/bare.rs".into(),
+                budget: None,
+            },
+        ));
+        assert!(tiny["symbols"].is_array());
+        assert!(tiny.get("related_files").is_none());
+        assert!(tiny.get("key_symbols").is_none());
+        // explore_file's drip annotation survives the merge.
+        assert!(tiny["annotation_hint"].is_string());
+
+        let small = json(tools::project::file_outline(
+            &mcp,
+            FileOutlineParam {
+                path: "src/bare.rs".into(),
+                budget: Some("small".into()),
+            },
+        ));
+        assert!(small["symbols"].is_array());
+        assert_eq!(small["key_symbols"], serde_json::json!(["bare"]));
+        let related = small["related_files"].as_array().unwrap();
+        assert!(
+            related.iter().any(|r| r["path"] == "src/engine.rs"),
+            "same-dir sibling expected in related_files: {related:?}"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn find_files_matches_by_path_and_by_contained_symbol() {
+        let tmp = temp_project("find");
+        let mcp = KungfuMcp::new(tmp.clone());
+        let query = |q: &str| {
+            json(tools::search::find_files(
+                &mcp,
+                QueryParam {
+                    query: q.into(),
+                    budget: None,
+                    scope: None,
+                },
+            ))
+        };
+
+        let by_symbol = query("compute_widget_total");
+        let top = &by_symbol[0];
+        assert_eq!(top["path"], "src/engine.rs");
+        assert_eq!(top["match"], "symbol: compute_widget_total");
+
+        let by_path = query("widget");
+        let top = &by_path[0];
+        assert_eq!(top["path"], "src/widget.rs");
+        assert_eq!(top["match"], "path");
+
+        let none = query("zzqx");
+        assert_eq!(none["results"], serde_json::json!([]));
+        assert!(none["hint"].is_string());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn scoped_find_files_filters_before_budget_trim() {
+        let tmp = temp_project("find_scope");
+        // Four path matches outside the scope outrank the in-scope symbol match,
+        // filling the tiny (3) page if scope were applied after the trim.
+        for name in ["widget_a", "widget_b", "widget_c", "widget_d"] {
+            std::fs::write(tmp.join(format!("src/{name}.rs")), "pub fn x() {}\n").unwrap();
+        }
+        std::fs::create_dir_all(tmp.join("other")).unwrap();
+        std::fs::write(tmp.join("other/misc.rs"), "pub fn widget_thing() {}\n").unwrap();
+        kungfu_core::KungfuService::open(&tmp)
+            .unwrap()
+            .index_full()
+            .unwrap();
+        let mcp = KungfuMcp::new(tmp.clone());
+        let query = |scope: &str| {
+            json(tools::search::find_files(
+                &mcp,
+                QueryParam {
+                    query: "widget".into(),
+                    budget: Some("tiny".into()),
+                    scope: Some(scope.into()),
+                },
+            ))
+        };
+
+        let scoped = query("other/");
+        assert_eq!(scoped[0]["path"], "other/misc.rs");
+        assert_eq!(scoped[0]["match"], "symbol: widget_thing");
+
+        let empty = query("nowhere/");
+        assert_eq!(empty["results"], serde_json::json!([]));
+        assert!(empty["hint"]
+            .as_str()
+            .unwrap()
+            .contains("in scope 'nowhere/'"));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

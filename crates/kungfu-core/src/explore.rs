@@ -174,15 +174,52 @@ impl KungfuService {
         }))
     }
 
-    /// Composite: explore a file — outline + related files + key symbols in one call.
-    pub fn explore_file(&self, path: &str, budget: Budget) -> Result<serde_json::Value> {
+    /// File outline at a budget: the full outline at tiny; above tiny also the
+    /// related files and the names of the key symbols.
+    pub fn file_outline_at(&self, path: &str, budget: Budget) -> Result<serde_json::Value> {
         let budget = self.resolve_budget(budget);
-        // 1. File outline
         let outline = self.file_outline(path)?;
 
-        // 2. Related files
-        let related = self.find_related(path, budget).unwrap_or_default();
-        let related_files: Vec<_> = related
+        let symbols: Vec<_> = outline
+            .symbols
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "kind": s.kind,
+                    "signature": s.signature,
+                    "line": s.line,
+                    "exported": s.exported,
+                })
+            })
+            .collect();
+
+        let mut out = serde_json::json!({
+            "path": outline.path,
+            "language": outline.language,
+            "purpose": outline.purpose,
+            "purpose_source": outline.purpose_source,
+            "tags": outline.tags,
+            "symbols": symbols,
+        });
+        if budget != Budget::Tiny {
+            let key: Vec<_> = key_symbols(&outline, budget.top_k() * 2)
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect();
+            out["key_symbols"] = serde_json::json!(key);
+            out["related_files"] =
+                serde_json::json!(self.related_files_json(&outline.path, budget));
+        }
+        if let Some(hint) = annotation_hint(&outline) {
+            out["annotation_hint"] = serde_json::json!(hint);
+        }
+        Ok(out)
+    }
+
+    fn related_files_json(&self, path: &str, budget: Budget) -> Vec<serde_json::Value> {
+        self.find_related(path, budget)
+            .unwrap_or_default()
             .iter()
             .map(|r| {
                 serde_json::json!({
@@ -191,14 +228,17 @@ impl KungfuService {
                     "score": r.score,
                 })
             })
-            .collect();
+            .collect()
+    }
 
-        // 3. Key symbols (exported first, then by line order)
-        let mut key_symbols: Vec<_> = outline.symbols.iter().collect();
-        key_symbols.sort_by(|a, b| b.exported.cmp(&a.exported).then(a.line.cmp(&b.line)));
-        let key_symbols: Vec<_> = key_symbols
+    /// Composite: explore a file — outline + related files + key symbols in one call.
+    pub fn explore_file(&self, path: &str, budget: Budget) -> Result<serde_json::Value> {
+        let budget = self.resolve_budget(budget);
+        let outline = self.file_outline(path)?;
+        let related_files = self.related_files_json(path, budget);
+
+        let key_symbols: Vec<_> = key_symbols(&outline, budget.top_k() * 2)
             .iter()
-            .take(budget.top_k() * 2)
             .map(|s| {
                 serde_json::json!({
                     "name": s.name,
@@ -220,13 +260,8 @@ impl KungfuService {
             "key_symbols": key_symbols,
             "related_files": related_files,
         });
-        // Drip annotation: the agent that just explored this file is the best
-        // moment to capture what it is for. One short field, only when absent.
-        if outline.purpose.is_none() && !outline.tags.iter().any(|t| t == "tests") {
-            out["annotation_hint"] = serde_json::json!(
-                "no purpose recorded for this file — if you now understand it, \
-                 call annotate_file with a one-line purpose"
-            );
+        if let Some(hint) = annotation_hint(&outline) {
+            out["annotation_hint"] = serde_json::json!(hint);
         }
         Ok(out)
     }
@@ -324,6 +359,23 @@ impl KungfuService {
         }
         Some(snippet.join("\n"))
     }
+}
+
+/// Exported symbols first, then by line order.
+fn key_symbols(outline: &FileOutline, n: usize) -> Vec<&SymbolOutline> {
+    let mut key: Vec<_> = outline.symbols.iter().collect();
+    key.sort_by(|a, b| b.exported.cmp(&a.exported).then(a.line.cmp(&b.line)));
+    key.truncate(n);
+    key
+}
+
+/// Drip annotation: the agent that just looked at this file is the best moment
+/// to capture what it is for. One short field, only when absent.
+fn annotation_hint(outline: &FileOutline) -> Option<&'static str> {
+    (outline.purpose.is_none() && !outline.tags.iter().any(|t| t == "tests")).then_some(
+        "no purpose recorded for this file — if you now understand it, \
+         call annotate_file with a one-line purpose",
+    )
 }
 
 /// Pick the best definition among same-name candidates — on tie prefer:

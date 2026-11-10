@@ -3,9 +3,12 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct BudgetParam {
+pub struct RepoOutlineParam {
     /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "auto"
     pub budget: Option<String>,
+    /// Also return the onboarding summary (architecture, key symbols, naming, tests,
+    /// glossary with provenance) under `onboard`. Default: false
+    pub include_onboard: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -54,10 +57,11 @@ pub struct SymbolNameParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct FilePathBudgetParam {
+pub struct FileOutlineParam {
     /// Path to the file (relative to project root)
     pub path: String,
-    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "auto"
+    /// Budget level: "tiny", "small", "medium", "full", or "auto". Default: "tiny" (outline
+    /// only); above tiny adds `related_files` and `key_symbols`
     pub budget: Option<String>,
 }
 
