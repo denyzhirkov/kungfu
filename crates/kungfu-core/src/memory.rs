@@ -16,8 +16,23 @@ pub struct MemorySearchResult {
 
 impl MemorySearchResult {
     /// Cap scored matches to the budget (auto resolves to small).
-    pub fn from_scored(mut results: Vec<(f64, ProjectMemoryEntry)>, budget: Budget) -> Self {
+    pub fn from_scored(results: Vec<(f64, ProjectMemoryEntry)>, budget: Budget) -> Self {
         let total = results.len();
+        Self::capped(results, total, budget)
+    }
+
+    /// Entry cap for a budget (auto resolves to small).
+    fn limit(budget: Budget) -> usize {
+        match budget {
+            Budget::Tiny => 3,
+            Budget::Small | Budget::Auto => 5,
+            Budget::Medium => 10,
+            Budget::Full => 25,
+        }
+    }
+
+    /// `results` is already cut to at most `limit(budget)`; `total` is the pre-cap match count.
+    fn capped(mut results: Vec<(f64, ProjectMemoryEntry)>, total: usize, budget: Budget) -> Self {
         if total == 0 {
             return Self {
                 results,
@@ -25,17 +40,12 @@ impl MemorySearchResult {
                 note: None,
                 status: Some("no_match"),
                 hint: Some(
-                    "no memory matched — try broader terms, drop the kind/tag filter, or list entries with memory_list"
+                    "no memory matched — try broader terms or drop the kind/tag/pinned filter; with an empty query this means no entries match the filters (or the store is empty — add one with memory_add)"
                         .to_string(),
                 ),
             };
         }
-        let limit = match budget {
-            Budget::Tiny => 3,
-            Budget::Small | Budget::Auto => 5,
-            Budget::Medium => 10,
-            Budget::Full => 25,
-        };
+        let limit = Self::limit(budget);
         let note = (total > limit).then(|| {
             let action = if budget == Budget::Full {
                 "narrow with kind/tag"
@@ -132,19 +142,64 @@ impl KungfuService {
         filter: &kungfu_memory::project_search::MemoryFilter,
         budget: Budget,
     ) -> Result<MemorySearchResult> {
+        if query.trim().is_empty() {
+            return self.memory_list_capped(filter, budget);
+        }
         // Generate candidates from the inverted index, then read and score only
-        // those bodies. An empty query degenerates to a filtered list, so load
-        // all (rare path). Scoring semantics are unchanged from the full scan.
-        let entries = if query.trim().is_empty() {
-            self.store().load_project_memories()?
-        } else {
-            let ids = self.store().project_memory_candidates(query)?;
-            self.store().load_project_memory_bodies(&ids)?
-        };
+        // those bodies. Scoring semantics are unchanged from the full scan.
+        let ids = self.store().project_memory_candidates(query)?;
+        let entries = self.store().load_project_memory_bodies(&ids)?;
         Ok(MemorySearchResult::from_scored(
             kungfu_memory::project_search::search_project_memory(query, &entries, filter),
             budget,
         ))
+    }
+
+    /// Empty-query search = filtered list: pinned first, then newest. Ordering and filtering
+    /// run on metadata; only the capped survivors have their bodies read.
+    fn memory_list_capped(
+        &self,
+        filter: &kungfu_memory::project_search::MemoryFilter,
+        budget: Budget,
+    ) -> Result<MemorySearchResult> {
+        let status = filter.status.unwrap_or(MemoryStatus::Active);
+        let mut metas: Vec<_> = self
+            .store()
+            .list_project_memory_meta()?
+            .into_iter()
+            .filter(|m| {
+                m.status == status
+                    && filter.kind.is_none_or(|k| m.kind == k)
+                    && filter
+                        .tag
+                        .as_ref()
+                        .is_none_or(|tag| m.tags.iter().any(|t| t == tag))
+                    && (!filter.pinned_only || m.pinned)
+            })
+            .collect();
+        metas.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
+        let total = metas.len();
+        let ids: Vec<String> = metas
+            .into_iter()
+            .take(MemorySearchResult::limit(budget))
+            .map(|m| m.id)
+            .collect();
+        let mut by_id: std::collections::HashMap<String, ProjectMemoryEntry> = self
+            .store()
+            .load_project_memory_bodies(&ids)?
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
+        let results = ids
+            .iter()
+            .filter_map(|id| by_id.remove(id))
+            .map(|e| (0.0, e))
+            .collect();
+        Ok(MemorySearchResult::capped(results, total, budget))
     }
 
     pub fn memory_update(
@@ -154,8 +209,12 @@ impl KungfuService {
         title: Option<&str>,
         tags: Option<Vec<String>>,
         pinned: Option<bool>,
+        status: Option<MemoryStatus>,
     ) -> Result<ProjectMemoryEntry> {
         self.store().update_project_memory(id, |e| {
+            if let Some(s) = status {
+                e.status = s;
+            }
             if let Some(c) = content {
                 e.content = c.to_string();
             }

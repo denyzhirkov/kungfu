@@ -2572,6 +2572,7 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
             let budget: Budget = budget.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let found = service.memory_search(&query, &filter, budget)?;
             service.track_call("memory_search", 0, None);
+            let listing = query.trim().is_empty();
             if json {
                 // Mirror the MCP tool: full entry only for confident hits; below the
                 // threshold emit a stub + excerpt so weak matches don't flood context.
@@ -2580,7 +2581,17 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                     .results
                     .iter()
                     .map(|(score, e)| {
-                        if *score >= FULL_CONTENT_THRESHOLD {
+                        if listing {
+                            serde_json::json!({
+                                "id": e.id,
+                                "kind": e.kind,
+                                "title": e.title,
+                                "pinned": e.pinned,
+                                "updated_at": e.updated_at,
+                                "excerpt": truncate_str(&e.content, 160),
+                                "hint": "run `kungfu memory show <id>` for the full entry",
+                            })
+                        } else if *score >= FULL_CONTENT_THRESHOLD {
                             serde_json::json!({ "score": score, "entry": e })
                         } else {
                             serde_json::json!({
@@ -2614,9 +2625,14 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
                 for (score, e) in &found.results {
                     let pin_marker = if e.pinned { " [pinned]" } else { "" };
                     let title = e.title.as_deref().unwrap_or(&e.content);
+                    let score_col = if listing {
+                        String::new()
+                    } else {
+                        format!("{score:.2}  ")
+                    };
                     println!(
-                        "  {:.2}  {} [{}]{} {}",
-                        score,
+                        "  {}{} [{}]{} {}",
+                        score_col,
                         e.id,
                         e.kind,
                         pin_marker,
@@ -2636,8 +2652,14 @@ pub fn memory(action: MemoryCommands, json: bool) -> Result<()> {
             pin,
         } => {
             let tags_opt = if tags.is_empty() { None } else { Some(tags) };
-            let entry =
-                service.memory_update(&id, content.as_deref(), title.as_deref(), tags_opt, pin)?;
+            let entry = service.memory_update(
+                &id,
+                content.as_deref(),
+                title.as_deref(),
+                tags_opt,
+                pin,
+                None,
+            )?;
             service.track_call("memory_update", 0, None);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);

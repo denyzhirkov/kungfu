@@ -101,6 +101,20 @@ impl std::fmt::Display for MemoryStatus {
     }
 }
 
+impl std::str::FromStr for MemoryStatus {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(MemoryStatus::Active),
+            "archived" => Ok(MemoryStatus::Archived),
+            "superseded" => Ok(MemoryStatus::Superseded),
+            _ => Err(format!(
+                "invalid status '{s}' — expected \"active\", \"archived\" or \"superseded\""
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectMemoryEntry {
     pub id: String,
