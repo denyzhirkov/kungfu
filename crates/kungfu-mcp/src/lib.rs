@@ -161,47 +161,11 @@ impl KungfuMcp {
         tools::search::semantic_search(self, params)
     }
 
-    #[tool(description = "Get git history for a file: recent commits with date, author, message")]
-    fn file_history(
-        &self,
-        Parameters(params): Parameters<FilePathParam>,
-    ) -> Result<String, String> {
-        tools::history::file_history(self, params)
-    }
-
-    #[tool(description = "Get git blame + recent commits for a symbol: who changed it and why")]
-    fn symbol_history(
-        &self,
-        Parameters(params): Parameters<SymbolNameParam>,
-    ) -> Result<String, String> {
-        tools::history::symbol_history(self, params)
-    }
-
     #[tool(
-        description = "Change timeline: show how a symbol or file evolved — when introduced, churn rate, linked decisions, recent changes"
+        description = "Why is it like this / what changed: git history + blame + evolution timeline (introduced, churn, linked decisions) for a file (`path`) or a symbol (`symbol`) — pass exactly one"
     )]
-    fn change_timeline(
-        &self,
-        Parameters(params): Parameters<SymbolNameParam>,
-    ) -> Result<String, String> {
-        tools::history::change_timeline(self, params)
-    }
-
-    #[tool(
-        description = "Build a context packet focused on a specific git commit: scored symbols overlapping the commit's hunks + commit metadata in history"
-    )]
-    fn commit_context(
-        &self,
-        Parameters(params): Parameters<CommitContextParam>,
-    ) -> Result<String, String> {
-        tools::history::commit_context(self, params)
-    }
-
-    #[tool(
-        description = "Build a context packet covering all commits in a GitHub PR (requires `gh` CLI). Merges hunks across commits, lists each commit in history"
-    )]
-    fn pr_context(&self, Parameters(params): Parameters<PrContextParam>) -> Result<String, String> {
-        tools::history::pr_context(self, params)
+    fn history(&self, Parameters(params): Parameters<HistoryParam>) -> Result<String, String> {
+        tools::history::history(self, params)
     }
 
     #[tool(description = "Show usage statistics: token savings, cache hit rate, calls served")]
@@ -444,5 +408,44 @@ mod tests {
         let info = KungfuMcp::new(PathBuf::from(".")).get_info();
         assert_eq!(info.server_info.name, "kungfu");
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn history_tool_replaces_git_history_tools() {
+        let names: Vec<String> = KungfuMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(names.iter().any(|n| n == "history"));
+        for removed in [
+            "file_history",
+            "symbol_history",
+            "change_timeline",
+            "commit_context",
+            "pr_context",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == removed),
+                "{removed} still exposed"
+            );
+        }
+    }
+
+    #[test]
+    fn history_requires_exactly_one_target() {
+        let mcp = KungfuMcp::new(PathBuf::from("."));
+        for (path, symbol) in [(None, None), (Some("a.rs"), Some("f"))] {
+            let err = tools::history::history(
+                &mcp,
+                HistoryParam {
+                    path: path.map(String::from),
+                    symbol: symbol.map(String::from),
+                    budget: None,
+                },
+            )
+            .unwrap_err();
+            assert!(err.contains("`path`") && err.contains("`symbol`"));
+        }
     }
 }

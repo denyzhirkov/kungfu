@@ -181,6 +181,194 @@ impl KungfuService {
         Ok(events)
     }
 
+    /// Combined history for exactly one of a file path or a symbol name: git history
+    /// (plus blame for a symbol) and derived timeline events, all about one resolved file.
+    pub fn history(
+        &self,
+        path: Option<&str>,
+        symbol: Option<&str>,
+        budget: Budget,
+    ) -> Result<serde_json::Value> {
+        let (mode, target) = match (path, symbol) {
+            (Some(p), None) => ("file", p),
+            (None, Some(s)) => ("symbol", s),
+            _ => bail!("history takes exactly one of `path` or `symbol`"),
+        };
+        if !kungfu_git::is_git_repo(&self.project.root) {
+            bail!("not a git repository");
+        }
+        let budget = self.resolve_budget(budget);
+        let max_entries = match budget {
+            Budget::Tiny => 3,
+            Budget::Small => 5,
+            Budget::Medium => 10,
+            _ => 20,
+        };
+
+        let sym = if mode == "symbol" {
+            match self.search().get_symbol(target)? {
+                Some(s) => Some(s),
+                None => bail!(
+                    "Symbol '{target}' not found; use find_symbol to locate the exact name, or pass `path` for a file"
+                ),
+            }
+        } else {
+            None
+        };
+        let file_path = sym.as_ref().map_or(target, |s| s.path.as_str());
+
+        let log = kungfu_git::file_log_checked(&self.project.root, file_path, max_entries)?;
+        let mut out = serde_json::Map::new();
+        out.insert("mode".into(), mode.into());
+        let commits_key = if sym.is_some() {
+            out.insert("symbol".into(), target.into());
+            "recent_commits"
+        } else {
+            "commits"
+        };
+        out.insert("path".into(), file_path.into());
+
+        let mut hints = Vec::new();
+        if let Some(sym) = &sym {
+            out.insert(
+                "lines".into(),
+                format!("{}-{}", sym.span.start_line, sym.span.end_line).into(),
+            );
+            let blame = kungfu_git::blame_lines(
+                &self.project.root,
+                file_path,
+                sym.span.start_line,
+                sym.span.end_line,
+            )?;
+            if blame.len() > max_entries {
+                hints.push(format!(
+                    "blame: showing {max_entries} of {} entries (line order)",
+                    blame.len()
+                ));
+            }
+            let items: Vec<_> = blame
+                .iter()
+                .take(max_entries)
+                .map(|b| {
+                    serde_json::json!({
+                        "hash": b.hash,
+                        "author": b.author,
+                        "date": b.date,
+                        "summary": b.summary,
+                    })
+                })
+                .collect();
+            out.insert("blame".into(), items.into());
+        }
+
+        let commits: Vec<_> = log
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "hash": e.hash,
+                    "date": e.date,
+                    "author": e.author,
+                    "message": e.message,
+                })
+            })
+            .collect();
+        out.insert(commits_key.into(), commits.into());
+
+        if log.is_empty() {
+            out.insert("status".into(), "no_commits".into());
+            hints.push(
+                "no git history for this file; it may be untracked, uncommitted, or the path is wrong (use a path relative to the project root)".into(),
+            );
+            out.insert("timeline".into(), Vec::<serde_json::Value>::new().into());
+        } else {
+            if log.len() >= max_entries {
+                hints.push(if budget == Budget::Full {
+                    format!("commits: showing the {} most recent", log.len())
+                } else {
+                    format!(
+                        "commits: showing the {} most recent; use a larger budget for more",
+                        log.len()
+                    )
+                });
+            }
+            let timeline =
+                self.timeline_events(file_path, target, &log, log.len() >= max_entries)?;
+            out.insert("timeline".into(), serde_json::to_value(timeline)?);
+        }
+        if !hints.is_empty() {
+            out.insert("hint".into(), hints.join("; ").into());
+        }
+        Ok(serde_json::Value::Object(out))
+    }
+
+    /// Derived events for one exact file: introduction (only when not already among the
+    /// shown commits), churn over the most recent commits, and linked decisions.
+    fn timeline_events(
+        &self,
+        file_path: &str,
+        target: &str,
+        shown: &[kungfu_git::LogEntry],
+        capped: bool,
+    ) -> Result<Vec<kungfu_types::context::HistoryEvent>> {
+        use kungfu_types::context::HistoryEvent;
+        let root = &self.project.root;
+        let mut events = Vec::new();
+
+        // An uncapped log already ends at the introducing commit; only look further
+        // back (a full-history walk) when the shown log was cut.
+        let first = if capped {
+            kungfu_git::file_introduced(root, file_path)?
+        } else {
+            None
+        };
+        if let Some(first) = first {
+            if !shown.iter().any(|e| e.hash == first.hash) {
+                events.push(HistoryEvent {
+                    event_type: "introduced".to_string(),
+                    target: target.to_string(),
+                    detail: format!("First appeared: {} by {}", first.message, first.author),
+                    date: Some(first.date),
+                });
+            }
+        }
+
+        const CHURN_WINDOW: usize = 500;
+        let churn = kungfu_git::recent_file_commit_counts(root, CHURN_WINDOW)?;
+        if let Some(&count) = churn.get(file_path) {
+            let avg = churn.values().copied().sum::<usize>() / churn.len().max(1);
+            if count > avg * 2 {
+                events.push(HistoryEvent {
+                    event_type: "high_churn".to_string(),
+                    target: file_path.to_string(),
+                    detail: format!(
+                        "{count} commits in the last {CHURN_WINDOW} (window avg: {avg})"
+                    ),
+                    date: None,
+                });
+            }
+        }
+
+        let memories = self.store().load_memories().unwrap_or_default();
+        for mem in &memories {
+            if mem.kind == kungfu_types::memory::MemoryKind::Decision {
+                let related = mem.path == file_path
+                    || mem
+                        .anchors
+                        .iter()
+                        .any(|a| target.to_lowercase().contains(a));
+                if related {
+                    events.push(HistoryEvent {
+                        event_type: "decision_ref".to_string(),
+                        target: mem.path.clone(),
+                        detail: mem.text.chars().take(200).collect(),
+                        date: None,
+                    });
+                }
+            }
+        }
+        Ok(events)
+    }
+
     /// Build a context packet for a specific commit: scored symbols overlapping the commit's
     /// hunks, plus commit metadata. Used by the `commit-context` CLI/MCP tool.
     pub fn commit_context(&self, hash: &str, budget: Budget) -> Result<ContextPacket> {
