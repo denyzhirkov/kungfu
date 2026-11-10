@@ -454,12 +454,9 @@ impl KungfuService {
         let wants_tests = kungfu_search::query_wants_tests(&words);
         let wants_config = kungfu_search::query_wants_config(&words);
 
+        let test_ids = crate::helpers::test_symbol_ids(&all_symbols);
         for s in &mut scored_symbols {
-            if wants_tests
-                && (s.symbol.path.contains("test")
-                    || s.symbol.path.contains("spec")
-                    || s.symbol.path.contains("tests/"))
-            {
+            if wants_tests && test_ids.contains(&s.symbol.id) {
                 s.score += w.test_bonus;
             }
             if wants_config
@@ -597,7 +594,6 @@ impl KungfuService {
         // Uses the symbol-table walk so inline `#[cfg(test)] mod tests` members are caught,
         // not just `test_`-prefixed names.
         if matches!(intent, Intent::Understand | Intent::Lookup) {
-            let test_ids = crate::helpers::test_symbol_ids(&all_symbols);
             for s in &mut scored_symbols {
                 if test_ids.contains(&s.symbol.id) {
                     s.score *= w.test_penalty;

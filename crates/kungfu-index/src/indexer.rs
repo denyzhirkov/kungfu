@@ -1477,8 +1477,11 @@ impl<'a> Indexer<'a> {
                     // Same directory (e.g. foo.rs + foo_test.rs)
                     if *src_dir == test_dir {
                         scored.push((source, 0));
-                    // Sibling: tests/test_foo.py ↔ src/foo.py (share parent)
-                    } else if matches!((&test_up, src_up), (Some(a), Some(b)) if !a.is_empty() && a == b)
+                    // Sibling: tests/test_foo.py ↔ src/foo.py (share parent). At the
+                    // project root the shared parent is empty; accept that only for a
+                    // top-level test directory (tests/parser.rs ↔ src/parser.rs).
+                    } else if matches!((&test_up, src_up), (Some(a), Some(b))
+                        if a == b && (!a.is_empty() || kungfu_types::test_paths::is_test_dir(&f.path)))
                     {
                         scored.push((source, 1));
                     // Test dir is child of source dir (e.g. src/foo.rs + src/__tests__/foo.test.ts)
@@ -1846,21 +1849,7 @@ fn is_doc_memory_source(path: &str) -> bool {
 }
 
 fn is_test_file(path: &str) -> bool {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    let lower = filename.to_lowercase();
-
-    // foo_test.rs, foo_test.go
-    lower.contains("_test.")
-        // foo.test.ts, foo.test.js
-        || lower.contains(".test.")
-        // foo.spec.ts, foo.spec.js
-        || lower.contains(".spec.")
-        // files in tests/ or test/ or __tests__/ directories
-        || path.contains("/tests/")
-        || path.contains("/test/")
-        || path.contains("/__tests__/")
-        // test_foo.py
-        || lower.starts_with("test_")
+    kungfu_types::test_paths::is_test_path(path)
 }
 
 fn is_config_file(path: &str) -> bool {
@@ -1922,7 +1911,7 @@ fn extract_test_base_stem(path: &str) -> String {
         return base.to_string();
     }
     // If in tests/ dir, use stem as-is for matching
-    if path.contains("/tests/") || path.contains("/test/") || path.contains("/__tests__/") {
+    if kungfu_types::test_paths::is_test_dir(path) {
         return stem;
     }
     String::new()
@@ -1967,6 +1956,38 @@ fn normalize_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_level_tests_dir_pairs_with_src() {
+        let entry = |id: &str, path: &str| FileEntry {
+            id: id.into(),
+            path: path.into(),
+            extension: Some("rs".into()),
+            language: Some("rust".into()),
+            size: 1,
+            hash: id.into(),
+            indexed_at: chrono::Utc::now(),
+            tags: Vec::new(),
+            purpose: None,
+            purpose_source: None,
+        };
+        let files = vec![
+            entry("t", "tests/parser.rs"),
+            entry("s", "src/parser.rs"),
+            // A test file outside a test directory still needs a non-empty shared
+            // parent: root-level siblings don't pair by stem alone.
+            entry("a", "bench/lexer_test.rs"),
+            entry("b", "src/lexer.rs"),
+        ];
+        let mut relations = Vec::new();
+        Indexer::build_test_relations(&files, &mut relations);
+        let pairs: Vec<(&str, &str)> = relations
+            .iter()
+            .filter(|r| r.kind == RelationKind::TestFor)
+            .map(|r| (r.source_id.as_str(), r.target_id.as_str()))
+            .collect();
+        assert_eq!(pairs, vec![("t", "s")]);
+    }
 
     #[test]
     fn is_binary_detects_nul() {

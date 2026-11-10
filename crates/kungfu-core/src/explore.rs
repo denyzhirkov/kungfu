@@ -394,9 +394,8 @@ pub(crate) fn pick_best_definition<'a>(
             .then_with(|| {
                 // Strongest signal: prefer source over test/example paths
                 fn is_non_src(path: &str) -> bool {
-                    path.contains("test")
+                    kungfu_types::test_paths::is_test_path(path)
                         || path.contains("example")
-                        || path.contains("spec/")
                         || path.contains("fixture")
                         || path.contains("evals/")
                         || path.contains("/bench/")

@@ -84,15 +84,29 @@ pub(crate) fn is_stop_word(word: &str) -> bool {
     )
 }
 
-/// Cheap per-symbol test heuristic: name prefix/infix or a path under a test dir.
-/// Misses symbols inside an inline `#[cfg(test)] mod tests` whose own name looks
-/// production — use [`test_symbol_ids`] when the full symbol table is available.
+pub(crate) use kungfu_types::test_paths::is_test_path;
+
+/// Per-symbol test check. The only signal available without the symbol table
+/// is the file path; a function named `test_*` or `Test*` in a production file
+/// is deliberately NOT a test (it is usually production code about tests, e.g.
+/// `smart_test`). Inline `#[cfg(test)] mod tests` members need
+/// [`test_symbol_ids`].
 pub(crate) fn is_test_symbol(sym: &Symbol) -> bool {
-    sym.name.starts_with("test_")
-        || sym.name.starts_with("Test")
-        || sym.name.contains("_test")
-        || sym.path.contains("test")
-        || sym.path.contains("spec")
+    is_test_path(&sym.path)
+}
+
+/// Runnable test candidates: functions and methods of [`test_symbol_ids`].
+/// Excludes the `mod tests` symbol itself and nested modules/classes; helpers
+/// inside a test module remain (no `#[test]` marker is indexed).
+pub(crate) fn test_fn_ids(symbols: &[Symbol]) -> HashSet<String> {
+    let all = test_symbol_ids(symbols);
+    symbols
+        .iter()
+        .filter(|s| {
+            matches!(s.kind, SymbolKind::Function | SymbolKind::Method) && all.contains(&s.id)
+        })
+        .map(|s| s.id.clone())
+        .collect()
 }
 
 /// Robust test detection over the whole symbol table: every symbol that lives
@@ -102,10 +116,8 @@ pub(crate) fn is_test_symbol(sym: &Symbol) -> bool {
 pub(crate) fn test_symbol_ids(symbols: &[Symbol]) -> HashSet<String> {
     let by_id: HashMap<&str, &Symbol> = symbols.iter().map(|s| (s.id.as_str(), s)).collect();
     let is_test_container = |s: &Symbol| {
-        matches!(s.kind, SymbolKind::Module | SymbolKind::Class) && {
-            let n = s.name.to_lowercase();
-            n == "tests" || n == "test"
-        }
+        matches!(s.kind, SymbolKind::Module | SymbolKind::Class)
+            && kungfu_types::test_paths::is_test_module_name(&s.name)
     };
 
     let mut out = HashSet::new();
@@ -248,21 +260,41 @@ mod tests {
     }
 
     #[test]
-    fn is_test_symbol_heuristic() {
-        assert!(is_test_symbol(&sym(
-            "1",
-            "test_something",
-            SymbolKind::Function,
-            None,
-            "src/lib.rs"
-        )));
-        assert!(!is_test_symbol(&sym(
-            "2",
-            "do_work",
-            SymbolKind::Function,
-            None,
-            "src/lib.rs"
-        )));
+    fn production_fn_with_test_in_name_is_not_a_test() {
+        for (name, path) in [
+            ("smart_test", "crates/kungfu-core/src/review.rs"),
+            ("count_test_symbols", "src/review.rs"),
+            ("TestFoo", "pkg/x.go"),
+            ("test_bar", "app/app.py"),
+        ] {
+            let s = sym("1", name, SymbolKind::Function, None, path);
+            assert!(!is_test_symbol(&s), "{name} in {path}");
+            assert!(!test_symbol_ids(&[s]).contains("1"), "{name} in {path}");
+        }
+    }
+
+    #[test]
+    fn test_fn_ids_excludes_module_symbol() {
+        let symbols = vec![
+            sym("mod", "tests", SymbolKind::Module, None, "src/a.rs"),
+            sym("f", "checks", SymbolKind::Function, Some("mod"), "src/a.rs"),
+            sym("p", "prod", SymbolKind::Function, None, "src/a.rs"),
+        ];
+        let ids = test_fn_ids(&symbols);
+        assert_eq!(ids, HashSet::from(["f".to_string()]));
+    }
+
+    #[test]
+    fn test_symbols_by_path() {
+        for (name, path) in [
+            ("TestFoo", "pkg/x_test.go"),
+            ("test_bar", "app/test_x.py"),
+            ("anything", "crates/a/tests/foo.rs"),
+            ("it_works", "web/foo.test.ts"),
+        ] {
+            let s = sym("1", name, SymbolKind::Function, None, path);
+            assert!(is_test_symbol(&s), "{name} in {path}");
+        }
     }
 
     #[test]

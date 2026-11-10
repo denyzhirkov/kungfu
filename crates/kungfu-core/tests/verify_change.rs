@@ -25,7 +25,7 @@ fn temp_repo(tag: &str) -> (PathBuf, KungfuService) {
     // Deliberately no .gitignore for `.kungfu/`: `init` does not add one, so
     // verify_change itself must not report kungfu's own state as changes.
     std::fs::create_dir_all(tmp.join("pkg")).unwrap();
-    std::fs::write(tmp.join("pkg/old.rs"), "pub fn test_old() {}\n").unwrap();
+    std::fs::write(tmp.join("pkg/old_test.rs"), "#[test]\nfn test_old() {}\n").unwrap();
     git(&tmp, &["init", "-q"]);
     git(&tmp, &["add", "."]);
     git(&tmp, &["commit", "-q", "-m", "init"]);
@@ -447,5 +447,49 @@ fn no_commits_declares_missing_co_change_history() {
         .as_str()
         .unwrap()
         .contains("no commits"));
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn production_fn_named_like_a_test_is_not_suggested() {
+    let (tmp, svc) = temp_repo("nametest");
+    std::fs::create_dir_all(tmp.join("lib")).unwrap();
+    let body = |n: u32| {
+        format!(
+            "pub fn count_test_symbols() -> u32 {{ {n} }}\n#[cfg(test)]\nmod tests {{\n    fn helper_fn() {{}}\n    #[test]\n    fn real_inline_check() {{ assert_eq!(super::count_test_symbols(), {n}); }}\n}}\n"
+        )
+    };
+    std::fs::write(tmp.join("lib/counts.rs"), body(1)).unwrap();
+    // Sibling file in the same directory with its own inline tests: not changed.
+    std::fs::write(
+        tmp.join("lib/other.rs"),
+        "pub fn other_fn() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn other_inline_check() {}\n}\n",
+    )
+    .unwrap();
+    co_commit(&tmp, &["lib/counts.rs", "lib/other.rs"], 1);
+    svc.index_full().unwrap();
+    std::fs::write(tmp.join("lib/counts.rs"), body(2)).unwrap();
+
+    let out = svc.verify_change(1).unwrap();
+    let names: Vec<&str> = out["suggested_tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .filter(|n| !n.is_empty())
+        .collect();
+    // Production `count_test_symbols`, the `tests` module and the unchanged
+    // sibling's tests are excluded. Helpers inside the changed file's own test
+    // module remain: no #[test] marker is indexed.
+    assert!(!names.contains(&"count_test_symbols"), "{out}");
+    assert!(!names.contains(&"tests"), "{out}");
+    assert!(!names.contains(&"other_inline_check"), "{out}");
+    assert!(names.contains(&"real_inline_check"), "{out}");
+    assert!(
+        names
+            .iter()
+            .all(|n| matches!(*n, "real_inline_check" | "helper_fn")),
+        "{out}"
+    );
     std::fs::remove_dir_all(&tmp).ok();
 }
