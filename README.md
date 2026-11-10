@@ -168,23 +168,25 @@ Add to your agent config (Claude Code, Cursor, etc.):
 }
 ```
 
-### Tools (40)
+### Tools (23)
 
-**Retrieval** — `ask_context` (intent + multi-strategy search + rationale + memory), `edit_context` (full verbatim body + contracts, edit-ready), `explore_symbol`, `explore_file`, `investigate`, `debug_trace`, `commit_context`, `pr_context`.
+**Retrieval** — `ask_context` (intent + multi-strategy search + rationale + memory + uncommitted changes), `edit_context` (full verbatim body + contracts, edit-ready), `explore_symbol`, `debug_trace`.
 
-**Search** — `find_symbol`, `search_text`, `find_files`, `semantic_search`, `embeddings_status`, `embeddings_build`.
+**Search** — `find_symbol`, `find_files` (ranked by path and contained symbols, with a `match` reason), `semantic_search`.
 
-**Structure** — `project_status`, `repo_outline`, `file_outline`, `onboard`.
+**Structure** — `project_status` (index, git and embeddings readiness), `repo_outline` (`include_onboard: true` adds architecture, naming, test layout and the project glossary), `file_outline` (budget above `tiny` adds related files and key symbols).
 
-**Graph & impact** — `callers`, `callees`, `affected`, `coupling`, `smart_test`, `test_subjects`, `verify_change`, `review`, `hotspots`.
+**Graph & impact** — `callers`, `callees`, `affected`, `coupling`, `hotspots`, `verify_change` (post-edit: changed symbols incl. deleted/untracked files, blast radius, tests to run, missing co-changes, untested code, one risk with reasons).
 
-**History** — `file_history`, `symbol_history`, `change_timeline`.
+**History** — `history` (a file `path` or a `symbol`: commits or blame, plus an evolution timeline — introduced, churn, linked decisions).
 
-**Memory** — `memory_add`, `memory_search`, `memory_list`, `memory_get`, `memory_update`, `memory_archive`.
+**Memory** — `memory_add`, `memory_search` (empty query lists; filters `kind` / `tag` / `pinned` / `status`), `memory_get`, `memory_update` (`status: "archived"` archives, `"active"` restores).
 
-**Annotations** — `annotate_file` (record a one-line file purpose + glossary terms; durable in `.kungfu/annotations.json`, merged with `purpose_source: agent`, authored module docs keep precedence), `annotation_queue` (files most worth annotating, ranked by import degree). `onboard` includes a project glossary computed on demand: agent-curated terms plus distinctive vocabulary mined from production identifiers, each entry carrying its provenance (`agent` / `doc` / `usage`).
+**Annotations** — `annotate_file` (record a one-line file purpose + glossary terms; durable in `.kungfu/annotations.json`, merged with `purpose_source: agent`, authored module docs keep precedence).
 
-**Freshness & stats** — `reindex` (targeted reindex of given paths — after shell edits, codegen or git checkout, or after any edit when the edit hook is not installed), `usage_stats`.
+**Freshness** — `reindex` (targeted reindex of given paths — after shell edits, codegen or git checkout, or after any edit when the edit hook is not installed).
+
+CLI-only (not exposed over MCP): `kungfu review`, `smart-test`, `test-subjects`, `commit-context`, `pr-context`, `investigate`, `onboard`, `stats`, `embeddings build`, `annotation-queue`, and the per-kind history commands.
 
 While connected, the server pushes `notifications/resources/updated` (URI `kungfu://index`) whenever the index changes on disk — subscribing agents can invalidate stale assumptions.
 
@@ -241,25 +243,28 @@ Route by situation:
 
 | Situation | First call |
 |---|---|
-| New task / "figure out X" | `ask_context` (or `investigate`) |
+| New task / "figure out X" | `ask_context` |
 | Where is a named symbol defined/used? | `find_symbol` → `explore_symbol`, then `callers` / `callees` |
-| Concept with no known name ("where does rate limiting live") | `semantic_search` |
-| Understand a file > 50 lines | `file_outline` / `explore_file`, then a targeted Read of that range |
-| About to edit a symbol | `edit_context` (full verbatim body + contracts — no follow-up Read) |
-| "Why is it like this / what changed?" | `file_history` / `symbol_history` / `change_timeline` |
-| Refactor touching > 1 file | `affected` + `coupling` + `smart_test` before editing |
+| Concept with no known name | `semantic_search` |
+| Which files deal with X? | `find_files` (paths + contained symbols) |
+| Understand a file > 50 lines | `file_outline` (budget "small" adds related files), then a targeted Read |
+| About to edit a symbol | `edit_context` (full verbatim body — no follow-up Read) |
+| "Why is it like this / what changed?" | `history` (a file path or a symbol) |
+| Refactor touching > 1 file | `affected` + `coupling` before editing |
 | Bug with no clear file | `hotspots`, then `debug_trace` on the stack trace |
+| New to the repo | `repo_outline` (include_onboard: conventions, glossary) |
 
 If kungfu's edit hook is installed (plugin or `kungfu init --agent claude`), files
 you Edit/Write are reindexed automatically; otherwise `reindex` the paths you
 changed. Always `reindex` after shell edits, codegen or git checkout. After edits,
-`verify_change` for the blast radius and minimal test set.
+`verify_change` (blast radius, tests, missed co-changes, risk).
 `memory_search` before implementing (there may already be a decision or warning);
 `memory_add` to persist new ones — pin sparingly.
 
 Skip kungfu only for: a one-line edit in a file already open this session; a file
 < 50 lines whose exact path you know; pure shell ops; reading a config/lock file by
-exact path. Otherwise, if you reach for Read / grep / find — stop and route above.
+exact path; an exact literal/regex search across files (Grep). Otherwise, if you
+reach for Read / grep / find — stop and route above.
 ```
 
 #### CLAUDE.md block
@@ -312,7 +317,7 @@ kungfu vs. naive grep + read, tokens to answer the same query:
 
 ## How it works
 
-**Indexing** — scans files respecting `.gitignore`; parses with [tree-sitter](https://tree-sitter.github.io/) (Rust, TypeScript, JavaScript, Python, Go, Java, C#, Kotlin, C, C++); extracts symbols, imports (resolved to real files), a function call graph, structured comments (TODO/FIXME/NOTE/doc), and a one-line file purpose from module-level doc comments (Rust `//!`, Python module docstrings, Go package comments, `/** */` file headers) — surfaced in `file_outline`, `explore_file`, and entrypoint lists. Heuristic file tags (`tests`, `entrypoint`, `config`, `database`, `http`, `cli`, `auth`, `types`) are derived from path conventions, import targets, and symbol composition — high-precision rules only; the authored purpose is the trusted layer. Incremental via blake3 fingerprints; oversized and binary files are recorded by name only.
+**Indexing** — scans files respecting `.gitignore`; parses with [tree-sitter](https://tree-sitter.github.io/) (Rust, TypeScript, JavaScript, Python, Go, Java, C#, Kotlin, C, C++); extracts symbols, imports (resolved to real files), a function call graph, structured comments (TODO/FIXME/NOTE/doc), and a one-line file purpose from module-level doc comments (Rust `//!`, Python module docstrings, Go package comments, `/** */` file headers) — surfaced in `file_outline` and entrypoint lists. Heuristic file tags (`tests`, `entrypoint`, `config`, `database`, `http`, `cli`, `auth`, `types`) are derived from path conventions, import targets, and symbol composition — high-precision rules only; the authored purpose is the trusted layer. Incremental via blake3 fingerprints; oversized and binary files are recorded by name only.
 
 **Search & ranking** — exact (1.0) → prefix (0.9) → contains (0.7) → stem (0.6) → fuzzy (0.4), plus `snake_case`/`camelCase` phrase matching and light English stemming.
 

@@ -35,25 +35,28 @@ Route by situation:
 
 | Situation | First call |
 |---|---|
-| New task / "figure out X" | `ask_context` (or `investigate`) |
+| New task / "figure out X" | `ask_context` |
 | Where is a named symbol defined/used? | `find_symbol` → `explore_symbol`, then `callers` / `callees` |
-| Concept with no known name ("where does rate limiting live") | `semantic_search` |
-| Understand a file > 50 lines | `file_outline` / `explore_file`, then a targeted Read of that range |
-| About to edit a symbol | `edit_context` (full verbatim body + contracts — no follow-up Read) |
-| "Why is it like this / what changed?" | `file_history` / `symbol_history` / `change_timeline` |
-| Refactor touching > 1 file | `affected` + `coupling` + `smart_test` before editing |
+| Concept with no known name | `semantic_search` |
+| Which files deal with X? | `find_files` (paths + contained symbols) |
+| Understand a file > 50 lines | `file_outline` (budget "small" adds related files), then a targeted Read |
+| About to edit a symbol | `edit_context` (full verbatim body — no follow-up Read) |
+| "Why is it like this / what changed?" | `history` (a file path or a symbol) |
+| Refactor touching > 1 file | `affected` + `coupling` before editing |
 | Bug with no clear file | `hotspots`, then `debug_trace` on the stack trace |
+| New to the repo | `repo_outline` (include_onboard: conventions, glossary) |
 
 If kungfu's edit hook is installed (plugin or `kungfu init --agent claude`), files
 you Edit/Write are reindexed automatically; otherwise `reindex` the paths you
 changed. Always `reindex` after shell edits, codegen or git checkout. After edits,
-`verify_change` for the blast radius and minimal test set.
+`verify_change` (blast radius, tests, missed co-changes, risk).
 `memory_search` before implementing (there may already be a decision or warning);
 `memory_add` to persist new ones — pin sparingly.
 
 Skip kungfu only for: a one-line edit in a file already open this session; a file
 < 50 lines whose exact path you know; pure shell ops; reading a config/lock file by
-exact path. Otherwise, if you reach for Read / grep / find — stop and route above."#;
+exact path; an exact literal/regex search across files (Grep). Otherwise, if you
+reach for Read / grep / find — stop and route above."#;
 
 /// Pointer block appended to the project's CLAUDE.md. The routing table itself
 /// lives in [`MCP_INSTRUCTIONS`]. Same content as the README "CLAUDE.md block"
