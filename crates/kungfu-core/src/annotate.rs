@@ -92,7 +92,7 @@ impl KungfuService {
         } else {
             (
                 "applied",
-                "run embeddings_build (or wait for the next sync) to refresh the file's vector"
+                "run `kungfu embeddings build` (or wait for the next sync) to refresh the file's vector"
                     .to_string(),
             )
         };

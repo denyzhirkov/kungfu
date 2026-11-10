@@ -204,11 +204,6 @@ impl KungfuMcp {
         tools::history::pr_context(self, params)
     }
 
-    #[tool(description = "Show usage statistics: token savings, cache hit rate, calls served")]
-    fn usage_stats(&self) -> Result<String, String> {
-        tools::review::usage_stats(self)
-    }
-
     #[tool(
         description = "Find largest symbols or files (hotspots), optionally weighted by git churn frequency. Use to identify complex code, refactoring candidates, and bug-prone areas"
     )]
@@ -228,23 +223,6 @@ impl KungfuMcp {
     )]
     fn affected(&self, Parameters(params): Parameters<AffectedParam>) -> Result<String, String> {
         tools::review::affected(self, params)
-    }
-
-    #[tool(
-        description = "Find minimal set of tests to run based on git diff. Analyzes changed symbols, traces call graph to test functions, returns specific test names"
-    )]
-    fn smart_test(&self) -> Result<String, String> {
-        tools::review::smart_test(self)
-    }
-
-    #[tool(
-        description = "Reverse of smart_test: given a test function name, return the production code it exercises (callees up to 2 hops via thin test helpers)"
-    )]
-    fn test_subjects(
-        &self,
-        Parameters(params): Parameters<SymbolNameParam>,
-    ) -> Result<String, String> {
-        tools::review::test_subjects(self, params)
     }
 
     #[tool(
@@ -279,13 +257,6 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Build embeddings in the background (downloads model weights on first run). Returns immediately; poll embeddings_status until indexed_vectors catches up. Idempotent. After the first build, vectors auto-sync on every reindex — no need to call this again."
-    )]
-    fn embeddings_build(&self) -> Result<String, String> {
-        tools::review::embeddings_build(self)
-    }
-
-    #[tool(
         description = "Record a one-line purpose (and optional glossary terms) for a file you now understand. Stored durably, merged into the index with purpose_source=agent (an authored module doc keeps precedence), and picked up by the file's search vector"
     )]
     fn annotate_file(
@@ -293,16 +264,6 @@ impl KungfuMcp {
         Parameters(params): Parameters<AnnotateFileParam>,
     ) -> Result<String, String> {
         tools::annotate::annotate_file(self, params)
-    }
-
-    #[tool(
-        description = "Files most worth annotating: no purpose from any source, ranked by how much of the project imports them. Returns items + the expected workflow (understand via file_outline, then annotate_file)"
-    )]
-    fn annotation_queue(
-        &self,
-        Parameters(params): Parameters<AnnotationQueueParam>,
-    ) -> Result<String, String> {
-        tools::annotate::annotation_queue(self, params)
     }
 
     #[tool(
@@ -444,5 +405,24 @@ mod tests {
         let info = KungfuMcp::new(PathBuf::from(".")).get_info();
         assert_eq!(info.server_info.name, "kungfu");
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn tool_router_excludes_de_exposed_tools() {
+        let router = KungfuMcp::tool_router();
+        for name in [
+            "usage_stats",
+            "smart_test",
+            "test_subjects",
+            "embeddings_build",
+            "annotation_queue",
+        ] {
+            assert!(
+                !router.has_route(name),
+                "{name} must not be exposed over MCP"
+            );
+        }
+        assert!(router.has_route("verify_change"));
+        assert!(router.has_route("annotate_file"));
     }
 }

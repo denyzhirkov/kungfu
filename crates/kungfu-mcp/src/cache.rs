@@ -11,22 +11,6 @@ pub(crate) struct CacheState {
     pub entries: HashMap<u64, String>,
     pub order: Vec<u64>,
     pub index_mtime: Option<SystemTime>,
-    pub hits: u64,
-    pub misses: u64,
-    /// Total bytes returned to agent via kungfu
-    pub bytes_served: u64,
-    /// Total MCP tool calls served
-    pub calls_served: u64,
-    /// Sum of on-disk sizes of the distinct source files referenced by served results — i.e. the
-    /// bytes an agent would have read by opening those files directly. This is the real baseline
-    /// the served bytes are compared against, not a per-call constant.
-    pub raw_bytes_baseline: u64,
-    /// Served results that referenced source files (baseline > 0); the ratio is over these only.
-    pub file_backed_calls: u64,
-    pub file_backed_bytes_served: u64,
-    /// Served results with no file baseline (memory_*, project_status, ...).
-    pub pathless_calls: u64,
-    pub pathless_bytes_served: u64,
     /// Cached path → file size map (from the index), reloaded after a reindex clears the cache.
     pub file_sizes: Option<HashMap<String, u64>>,
 }
@@ -37,28 +21,17 @@ impl CacheState {
             entries: HashMap::new(),
             order: Vec::new(),
             index_mtime: None,
-            hits: 0,
-            misses: 0,
-            bytes_served: 0,
-            calls_served: 0,
-            raw_bytes_baseline: 0,
-            file_backed_calls: 0,
-            file_backed_bytes_served: 0,
-            pathless_calls: 0,
-            pathless_bytes_served: 0,
             file_sizes: None,
         }
     }
 
     pub fn get(&mut self, key: u64) -> Option<&String> {
         if let Some(val) = self.entries.get(&key) {
-            self.hits += 1;
             // Move to end (most recent)
             self.order.retain(|k| *k != key);
             self.order.push(key);
             Some(val)
         } else {
-            self.misses += 1;
             None
         }
     }
@@ -138,7 +111,7 @@ fn cache_key(tool: &str, query: &str, budget: &str) -> u64 {
 }
 
 /// One background embeddings job at a time, process-wide. Shared by the auto-sync
-/// after reindex and the explicit embeddings_build tool.
+/// after reindex.
 pub(crate) static EMBED_JOB_RUNNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -232,23 +205,11 @@ impl KungfuMcp {
             .sum()
     }
 
-    /// Single accounting point for every served tool result — session counters (calls, bytes,
-    /// raw baseline) and the persistent per-command stats. Cached and uncached tools both route
-    /// through here so usage stats cover the full surface, not just the cached subset.
+    /// Single accounting point for every served tool result: persistent per-command stats
+    /// (read by `kungfu stats`). Cached and uncached tools both route through here so the
+    /// stats cover the full surface, not just the cached subset.
     pub(crate) fn record_served(&self, tool: &str, result: &str) {
         let baseline = self.raw_baseline_bytes(result);
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.bytes_served += result.len() as u64;
-            cache.calls_served += 1;
-            cache.raw_bytes_baseline += baseline;
-            if baseline > 0 {
-                cache.file_backed_calls += 1;
-                cache.file_backed_bytes_served += result.len() as u64;
-            } else {
-                cache.pathless_calls += 1;
-                cache.pathless_bytes_served += result.len() as u64;
-            }
-        }
         if let Ok(svc) = self.service_untracked() {
             svc.track_call(tool, result.len(), Some(baseline as usize));
         }
