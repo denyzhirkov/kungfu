@@ -111,10 +111,14 @@ pub const LEGACY_REINDEX_HOOK_COMMAND: &str =
 /// reindexes, so init leaves it alone and doctor only notes it.
 pub const LEGACY_REINDEX_HOOK_FINGERPRINT: &str = "kungfu index --only";
 
-/// Shell command of the SessionStart release check. Prints one line only when a
-/// newer kungfu exists (cached 24h, silent on network failure), so a stale binary
-/// is noticed at the moment restarting the session is still cheap.
-pub const UPDATE_CHECK_HOOK_COMMAND: &str = "kungfu update --check --quiet 2>/dev/null || true";
+/// Shell command of the plugin's SessionStart hook. With the binary on PATH it is
+/// the release check: one line only when a newer kungfu exists (cached 24h, silent
+/// on network failure), so a stale binary is noticed while restarting is cheap.
+/// Without it, it says so — otherwise the MCP server and edit hook fail silently.
+/// It never downloads anything: installing stays an explicit user action.
+/// POSIX shell syntax: Claude Code runs hooks with `sh -c`, or Git Bash on Windows.
+/// The PowerShell fallback (Windows without Git Bash) can't evaluate `command -v`.
+pub const UPDATE_CHECK_HOOK_COMMAND: &str = "command -v kungfu >/dev/null 2>&1 && { kungfu update --check --quiet 2>/dev/null || true; } || echo \"kungfu plugin: the kungfu binary is not on PATH, so the kungfu MCP server and edit hook are inactive. Install it (https://github.com/denyzhirkov/kungfu#install), then restart the session.\"";
 
 /// Full SessionStart hook entry for the update check.
 pub fn update_check_hook_entry() -> Value {
@@ -146,5 +150,55 @@ mod tests {
             n <= 2048,
             "MCP_INSTRUCTIONS is {n} chars; Claude Code truncates at 2048"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_start_hook_reports_missing_binary() {
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", UPDATE_CHECK_HOOK_COMMAND])
+            .env("PATH", "/nonexistent")
+            .output()
+            .expect("run sh");
+        assert!(out.status.success(), "hook must never fail the session");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("not on PATH") && stdout.contains("#install"),
+            "missing-binary hint expected, got: {stdout}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_start_hook_passes_through_when_binary_present() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("kf-hook-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let run = |script: &str| {
+            let bin = dir.join("kungfu");
+            std::fs::write(&bin, script).expect("fake kungfu");
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            std::process::Command::new("/bin/sh")
+                .args(["-c", UPDATE_CHECK_HOOK_COMMAND])
+                .env("PATH", format!("{}:/bin:/usr/bin", dir.display()))
+                .output()
+                .expect("run sh")
+        };
+        // Up to date: silent. A failing update check stays silent too (no hint).
+        for script in ["#!/bin/sh\nexit 0\n", "#!/bin/sh\nexit 3\n"] {
+            let out = run(script);
+            assert!(out.status.success());
+            assert!(
+                out.stdout.is_empty(),
+                "expected silence, got {:?}",
+                out.stdout
+            );
+        }
+        let out = run("#!/bin/sh\necho 'kungfu 9.9.9 is available'\n");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "kungfu 9.9.9 is available"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

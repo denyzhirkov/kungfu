@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "kungfu update --check --quiet 2>/dev/null || true"
+            "command": "command -v kungfu >/dev/null 2>&1 && { kungfu update --check --quiet 2>/dev/null || true; } || echo \"kungfu plugin: the kungfu binary is not on PATH, so the kungfu MCP server and edit hook are inactive. Install it (https://github.com/denyzhirkov/kungfu#install), then restart the session.\""
           }
         ]
       }
