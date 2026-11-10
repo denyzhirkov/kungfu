@@ -163,7 +163,7 @@ impl KungfuService {
         if !kungfu_git::is_git_repo(&self.project.root) {
             bail!("--changed requires a git repository");
         }
-        let changed = kungfu_git::changed_files(&self.project.root)?;
+        let changed = kungfu_git::working_tree_changes(&self.project.root)?;
         if changed.is_empty() {
             return Ok(kungfu_index::indexer::IndexStats {
                 total_files: 0,

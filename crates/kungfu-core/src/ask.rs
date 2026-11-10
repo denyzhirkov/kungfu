@@ -9,6 +9,9 @@ use kungfu_types::context::{ContextPacket, Intent};
 use kungfu_types::relation::RelationKind;
 use kungfu_types::symbol::Symbol;
 use std::collections::{HashMap, HashSet};
+use tracing::warn;
+
+const CHANGED_FILES_CAP: usize = 50;
 
 /// Strategy A2 caps: how many top-cosine rows to fetch from the vector store and
 /// how many may enter the candidate pool. Bounded so packet assembly cost stays
@@ -550,18 +553,40 @@ impl KungfuService {
         }
 
         // Changed-file bonus
+        let mut changed_note: Option<String> = None;
         let changed = if kungfu_git::is_git_repo(&self.project.root) {
-            kungfu_git::changed_files(&self.project.root).unwrap_or_default()
+            kungfu_git::working_tree_changes(&self.project.root).unwrap_or_else(|e| {
+                warn!("ask_context: changed files unavailable: {e:#}");
+                changed_note = Some(format!("changed files unavailable: {e:#}"));
+                Vec::new()
+            })
         } else {
             Vec::new()
         };
 
-        if !changed.is_empty() {
+        // When most of the project counts as changed (e.g. the enclosing repo
+        // does not track it), "recently changed" carries no signal.
+        // Count only changed files the index knows: untracked docs, images or build
+        // output must not switch the bonus off for real code edits.
+        let indexed_paths: HashSet<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        let changed_indexed = changed
+            .iter()
+            .filter(|p| indexed_paths.contains(p.as_str()))
+            .count();
+        let changed_is_noise =
+            changed_indexed > CHANGED_FILES_CAP && changed_indexed * 2 > indexed_paths.len();
+        if changed_is_noise {
+            changed_note = Some(format!(
+                "{} changed files, most of the project: no \"recently changed\" ranking bonus applied; \
+                 the enclosing git repo probably does not track this project; verify_change lists the change set",
+                changed.len()
+            ));
+        }
+
+        if !changed.is_empty() && !changed_is_noise {
+            let changed_set: HashSet<&str> = changed.iter().map(String::as_str).collect();
             for s in &mut scored_symbols {
-                if changed
-                    .iter()
-                    .any(|c| s.symbol.path.ends_with(c) || c.ends_with(&s.symbol.path))
-                {
+                if changed_set.contains(s.symbol.path.as_str()) {
                     s.score += w.changed_file_bonus;
                     s.reason = format!("{}, recently changed", s.reason);
                 }
@@ -585,7 +610,17 @@ impl KungfuService {
         packet.retrieval = Some(retrieval);
 
         // 6. Attach changed files list
-        packet.changed_files = changed;
+        if changed.len() > CHANGED_FILES_CAP && changed_note.is_none() {
+            changed_note = Some(format!(
+                "showing {CHANGED_FILES_CAP} of {} — verify_change lists the change set",
+                changed.len()
+            ));
+        }
+        if changed_note.is_some() {
+            packet.changed_files_total = Some(changed.len());
+        }
+        packet.changed_files = changed.into_iter().take(CHANGED_FILES_CAP).collect();
+        packet.changed_files_note = changed_note;
 
         // 7. Extract snippets based on budget
         let snippet_lines = budget.max_lines();

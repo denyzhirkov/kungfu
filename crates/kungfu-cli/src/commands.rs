@@ -2412,6 +2412,9 @@ pub fn investigate(query: &str, budget: Budget, json: bool) -> Result<()> {
                     .map(|a| a.len())
                     .unwrap_or(0),
             );
+            if let Some(note) = diff["changed_files_note"].as_str() {
+                println!("        {}", note);
+            }
         }
 
         if let Some(items) = result.get("items").and_then(|i| i.as_array()) {

@@ -8,51 +8,22 @@ use std::process::Command;
 pub type LineRange = (usize, usize);
 pub type FileChangedLines = (String, Vec<LineRange>);
 
+/// True when `root` or any ancestor holds `.git` (a directory, or the file a
+/// worktree/submodule uses), so a project initialised inside a larger
+/// repository counts. Filesystem walk only: this sits on hot paths. Git
+/// commands run with `current_dir(root)` and `--relative`, which scopes their
+/// output to the project.
 pub fn is_git_repo(root: &Path) -> bool {
-    root.join(".git").exists()
+    root.ancestors().any(|dir| dir.join(".git").exists())
 }
 
-pub fn changed_files(root: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only", "HEAD"])
-        .current_dir(root)
-        .output()
-        .context("failed to run git diff")?;
-
-    if !output.status.success() {
-        // Try without HEAD for initial commit
-        let output = Command::new("git")
-            .args(["diff", "--name-only"])
-            .current_dir(root)
-            .output()
-            .context("failed to run git diff")?;
-
-        let text = String::from_utf8_lossy(&output.stdout);
-        return Ok(text
-            .lines()
-            .map(String::from)
-            .filter(|s| !s.is_empty())
-            .collect());
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-
-    // Also get untracked files
-    let untracked = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(root)
-        .output()
-        .context("failed to run git ls-files")?;
-
-    let untracked_text = String::from_utf8_lossy(&untracked.stdout);
-
-    let mut files: Vec<String> = text
-        .lines()
-        .chain(untracked_text.lines())
-        .map(String::from)
-        .filter(|s| !s.is_empty())
-        .collect();
-
+/// Every path whose working-tree state differs from HEAD: tracked changes
+/// (staged or not, deletions included) plus untracked files. Relative to
+/// `root`, sorted, deduplicated; a failing git is an error, not an empty list.
+pub fn working_tree_changes(root: &Path) -> Result<Vec<String>> {
+    let base = diff_base(root)?;
+    let mut files = changed_paths(root, &base)?;
+    files.extend(untracked_files(root)?);
     files.sort();
     files.dedup();
     Ok(files)
@@ -237,10 +208,10 @@ pub fn recent_file_commit_counts(
 
 fn commit_counts(root: &Path, max_commits: Option<usize>) -> Result<HashMap<String, usize>> {
     let mut cmd = Command::new("git");
-    cmd.args(["log", "--format=", "--name-only"]);
+    // Project-relative paths, scoped to the project (it may be nested in the repo).
+    cmd.args(["log", "--format=", "--name-only", "--relative"]);
     if let Some(n) = max_commits {
-        // Project-relative paths, scoped to the project (it may be nested in the repo).
-        cmd.arg(format!("-n{n}")).arg("--relative");
+        cmd.arg(format!("-n{n}"));
     }
     let output = cmd
         .current_dir(root)
@@ -530,7 +501,7 @@ fn validate_hash(hash: &str) -> Result<()> {
 pub fn commit_changed_lines(root: &Path, hash: &str) -> Result<Vec<FileChangedLines>> {
     validate_hash(hash)?;
     let output = Command::new("git")
-        .args(["show", "-U0", "--format=", hash])
+        .args(["show", "-U0", "--relative", "--format=", hash])
         .current_dir(root)
         .output()
         .context("failed to run git show -U0")?;
@@ -548,7 +519,7 @@ pub fn commit_changed_lines(root: &Path, hash: &str) -> Result<Vec<FileChangedLi
 pub fn commit_files(root: &Path, hash: &str) -> Result<Vec<String>> {
     validate_hash(hash)?;
     let output = Command::new("git")
-        .args(["show", "--name-only", "--format=", hash])
+        .args(["show", "--name-only", "--relative", "--format=", hash])
         .current_dir(root)
         .output()
         .context("failed to run git show --name-only")?;
@@ -661,6 +632,64 @@ pub fn staged_files(root: &Path) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn is_git_repo_sees_ancestor_repo_and_worktree_file() {
+        let repo = temp_repo("isrepo");
+        let nested = repo.join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(is_git_repo(&repo));
+        assert!(is_git_repo(&nested));
+
+        let wt = std::env::temp_dir().join(format!("kungfu-git-wtfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert!(is_git_repo(&wt));
+
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn working_tree_changes_nested_root_is_project_relative() {
+        let repo = temp_repo("wtc");
+        write(&repo, "sub/a.rs", "fn a() {}\n");
+        write(&repo, "sub/gone.rs", "fn g() {}\n");
+        write(&repo, "outside.rs", "fn o() {}\n");
+        commit_all(&repo);
+        write(&repo, "sub/a.rs", "fn a() { 1; }\n");
+        write(&repo, "outside.rs", "fn o() { 1; }\n");
+        std::fs::remove_file(repo.join("sub/gone.rs")).unwrap();
+        write(&repo, "sub/new.rs", "fn n() {}\n");
+        write(&repo, "sub/.kungfu/index/x.json", "{}");
+        write(&repo, "outside_new.rs", "fn n() {}\n");
+
+        let sub = repo.join("sub");
+        assert_eq!(
+            working_tree_changes(&sub).unwrap(),
+            vec!["a.rs", "gone.rs", "new.rs"]
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn working_tree_changes_without_commits_and_outside_repo() {
+        let dir = std::env::temp_dir().join(format!("kungfu-git-wtc0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        write(&dir, "staged.rs", "fn s() {}\n");
+        write(&dir, "loose.rs", "fn l() {}\n");
+        git_in(&dir, &["add", "staged.rs"]);
+        assert_eq!(
+            working_tree_changes(&dir).unwrap(),
+            vec!["loose.rs", "staged.rs"]
+        );
+        std::fs::remove_dir_all(dir.join(".git")).unwrap();
+        assert!(working_tree_changes(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn validate_hash_accepts_full_and_abbreviated_shas() {
