@@ -257,19 +257,52 @@ fn commit_counts(root: &Path, max_commits: Option<usize>) -> Result<HashMap<Stri
     Ok(counts)
 }
 
+/// How many recent commits `co_change_pairs` reads.
+pub const CO_CHANGE_WINDOW: usize = 500;
+/// Commits touching more files than this (merges, bulk rewrites) are skipped.
+pub const CO_CHANGE_MAX_FILES: usize = 50;
+
+/// Co-change history over the last `CO_CHANGE_WINDOW` commits touching the
+/// project; commits over `CO_CHANGE_MAX_FILES` files are left out of every count.
+#[derive(Debug, Default)]
+pub struct CoChangeHistory {
+    /// Commits counted.
+    pub commits: usize,
+    /// file → number of counted commits touching it
+    pub file_commits: HashMap<String, usize>,
+    /// file → (partner, times changed together), count descending
+    pub partners: HashMap<String, Vec<(String, usize)>>,
+}
+
 /// Find files that frequently change together (co-change analysis).
 /// Returns pairs: for each file, the list of files that co-changed with it and how many times.
 pub fn co_change_pairs(
     root: &Path,
     min_count: usize,
 ) -> Result<HashMap<String, Vec<(String, usize)>>> {
-    let output = Command::new("git")
-        .args(["log", "--format=format:COMMIT", "--name-only", "-n", "500"])
-        .current_dir(root)
-        .output()
-        .context("failed to run git log for co-change")?;
+    Ok(co_change_history(root, min_count)?.partners)
+}
 
-    let text = String::from_utf8_lossy(&output.stdout);
+/// `co_change_pairs` plus the per-file commit counts needed to judge how
+/// strong a pair is. Paths are relative to `root`; git failures are errors.
+pub fn co_change_history(root: &Path, min_count: usize) -> Result<CoChangeHistory> {
+    let window = CO_CHANGE_WINDOW.to_string();
+    let stdout = git_query(
+        root,
+        &[
+            "log",
+            "--relative",
+            "--format=format:COMMIT",
+            "--name-only",
+            "-n",
+            &window,
+            // Only commits touching the project, so a project nested in a busy
+            // repository still gets a full window of its own history.
+            "--",
+            ".",
+        ],
+    )?;
+    let text = String::from_utf8_lossy(&stdout);
 
     // Parse commits: group files per commit
     let mut commits: Vec<Vec<String>> = Vec::new();
@@ -286,13 +319,19 @@ pub fn co_change_pairs(
     if !current.is_empty() {
         commits.push(current);
     }
+    // Skip huge commits (merges, bulk changes)
+    commits.retain(|files| files.len() <= CO_CHANGE_MAX_FILES);
+
+    let mut file_commits: HashMap<String, usize> = HashMap::new();
+    for files in &commits {
+        for f in files {
+            *file_commits.entry(f.clone()).or_default() += 1;
+        }
+    }
 
     // Count co-occurrences
     let mut pairs: HashMap<(String, String), usize> = HashMap::new();
     for files in &commits {
-        if files.len() > 50 {
-            continue; // skip huge commits (merges, bulk changes)
-        }
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {
                 let a = &files[i];
@@ -319,12 +358,17 @@ pub fn co_change_pairs(
         }
     }
 
-    // Sort each list by count descending
+    // Count descending, ties by path: callers taking the top N must get the
+    // same answer on every run (pairs come out of a HashMap).
     for v in result.values_mut() {
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     }
 
-    Ok(result)
+    Ok(CoChangeHistory {
+        commits: commits.len(),
+        file_commits,
+        partners: result,
+    })
 }
 
 /// Run a git query and return stdout; any failure is reported, never
@@ -671,6 +715,35 @@ mod tests {
             "init",
         ]);
         dir
+    }
+
+    #[test]
+    fn co_change_history_is_relative_to_a_nested_root() {
+        let repo = temp_repo("cochange-nested");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        for round in 0..3 {
+            for f in ["sub/a.rs", "sub/b.rs", "other.rs"] {
+                std::fs::write(repo.join(f), format!("{round}")).unwrap();
+            }
+            git_in(&repo, &["add", "-A"]);
+            git_in(&repo, &["commit", "-q", "-m", "r"]);
+        }
+
+        let history = co_change_history(&repo.join("sub"), 3).unwrap();
+        assert_eq!(history.partners["a.rs"], [("b.rs".to_string(), 3)]);
+        assert_eq!(history.file_commits["a.rs"], 3);
+        assert_eq!(history.commits, 3);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn co_change_history_reports_git_failure() {
+        let dir = std::env::temp_dir().join(format!("kungfu-git-unborn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        assert!(co_change_history(&dir, 3).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -170,14 +170,7 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Code review context for current git diff: changed symbols, missing co-changes (files that usually change together), untested code, risk assessment"
-    )]
-    fn review(&self) -> Result<String, String> {
-        tools::review::review(self)
-    }
-
-    #[tool(
-        description = "Verify your edits in one call: changed symbols in the working-tree diff, blast radius (transitive callers), the minimal test set covering them, and any touched public contracts. Call this after finishing a series of edits, before declaring the work done"
+        description = "The post-edit check and code review in one call: changed symbols in the working-tree diff (incl. untracked/deleted files), blast radius (transitive callers), the minimal test set, touched public contracts, missing co-changes (files that usually change together per git history but are not in the diff), untested changed functions, and an overall risk with reasons. Call this after finishing a series of edits, before declaring the work done or reviewing a diff"
     )]
     fn verify_change(
         &self,
@@ -360,7 +353,6 @@ mod tests {
             "project_status",
             "reindex",
             "repo_outline",
-            "review",
             "semantic_search",
             "verify_change",
         ];

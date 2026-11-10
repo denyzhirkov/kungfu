@@ -37,15 +37,6 @@ pub(crate) fn affected(mcp: &KungfuMcp, params: AffectedParam) -> Result<String,
     })
 }
 
-pub(crate) fn review(mcp: &KungfuMcp) -> Result<String, String> {
-    // No cache — depends on current diff state
-    let service = mcp.service()?;
-    let result = service.review().map_err(|e| e.to_string())?;
-    let out = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
-    mcp.record_served("review", &out);
-    Ok(out)
-}
-
 pub(crate) fn verify_change(
     mcp: &KungfuMcp,
     params: crate::params::VerifyChangeParam,

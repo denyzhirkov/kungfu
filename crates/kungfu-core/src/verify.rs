@@ -21,11 +21,24 @@ fn set_capped<T: Serialize>(out: &mut serde_json::Value, key: &str, items: &[T])
     }
 }
 
+fn raise_one_level(level: &str) -> &'static str {
+    match level {
+        "NONE" => "LOW",
+        "LOW" => "MEDIUM",
+        _ => "HIGH",
+    }
+}
+
 impl KungfuService {
     /// One call after editing: what the working-tree diff touched, the blast
-    /// radius, the minimal test set, and which public contracts changed.
-    /// Composite over affected_staged + smart_test so the agent doesn't have to
-    /// remember to run each one.
+    /// radius, the minimal test set, which public contracts changed, files
+    /// that usually change with these but were left out, and changed code
+    /// without tests. Composite over affected_staged + smart_test + review so
+    /// the agent doesn't have to remember to run each one.
+    ///
+    /// `risk` starts from the blast radius (`affected.risk`); confident
+    /// missing co-changes raise it by one level at most. `untested` is a
+    /// heuristic and only adds a reason. `risk_reasons` says what applied.
     pub fn verify_change(&self, depth: usize) -> Result<serde_json::Value> {
         self.ensure_fresh_index()?;
         if !kungfu_git::is_git_repo(&self.project.root) {
@@ -133,6 +146,7 @@ impl KungfuService {
                     "name": t.test_name,
                     "path": t.test_path,
                     "reason": t.reason,
+                    "kind": t.kind,
                 })
             })
             .collect();
@@ -156,8 +170,50 @@ impl KungfuService {
             .filter(|p| !hunked.contains(p) && !deleted_files.iter().any(|d| d == p))
             .collect();
 
+        let files = self.store().files_arc()?;
+        let untested: Vec<String> =
+            crate::review::untested_symbols(&changed_symbols, &all_symbols, &files, &relations)
+                .iter()
+                .map(|s| format!("{}::{}", s.path, s.name))
+                .collect();
+
+        // Unborn HEAD has no history to compare against.
+        let co_changes = if base.has_commits {
+            let changed_set: HashSet<&str> = changed_files.iter().copied().collect();
+            Some(crate::review::missing_co_changes(root, &changed_set))
+        } else {
+            None
+        };
+        let missing_count = match &co_changes {
+            Some(Ok(list)) => list.len(),
+            _ => 0,
+        };
+
+        let mut risk = affected.risk.as_str();
+        let mut risk_reasons = vec![format!(
+            "blast radius {risk}: {affected_total} affected, {} test files",
+            affected.test_files.len()
+        )];
+        if missing_count > 0 {
+            let raised = raise_one_level(risk);
+            risk_reasons.push(if raised == risk {
+                format!("{missing_count} missing co-changes")
+            } else {
+                format!("{missing_count} missing co-changes (raised {risk} → {raised})")
+            });
+            risk = raised;
+        }
+        if !untested.is_empty() {
+            risk_reasons.push(format!(
+                "{} changed functions without test evidence (heuristic, does not raise risk)",
+                untested.len()
+            ));
+        }
+
         let mut out = serde_json::json!({
             "status": "changes",
+            "risk": risk,
+            "risk_reasons": risk_reasons,
             "affected": {
                 "risk": affected.risk,
                 "total": affected_total,
@@ -174,6 +230,37 @@ impl KungfuService {
         set_capped(&mut out, "changed_symbols", &symbol_names);
         set_capped(&mut out, "touched_contracts", &touched_contracts);
         set_capped(&mut out, "suggested_tests", &suggested_tests);
+        set_capped(&mut out, "untested", &untested);
+        if !untested.is_empty() {
+            let mut note = Some(
+                "heuristic — evidence checked: a test file paired with the symbol's file (TestFor), a test calling it directly in the call graph, a test module in the same file; calls to names defined more than once are not linked, so a listed symbol may still be tested"
+                    .to_string(),
+            );
+            if !call_graph_indexed {
+                crate::review::push_note(
+                    &mut note,
+                    "no call relations indexed — direct-caller evidence is absent",
+                );
+            }
+            if let Some(cap) = out["untested_note"].as_str() {
+                crate::review::push_note(&mut note, cap);
+            }
+            out["untested_note"] = serde_json::json!(note);
+        }
+        match co_changes {
+            Some(Ok(list)) => {
+                set_capped(&mut out, "missing_co_changes", &list);
+                out["co_change_window"] = serde_json::json!(crate::review::co_change_window());
+            }
+            Some(Err(e)) => {
+                out["co_change_note"] =
+                    serde_json::json!(format!("co-change history unavailable: {e}"));
+            }
+            None => {
+                out["co_change_note"] =
+                    serde_json::json!("no commits — no co-change history to compare against");
+            }
+        }
         if !deleted_files.is_empty() {
             set_capped(&mut out, "deleted_files", &deleted_files);
             out["deleted_note"] = serde_json::json!(
