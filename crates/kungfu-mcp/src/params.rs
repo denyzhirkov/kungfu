@@ -154,24 +154,18 @@ pub struct MemoryAddParam {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MemorySearchParam {
-    /// Search query
-    pub query: String,
+    /// Search query. Omit or leave empty to list active entries (pinned first) instead of searching
+    pub query: Option<String>,
     /// Filter by kind: "fact", "decision", "warning", "session_summary"
     pub kind: Option<String>,
     /// Filter by tag
     pub tag: Option<String>,
+    /// Only pinned entries
+    pub pinned: Option<bool>,
+    /// Filter by lifecycle status: "active" (default), "archived" or "superseded"
+    pub status: Option<String>,
     /// Result budget: "tiny" (3), "small" (5), "medium" (10), "full" (25), "auto" (= small). Default: auto
     pub budget: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct MemoryListParam {
-    /// Filter by kind: "fact", "decision", "warning", "session_summary"
-    pub kind: Option<String>,
-    /// Filter by tag
-    pub tag: Option<String>,
-    /// Show only pinned entries
-    pub pinned: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -192,6 +186,9 @@ pub struct MemoryUpdateParam {
     pub tags: Option<Vec<String>>,
     /// Set pinned state (optional)
     pub pin: Option<bool>,
+    /// Lifecycle status (optional): "archived" hides the entry from search/list but keeps it
+    /// for history; "active" restores it
+    pub status: Option<String>,
 }
 
 pub(crate) fn parse_budget(s: Option<&str>) -> Budget {

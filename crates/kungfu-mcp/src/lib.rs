@@ -313,7 +313,7 @@ impl KungfuMcp {
     }
 
     #[tool(
-        description = "Search project memory by query. Returns {results,total} (scored facts, decisions, warnings, session summaries), capped by budget with a truncation note"
+        description = "Search project memory by query, or list entries when query is empty/omitted (filter with kind/tag/pinned). Returns {results,total} (facts, decisions, warnings, session summaries), capped by budget with a truncation note"
     )]
     fn memory_search(
         &self,
@@ -322,35 +322,19 @@ impl KungfuMcp {
         tools::memory::memory_search(self, params)
     }
 
-    #[tool(description = "List project memory entries with optional filters")]
-    fn memory_list(
-        &self,
-        Parameters(params): Parameters<MemoryListParam>,
-    ) -> Result<String, String> {
-        tools::memory::memory_list(self, params)
-    }
-
     #[tool(description = "Get a single project memory entry by ID")]
     fn memory_get(&self, Parameters(params): Parameters<MemoryIdParam>) -> Result<String, String> {
         tools::memory::memory_get(self, params)
     }
 
-    #[tool(description = "Update a project memory entry: content, title, tags, or pinned state")]
+    #[tool(
+        description = "Update a project memory entry: content, title, tags, pinned state, or status (status \"archived\" archives it — removed from normal retrieval but kept for history; \"active\" restores)"
+    )]
     fn memory_update(
         &self,
         Parameters(params): Parameters<MemoryUpdateParam>,
     ) -> Result<String, String> {
         tools::memory::memory_update(self, params)
-    }
-
-    #[tool(
-        description = "Archive a project memory entry — removes from normal retrieval but preserves for history"
-    )]
-    fn memory_archive(
-        &self,
-        Parameters(params): Parameters<MemoryIdParam>,
-    ) -> Result<String, String> {
-        tools::memory::memory_archive(self, params)
     }
 }
 
@@ -444,5 +428,20 @@ mod tests {
         let info = KungfuMcp::new(PathBuf::from(".")).get_info();
         assert_eq!(info.server_info.name, "kungfu");
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn memory_tools_are_consolidated() {
+        let names: Vec<String> = KungfuMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for gone in ["memory_list", "memory_archive"] {
+            assert!(!names.iter().any(|n| n == gone), "{gone} still exposed");
+        }
+        for kept in ["memory_add", "memory_search", "memory_get", "memory_update"] {
+            assert!(names.iter().any(|n| n == kept), "{kept} missing");
+        }
     }
 }
