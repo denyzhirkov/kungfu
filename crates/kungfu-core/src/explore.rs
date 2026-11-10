@@ -274,23 +274,24 @@ impl KungfuService {
 
         // 2. Gather diff info if available
         let diff_info = if kungfu_git::is_git_repo(&self.project.root) {
-            let changed = kungfu_git::changed_files(&self.project.root).unwrap_or_default();
-            if changed.is_empty() {
+            // ask_context already computed the change set; its items carry the
+            // "recently changed" mark, so no second git run.
+            if packet.changed_files.is_empty() && packet.changed_files_note.is_none() {
                 None
             } else {
-                // Find which changed files overlap with context results
-                let relevant_changes: Vec<_> = changed
+                let mut relevant_changes: Vec<&str> = packet
+                    .items
                     .iter()
-                    .filter(|c| {
-                        packet
-                            .items
-                            .iter()
-                            .any(|item| item.path.ends_with(c.as_str()) || c.ends_with(&item.path))
-                    })
-                    .cloned()
+                    .filter(|item| item.why.contains("recently changed"))
+                    .map(|item| item.path.as_str())
                     .collect();
+                relevant_changes.sort_unstable();
+                relevant_changes.dedup();
                 Some(serde_json::json!({
-                    "total_changed_files": changed.len(),
+                    "total_changed_files": packet
+                        .changed_files_total
+                        .unwrap_or(packet.changed_files.len()),
+                    "changed_files_note": packet.changed_files_note,
                     "relevant_changed_files": relevant_changes,
                 }))
             }

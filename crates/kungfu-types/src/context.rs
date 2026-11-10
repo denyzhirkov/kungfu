@@ -32,6 +32,12 @@ pub struct ContextPacket {
     /// Files with uncommitted changes (populated by ask_context when git is available)
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub changed_files: Vec<String>,
+    /// Present iff `changed_files` is capped, withheld from ranking, or could not be computed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub changed_files_note: Option<String>,
+    /// Full change-set size when `changed_files` was capped or withheld from ranking.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub changed_files_total: Option<usize>,
     /// Design rationale and decision context matched to the query
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub rationale: Vec<RationaleItem>,

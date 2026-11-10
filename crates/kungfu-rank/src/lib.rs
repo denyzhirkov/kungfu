@@ -99,6 +99,8 @@ pub fn build_context_packet_full(
         intent,
         items,
         changed_files: Vec::new(),
+        changed_files_note: None,
+        changed_files_total: None,
         rationale: Vec::new(),
         history: Vec::new(),
         evidence: Vec::new(),

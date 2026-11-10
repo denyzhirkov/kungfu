@@ -492,7 +492,7 @@ impl KungfuService {
             bail!("not a git repository");
         }
 
-        let changed = kungfu_git::changed_files(&self.project.root)?;
+        let changed = kungfu_git::working_tree_changes(&self.project.root)?;
         if changed.is_empty() {
             return Ok(ContextPacket {
                 query: "diff context".to_string(),
@@ -500,6 +500,8 @@ impl KungfuService {
                 intent: None,
                 items: Vec::new(),
                 changed_files: Vec::new(),
+                changed_files_note: None,
+                changed_files_total: None,
                 rationale: Vec::new(),
                 history: Vec::new(),
                 evidence: Vec::new(),
