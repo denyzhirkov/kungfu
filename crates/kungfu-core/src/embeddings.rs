@@ -2,12 +2,17 @@ use crate::KungfuService;
 use anyhow::Result;
 use kungfu_embed::{
     append_vector, default_models_dir, open_default_engine, text_digest, EmbeddingManifest,
-    DEFAULT_DIM, DEFAULT_MODEL_ID,
+    DEFAULT_DIM, DEFAULT_MODEL_ID, INFERENCE_COMPILED,
 };
 use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EmbeddingsStatus {
+    /// Vector search is usable: inference compiled, weights installed, vectors built.
+    pub ready: bool,
     pub model_id: String,
     pub dim: usize,
     pub inference_compiled: bool,
@@ -91,39 +96,76 @@ fn embeddable_texts(
     texts
 }
 
+/// Last manifest stamp (path, mtime, byte length) and its (symbol, file) vector counts.
+/// The manifest holds an entry per vector, so parsing it on every status poll would
+/// dominate project_status; it only changes when a build or sync rewrites it.
+type CountsCache = Option<(PathBuf, SystemTime, u64, (usize, usize))>;
+static VECTOR_COUNTS: Mutex<CountsCache> = Mutex::new(None);
+
+/// Symbol and file vector counts — they share the store, so counted separately to
+/// keep the symbol-coverage hint truthful. `None` when no readable manifest exists.
+fn vector_counts(index_dir: &Path) -> Option<(usize, usize)> {
+    let path = EmbeddingManifest::manifest_path(index_dir);
+    let meta = std::fs::metadata(&path).ok()?;
+    let stamp = meta.modified().ok().map(|m| (m, meta.len()));
+    if let (Some((mtime, len)), Ok(cache)) = (stamp, VECTOR_COUNTS.lock()) {
+        if let Some((p, m, l, counts)) = cache.as_ref() {
+            if *p == path && *m == mtime && *l == len {
+                return Some(*counts);
+            }
+        }
+    }
+    let manifest = EmbeddingManifest::load(index_dir).ok().flatten()?;
+    let count = |prefix: &str| {
+        manifest
+            .offsets
+            .keys()
+            .filter(|id| id.starts_with(prefix))
+            .count()
+    };
+    let counts = (count("s:"), count("f:"));
+    if let (Some((mtime, len)), Ok(mut cache)) = (stamp, VECTOR_COUNTS.lock()) {
+        *cache = Some((path, mtime, len, counts));
+    }
+    Some(counts)
+}
+
 impl KungfuService {
     /// Report whether semantic vector search is wired up end-to-end and, if not, which
     /// step is missing. Always succeeds — designed so agents can ask "are we ready?"
     /// without crashing on partial setups.
     pub fn embeddings_status(&self) -> Result<EmbeddingsStatus> {
-        let engine = open_default_engine();
-        let inference_compiled = engine.is_real();
+        // No engine load here: status is polled (project_status, build progress) and
+        // loading the model on every call pegged CPU.
+        let inference_compiled = INFERENCE_COMPILED;
 
         let models_dir = default_models_dir();
         let weights_dir = models_dir.join(DEFAULT_MODEL_ID.replace('/', "--"));
-        let weights_installed = weights_dir.join("model.safetensors").exists();
+        // The engine needs all three files; any one missing means it cannot load.
+        let weights_installed = ["config.json", "tokenizer.json", "model.safetensors"]
+            .iter()
+            .all(|f| weights_dir.join(f).exists());
+        // This process's read paths keep whatever engine they first resolved: a noop
+        // cached before the model was installed stays until restart.
+        let engine_stale =
+            weights_installed && kungfu_embed::shared_engine_is_real() == Some(false);
 
         let index_dir = self.project.index_dir();
-        let manifest = EmbeddingManifest::load(&index_dir).ok().flatten();
-        let index_present = manifest.is_some();
-        // Symbol and file vectors share the store; count them separately so
-        // the symbol-coverage hint below stays truthful.
-        let indexed_vectors = manifest
-            .as_ref()
-            .map(|m| m.offsets.keys().filter(|id| id.starts_with("s:")).count())
-            .unwrap_or(0);
-        let indexed_file_vectors = manifest
-            .as_ref()
-            .map(|m| m.offsets.keys().filter(|id| id.starts_with("f:")).count())
-            .unwrap_or(0);
+        let counts = vector_counts(&index_dir);
+        let index_present = counts.is_some();
+        let (indexed_vectors, indexed_file_vectors) = counts.unwrap_or((0, 0));
 
-        let indexed_symbols = self.store.load_symbols().map(|s| s.len()).unwrap_or(0);
+        let indexed_symbols = self.store.symbols_arc().map(|s| s.len()).unwrap_or(0);
 
         let hint = if !inference_compiled {
             "binary built without `--features semantic`; rebuild to enable vector search"
                 .to_string()
         } else if !weights_installed {
             "weights not installed; run `kungfu embeddings install` (~130MB)".to_string()
+        } else if engine_stale {
+            "model installed after this session started; restart the session to load it \
+             (semantic_search stays keyword-only until then)"
+                .to_string()
         } else if !index_present || indexed_vectors == 0 {
             "vectors not built; run `kungfu embeddings build` after `kungfu index`".to_string()
         } else if indexed_vectors < indexed_symbols {
@@ -136,8 +178,9 @@ impl KungfuService {
         };
 
         Ok(EmbeddingsStatus {
-            model_id: engine.model_id().to_string(),
-            dim: engine.dim(),
+            ready: inference_compiled && weights_installed && !engine_stale && indexed_vectors > 0,
+            model_id: DEFAULT_MODEL_ID.to_string(),
+            dim: DEFAULT_DIM,
             inference_compiled,
             weights_installed,
             index_present,
@@ -166,7 +209,7 @@ impl KungfuService {
         }
         anyhow::ensure!(
             engine.is_real(),
-            "no real embedding engine available — check `embeddings_status` for the missing step"
+            "no real embedding engine available — check `kungfu embeddings status` (MCP: project_status → embeddings) for the missing step"
         );
 
         let symbols = self.store.load_symbols()?;
@@ -309,4 +352,29 @@ fn embed_pending(
     }
     manifest.save(index_dir)?;
     Ok(embedded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_counts_split_by_kind_and_follow_manifest_rewrites() {
+        let dir = std::env::temp_dir().join(format!("kungfu_vcounts_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(vector_counts(&dir), None, "no manifest → not present");
+
+        let mut m = EmbeddingManifest::new(DEFAULT_MODEL_ID, DEFAULT_DIM);
+        m.offsets.insert("s:a".into(), 0);
+        m.offsets.insert("f:x".into(), 1);
+        m.save(&dir).unwrap();
+        assert_eq!(vector_counts(&dir), Some((1, 1)));
+        // Unchanged manifest is served from the stamp cache.
+        assert_eq!(vector_counts(&dir), Some((1, 1)));
+
+        m.offsets.insert("s:b".into(), 2);
+        m.save(&dir).unwrap();
+        assert_eq!(vector_counts(&dir), Some((2, 1)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

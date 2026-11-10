@@ -65,7 +65,7 @@ fn call_graph_diagnostic(
             "status": "call_graph_disabled",
             "name": name,
             "hint": format!(
-                "The call graph is disabled by config ([call_graph] enabled = false). Use search_text(\"{}\") to find usages by name, or re-enable and reindex.",
+                "The call graph is disabled by config ([call_graph] enabled = false). Re-enable and reindex, or Grep for \"{}(\" to find call sites textually (kungfu has no call-site text search).",
                 name
             ),
             "results": [],
@@ -74,7 +74,7 @@ fn call_graph_diagnostic(
             "status": "filtered_ubiquitous",
             "name": name,
             "hint": format!(
-                "\"{}\" is on the ubiquitous-callables stop-list (std/utility name), so call edges to it are never stored. Use search_text(\"{}\") to find usages by name.",
+                "\"{}\" is on the ubiquitous-callables stop-list (std/utility name), so call edges to it are never stored. Grep for \"{}(\" to find call sites textually (kungfu has no call-site text search).",
                 name, name
             ),
             "results": [],
@@ -83,7 +83,7 @@ fn call_graph_diagnostic(
             "status": "call_graph_not_indexed",
             "name": name,
             "hint": format!(
-                "No call relations are built for this project, so callers/callees are unavailable. Use search_text(\"{}\") to find usages by name.",
+                "No call relations are built for this project, so callers/callees are unavailable. Grep for \"{}(\" to find call sites textually (kungfu has no call-site text search).",
                 name
             ),
             "results": [],
@@ -93,7 +93,7 @@ fn call_graph_diagnostic(
             "name": name,
             "max_caller_files": max_caller_files,
             "hint": format!(
-                "'{}' is called from more than {} distinct files, so its incoming call edges were dropped as utility-noise ([call_graph] max_caller_files = {}). Raise the limit and reindex, or use search_text(\"{}\") to find call sites by name.",
+                "'{}' is called from more than {} distinct files, so its incoming call edges were dropped as utility-noise ([call_graph] max_caller_files = {}). Raise the limit and reindex, or Grep for \"{}(\" to find call sites textually (kungfu has no call-site text search).",
                 name, max_caller_files, max_caller_files, name
             ),
             "provenance": service.call_graph_provenance(),
@@ -104,8 +104,8 @@ fn call_graph_diagnostic(
             "name": name,
             "definitions": definitions,
             "hint": format!(
-                "'{}' has {} same-name definitions — call edges are only stored for unambiguous callees, so none were stored for this name. Use search_text(\"{}\") with the scope parameter (e.g. scope: 'src/subsystem') to list call sites in the area you care about.",
-                name, definitions, name
+                "'{}' has {} same-name definitions — call edges are only stored for unambiguous callees, so none were stored for this name. Use find_symbol(\"{}\") to list the definitions, then Grep for \"{}(\" under the directory you care about to find call sites textually.",
+                name, definitions, name, name
             ),
             "provenance": service.call_graph_provenance(),
             "results": [],

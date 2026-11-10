@@ -30,6 +30,10 @@ pub const DEFAULT_MODEL_ID: &str = "BAAI/bge-small-en-v1.5";
 /// Embedding dimensionality for the default model.
 pub const DEFAULT_DIM: usize = 384;
 
+/// Whether this build carries the real inference backend — known without loading
+/// the ~130MB model, so status checks stay cheap.
+pub const INFERENCE_COMPILED: bool = cfg!(feature = "inference");
+
 /// Trait every concrete embedding backend implements.
 pub trait EmbedEngine: Send + Sync {
     fn model_id(&self) -> &str;
@@ -143,12 +147,20 @@ impl EmbedEngine for NoopEngine {
 ///
 /// The engine is resolved once and cached for the life of the process. If it could not be
 /// built at first use (feature off / weights missing) it stays `NoopEngine` until restart,
-/// so read paths degrade to keyword search. The explicit `embeddings_build` /
-/// `embeddings_status` paths deliberately keep using `open_default_engine` so a freshly
-/// installed model is picked up without a restart.
+/// so read paths degrade to keyword search. The explicit `embeddings_build` path
+/// deliberately keeps using `open_default_engine` so a freshly installed model is picked
+/// up without a restart.
 pub fn shared_engine() -> &'static dyn EmbedEngine {
-    static ENGINE: std::sync::OnceLock<Box<dyn EmbedEngine>> = std::sync::OnceLock::new();
-    ENGINE.get_or_init(open_default_engine).as_ref()
+    SHARED_ENGINE.get_or_init(open_default_engine).as_ref()
+}
+
+static SHARED_ENGINE: std::sync::OnceLock<Box<dyn EmbedEngine>> = std::sync::OnceLock::new();
+
+/// State of the [`shared_engine`] without forcing a load: `None` until a read path
+/// first used it, then whether it is real. `Some(false)` with weights on disk means
+/// the process cached the noop engine before the model was installed.
+pub fn shared_engine_is_real() -> Option<bool> {
+    SHARED_ENGINE.get().map(|e| e.is_real())
 }
 
 /// Try to construct the best available engine. With the `inference` feature compiled in

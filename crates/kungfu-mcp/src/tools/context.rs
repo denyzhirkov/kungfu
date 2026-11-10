@@ -1,6 +1,5 @@
 use crate::params::{
-    parse_budget, AskContextParam, DebugTraceParam, EditContextParam, FilePathBudgetParam,
-    QueryParam, SymbolBudgetParam,
+    parse_budget, AskContextParam, DebugTraceParam, EditContextParam, SymbolBudgetParam,
 };
 use crate::KungfuMcp;
 
@@ -58,33 +57,6 @@ pub(crate) fn explore_symbol(mcp: &KungfuMcp, params: SymbolBudgetParam) -> Resu
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         },
     )
-}
-
-pub(crate) fn explore_file(mcp: &KungfuMcp, params: FilePathBudgetParam) -> Result<String, String> {
-    let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
-    let path = params.path.clone();
-    mcp.cached("explore_file", &path, &budget_str, || {
-        let budget = parse_budget(Some(&budget_str));
-        let service = mcp.service()?;
-        let result = service
-            .explore_file(&path, budget)
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
-    })
-}
-
-pub(crate) fn investigate(mcp: &KungfuMcp, params: QueryParam) -> Result<String, String> {
-    let budget_str = params.budget.as_deref().unwrap_or("small").to_string();
-    let query = params.query.clone();
-    let scope = params.scope.clone();
-    mcp.cached_scoped("investigate", &query, &budget_str, scope.as_deref(), || {
-        let budget = parse_budget(Some(&budget_str));
-        let service = mcp.service()?;
-        let result = service
-            .investigate(&query, budget)
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
-    })
 }
 
 pub(crate) fn edit_context(mcp: &KungfuMcp, params: EditContextParam) -> Result<String, String> {

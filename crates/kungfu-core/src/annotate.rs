@@ -160,7 +160,7 @@ impl KungfuService {
         Ok(AnnotationQueue {
             total_unannotated,
             items,
-            instruction: "For each file: understand it (file_outline / explore_file), then call \
+            instruction: "For each file: understand it (file_outline, budget small for related files), then call \
                           annotate_file with a one-line purpose in the project's language; add \
                           `terms` for project jargon the file defines. Skip files you are not \
                           confident about — a wrong purpose is worse than none."

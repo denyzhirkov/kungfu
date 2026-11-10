@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use kungfu_index::Indexer;
 use kungfu_project::Project;
-use kungfu_search::{SearchEngine, SearchResult};
+use kungfu_search::{FileHit, SearchEngine, SearchResult};
 use kungfu_storage::JsonStore;
 use kungfu_types::budget::Budget;
 use kungfu_types::file::FileEntry;
@@ -196,6 +196,18 @@ impl KungfuService {
     pub fn search_text(&self, query: &str, budget: Budget) -> Result<Vec<SearchResult<FileEntry>>> {
         let budget = self.resolve_budget(budget);
         self.search().search_text(query, budget)
+    }
+
+    /// Ranked file search by path and contained symbols, each hit with its match reason.
+    /// `scope` is a path prefix applied before the budget trim.
+    pub fn find_files(
+        &self,
+        query: &str,
+        budget: Budget,
+        scope: Option<&str>,
+    ) -> Result<Vec<FileHit>> {
+        let budget = self.resolve_budget(budget);
+        self.search().find_files(query, budget, scope)
     }
 
     pub fn find_related(

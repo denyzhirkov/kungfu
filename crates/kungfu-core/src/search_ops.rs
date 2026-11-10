@@ -31,7 +31,7 @@ impl KungfuService {
     ///
     /// Lets adapters tell "this symbol has 0 callers" apart from "the call graph
     /// was never built for this project" — the latter should steer the agent to
-    /// `search_text` rather than reading an empty result as ground truth.
+    /// a textual search rather than reading an empty result as ground truth.
     pub fn has_call_graph(&self) -> Result<bool> {
         let relations = self.store().relations_arc()?;
         Ok(relations.iter().any(|r| r.kind == RelationKind::Calls))
@@ -330,7 +330,7 @@ impl KungfuService {
                         });
                         if embedded < total {
                             out["note"] = serde_json::json!(format!(
-                                "vectors cover {embedded}/{total} symbols — a sync may be catching up; unembedded symbols are reachable via find_symbol/search_text"
+                                "vectors cover {embedded}/{total} symbols — a sync may be catching up; unembedded symbols are reachable via find_symbol/find_files"
                             ));
                         }
                         return Ok(out);
