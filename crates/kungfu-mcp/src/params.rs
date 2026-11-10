@@ -207,9 +207,3 @@ pub struct AnnotateFileParam {
     /// Project-jargon glossary entries this file defines: term -> meaning
     pub terms: Option<std::collections::BTreeMap<String, String>>,
 }
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct AnnotationQueueParam {
-    /// Max files to return (default 10, max 50)
-    pub limit: Option<usize>,
-}
