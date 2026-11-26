@@ -101,6 +101,19 @@ fn queue_lists_only_files_without_purpose() {
     // A test file must not be offered for annotation.
     std::fs::create_dir_all(tmp.join("tests")).unwrap();
     std::fs::write(tmp.join("tests/bare_test.rs"), "fn t() {}\n").unwrap();
+    // Config files have no purpose to describe — nor do unknown-language files.
+    for config in [
+        "Dockerfile",
+        "Makefile",
+        "pom.xml",
+        "data.csv",
+        "setup.cfg",
+        "main.tf",
+    ] {
+        std::fs::write(tmp.join(config), "x\n").unwrap();
+    }
+    std::fs::write(tmp.join("package.json"), "{\"name\": \"x\"}\n").unwrap();
+    std::fs::write(tmp.join("notes.txt"), "x\n").unwrap();
     let service = KungfuService::open(&tmp).unwrap();
     service.index_full().unwrap();
 
@@ -114,6 +127,10 @@ fn queue_lists_only_files_without_purpose() {
     assert!(
         !paths.contains(&"tests/bare_test.rs"),
         "test files must not queue"
+    );
+    assert!(
+        paths.iter().all(|p| p.starts_with("src/")),
+        "config and unknown-language files must not queue: {paths:?}"
     );
 
     // Once annotated, the file leaves the queue.

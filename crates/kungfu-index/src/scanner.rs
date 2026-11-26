@@ -105,18 +105,50 @@ fn walk_builder(root: &Path, starts: &[PathBuf], config: &KungfuConfig) -> Resul
 }
 
 fn should_index(path: &Path, config: &KungfuConfig) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    use kungfu_types::file::Language;
 
-    let lang = kungfu_types::file::Language::from_extension(ext);
+    let lang = Language::from_path(path);
     let lang_str = lang.to_string();
 
+    // These were `Unknown` (always indexed) before they got a language of
+    // their own, and configs saved by `kungfu init` list `languages.enabled`
+    // explicitly — without them. Keep indexing them so an upgrade never drops
+    // files from an existing project.
+    let detected_later = matches!(
+        lang,
+        Language::Hcl
+            | Language::Csv
+            | Language::Env
+            | Language::Ini
+            | Language::Xml
+            | Language::Dockerfile
+            | Language::Makefile
+    );
+
     config.languages.enabled.iter().any(|l| l == &lang_str)
-        || lang == kungfu_types::file::Language::Unknown
+        || lang == Language::Unknown
+        || detected_later
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn languages_detected_later_are_indexed_under_an_old_explicit_list() {
+        // As `kungfu init` saved it before these languages existed.
+        let mut config = KungfuConfig::default();
+        config.languages.enabled = ["rust", "json", "markdown", "yaml", "toml"]
+            .map(String::from)
+            .to_vec();
+        for path in ["Dockerfile", "Makefile", "main.tf", "pom.xml", "data.csv"] {
+            assert!(should_index(Path::new(path), &config), "{path}");
+        }
+        assert!(should_index(Path::new("src/lib.rs"), &config));
+        assert!(should_index(Path::new("notes.txt"), &config));
+        // A listed-language switch still works for languages that had one.
+        assert!(!should_index(Path::new("app.py"), &config));
+    }
 
     #[test]
     fn shallow_scan_applies_the_full_scan_rules() {

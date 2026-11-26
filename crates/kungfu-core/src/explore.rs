@@ -93,6 +93,7 @@ impl KungfuService {
             })
             .collect();
 
+        let note = config_outline_note(file, symbols.len());
         Ok(FileOutline {
             path: file.path.clone(),
             language: file.language.clone(),
@@ -100,6 +101,9 @@ impl KungfuService {
             purpose_source: file.purpose_source.clone(),
             tags: file.tags.clone(),
             symbols: outlines,
+            config_symbols_total: file.config_symbols_total,
+            config_parse_errors: file.config_parse_errors,
+            note,
         })
     }
 
@@ -109,7 +113,10 @@ impl KungfuService {
         let search = self.search();
 
         // 1. Find symbol candidates
-        let candidates = search.find_symbol(name, budget)?;
+        // A name lookup resolves the symbol the user named: no config penalty.
+        let candidates = search
+            .find_symbol_ranked(name, budget, None, kungfu_search::ConfigRanking::Raw)?
+            .hits;
 
         // 2. Pick best candidate — on tie prefer: definitions > variables, src > test, exported
         let (symbol, score) = if let Some(best) = pick_best_definition(&candidates, name) {
@@ -202,6 +209,7 @@ impl KungfuService {
             "tags": outline.tags,
             "symbols": symbols,
         });
+        declare_outline_limits(&mut out, &outline);
         if budget != Budget::Tiny {
             let key: Vec<_> = key_symbols(&outline, budget.top_k() * 2)
                 .iter()
@@ -260,6 +268,7 @@ impl KungfuService {
             "key_symbols": key_symbols,
             "related_files": related_files,
         });
+        declare_outline_limits(&mut out, &outline);
         if let Some(hint) = annotation_hint(&outline) {
             out["annotation_hint"] = serde_json::json!(hint);
         }
@@ -359,6 +368,36 @@ impl KungfuService {
             ));
         }
         Some(snippet.join("\n"))
+    }
+}
+
+/// Retrieval honesty for a config file's outline: the per-file cap trimmed
+/// its symbols, or the parser recovered from syntax errors.
+fn config_outline_note(file: &kungfu_types::file::FileEntry, shown: usize) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(total) = file.config_symbols_total {
+        parts.push(format!(
+            "config symbols truncated, showing {shown} of {total} — raise [index] \
+             max_config_symbols_per_file in .kungfu/config.toml, then `kungfu index --full`"
+        ));
+    }
+    if file.config_parse_errors {
+        parts.push("parsed with syntax errors — config symbols may be incomplete".to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// Outline fields present only when the outline is partial, so a complete
+/// outline keeps its existing shape.
+fn declare_outline_limits(out: &mut serde_json::Value, outline: &FileOutline) {
+    if let Some(total) = outline.config_symbols_total {
+        out["config_symbols_total"] = serde_json::json!(total);
+    }
+    if outline.config_parse_errors {
+        out["config_parse_errors"] = serde_json::json!(true);
+    }
+    if let Some(note) = &outline.note {
+        out["note"] = serde_json::json!(note);
     }
 }
 

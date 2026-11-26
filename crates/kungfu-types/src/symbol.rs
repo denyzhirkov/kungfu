@@ -19,6 +19,19 @@ pub enum SymbolKind {
     Field,
     Import,
     Export,
+    /// A config node with a body: HCL block, TOML table, object/mapping-valued
+    /// key, Dockerfile stage, Makefile target, XML element.
+    ConfigBlock,
+    /// Any other config entry: a scalar or array-valued key, a CSV column.
+    ConfigKey,
+}
+
+impl SymbolKind {
+    /// Symbols extracted from config/data files rather than code. Code-only
+    /// consumers (call graph, glossary, test heuristics, onboarding) skip them.
+    pub fn is_config(&self) -> bool {
+        matches!(self, SymbolKind::ConfigBlock | SymbolKind::ConfigKey)
+    }
 }
 
 impl std::fmt::Display for SymbolKind {
@@ -53,4 +66,17 @@ pub struct Symbol {
     pub exported: bool,
     pub visibility: Option<String>,
     pub doc_summary: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_kinds_serialize_snake_case() {
+        assert_eq!(SymbolKind::ConfigBlock.to_string(), "config_block");
+        assert_eq!(SymbolKind::ConfigKey.to_string(), "config_key");
+        assert!(SymbolKind::ConfigKey.is_config());
+        assert!(!SymbolKind::Function.is_config());
+    }
 }

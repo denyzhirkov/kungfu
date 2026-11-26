@@ -4,6 +4,7 @@ use crate::helpers::{
 use crate::KungfuService;
 use anyhow::Result;
 use kungfu_rank::{build_context_packet_full, ScoredSymbol};
+use kungfu_search::{ConfigAct, ConfigActs, ConfigRanking, RankedHits};
 use kungfu_types::budget::Budget;
 use kungfu_types::context::{ContextPacket, Intent};
 use kungfu_types::relation::RelationKind;
@@ -140,6 +141,57 @@ impl StrategyWeights {
     }
 }
 
+/// The config ranking policy of one ask_context request, applied where each
+/// strategy computes a candidate's score — before any cut or gate reads it —
+/// and a record of what it did, for the `why` strings and the declaration.
+struct ConfigTally {
+    ranking: ConfigRanking,
+    /// What the policy did in this request (drives the note).
+    acts: ConfigActs,
+    /// Candidates whose score carries the penalty.
+    penalized: HashSet<String>,
+}
+
+impl ConfigTally {
+    fn new(ranking: ConfigRanking) -> Self {
+        Self {
+            ranking,
+            acts: ConfigActs::default(),
+            penalized: HashSet::new(),
+        }
+    }
+
+    /// Multiplier for a candidate scored outside the search layer.
+    fn factor(&mut self, sym: &Symbol) -> f64 {
+        let is_config = sym.kind.is_config();
+        let act = self.ranking.act(is_config, &sym.path);
+        self.acts.record(act);
+        if act == Some(ConfigAct::Penalized) {
+            self.penalized.insert(sym.id.clone());
+        }
+        self.ranking.factor(is_config, &sym.path)
+    }
+
+    /// An additive bonus for a candidate: scaled by the same factor as its base
+    /// score when that score carries the penalty, so a bonus cannot undo it.
+    fn bonus(&self, id: &str, amount: f64) -> f64 {
+        if self.penalized.contains(id) {
+            amount * kungfu_search::CONFIG_PENALTY
+        } else {
+            amount
+        }
+    }
+
+    /// Record what the search layer already did with this policy.
+    fn ranked_by_search<T>(&mut self, ranked: &RankedHits<T>) {
+        let acts = ranked.acts();
+        self.acts.penalized |= acts.penalized;
+        self.acts.lifted |= acts.lifted;
+        self.penalized
+            .extend(ranked.config_penalized.iter().cloned());
+    }
+}
+
 impl KungfuService {
     /// High-level context retrieval: parse intent, run multi-strategy search,
     /// rank with contextual signals, return compact packet.
@@ -170,14 +222,20 @@ impl KungfuService {
         // 3. Determine primary language for weighting
         let files = store.load_files()?;
         let primary_lang = detect_primary_language(&files);
+        // Decided once from the user's words (expanded terms must not lift it) and
+        // applied inside every strategy, so cuts and gates see penalised scores.
+        let config_ranking = ConfigRanking::decide(&words, &files, None);
+        let mut config = ConfigTally::new(config_ranking);
 
         // 4. Multi-strategy search
         let mut scored_symbols: Vec<ScoredSymbol> = Vec::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
 
         // Strategy A: symbol search
-        let sym_results = search.find_symbol(&keyword_query, Budget::Full)?;
-        for r in sym_results {
+        let sym_ranked =
+            search.find_symbol_ranked(&keyword_query, Budget::Full, None, config_ranking)?;
+        config.ranked_by_search(&sym_ranked);
+        for r in sym_ranked.hits {
             seen_ids.insert(r.item.id.clone());
             scored_symbols.push(ScoredSymbol {
                 symbol: r.item,
@@ -198,8 +256,11 @@ impl KungfuService {
             mode: "keyword_only".to_string(),
             vector_candidates: 0,
             vector_skipped: None,
+            config_ranking: None,
         };
-        let mut vector_added = 0usize;
+        // Candidates the vector layer added: the sparse-pool gates below count
+        // keyword candidates only.
+        let mut vector_ids: HashSet<String> = HashSet::new();
         if keywords.len() < 2 {
             retrieval.vector_skipped = Some(
                 "single-keyword query — name search is authoritative, vector recall skipped"
@@ -218,9 +279,17 @@ impl KungfuService {
                     } else {
                         match engine.embed_batch(&[task]) {
                             Ok(qv) if !qv.is_empty() => {
-                                let raw = emb_store.top_k(&qv[0], VECTOR_FETCH_K);
                                 let symbols_by_id: HashMap<&str, &Symbol> =
                                     all_symbols.iter().map(|s| (s.id.as_str(), s)).collect();
+                                // Config vectors are weighted before the store's cut,
+                                // so they cannot take fetch slots from code.
+                                let raw = emb_store.top_k_weighted(&qv[0], VECTOR_FETCH_K, |id| {
+                                    crate::helpers::config_vector_weight(
+                                        config_ranking,
+                                        symbols_by_id.get(id).copied(),
+                                        None,
+                                    )
+                                });
                                 // Best Strategy A (name search) score — the mid-band
                                 // trust cap in blend_vector_hits is relative to it.
                                 let best_name_score = scored_symbols
@@ -228,16 +297,21 @@ impl KungfuService {
                                     .map(|s| s.score)
                                     .fold(0.0f64, f64::max);
                                 retrieval.mode = "keyword+vector".to_string();
-                                let (contributed, added) = blend_vector_hits(
+                                let before = scored_symbols.len();
+                                let (contributed, _added) = blend_vector_hits(
                                     &raw,
                                     &symbols_by_id,
                                     best_name_score,
                                     &mut seen_ids,
                                     &mut scored_symbols,
+                                    &mut config,
                                     w,
                                 );
                                 retrieval.vector_candidates = contributed;
-                                vector_added = added;
+                                vector_ids = scored_symbols[before..]
+                                    .iter()
+                                    .map(|s| s.symbol.id.clone())
+                                    .collect();
                             }
                             _ => {
                                 retrieval.vector_skipped = Some(
@@ -263,8 +337,25 @@ impl KungfuService {
         }
 
         // Strategy B: text/file search — only add keyword-relevant symbols
-        let file_results = search.search_text(&keyword_query, Budget::Full)?;
-        for fr in &file_results {
+        let file_ranked =
+            search.find_files_ranked(&keyword_query, Budget::Full, None, config_ranking)?;
+        // Files whose score already carries the policy (matched via a config
+        // symbol): penalised, or ranked equally by a config-heavy project.
+        let penalized_files: HashSet<&str> = file_ranked
+            .config_penalized
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let lifted_files: HashSet<&str> = file_ranked
+            .config_lifted
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let file_acts = file_ranked.acts();
+        config.acts.penalized |= file_acts.penalized;
+        config.acts.lifted |= file_acts.lifted;
+        let file_results = &file_ranked.hits;
+        for fr in file_results {
             let file_syms: Vec<_> = all_symbols
                 .iter()
                 .filter(|s| s.file_id == fr.item.id && !seen_ids.contains(&s.id))
@@ -277,11 +368,21 @@ impl KungfuService {
                 })
                 .take(3)
                 .collect();
+            let file_penalized = penalized_files.contains(fr.item.id.as_str());
+            let inherited = file_penalized || lifted_files.contains(fr.item.id.as_str());
             for sym in file_syms {
                 seen_ids.insert(sym.id.clone());
+                let factor = if inherited {
+                    if file_penalized {
+                        config.penalized.insert(sym.id.clone());
+                    }
+                    1.0
+                } else {
+                    config.factor(sym)
+                };
                 scored_symbols.push(ScoredSymbol {
                     symbol: sym.clone(),
-                    score: fr.score * w.file_symbol_score,
+                    score: fr.score * w.file_symbol_score * factor,
                     reason: format!("in matched file {}", fr.item.path),
                 });
             }
@@ -290,13 +391,14 @@ impl KungfuService {
         // Strategy B2: content grep — search file bodies for keywords.
         // Sparse-pool gate counts only keyword-sourced candidates: vector hits
         // augment the pool but must not suppress keyword backfill.
-        if scored_symbols.len() - vector_added < budget.top_k() {
+        if keyword_pool_size(&scored_symbols, &vector_ids, &config) < budget.top_k() {
             let content_matches = self.grep_content(&keywords, &seen_ids, budget.top_k());
             for (sym, matched_line) in content_matches {
                 seen_ids.insert(sym.id.clone());
+                let factor = config.factor(&sym);
                 scored_symbols.push(ScoredSymbol {
                     symbol: sym,
-                    score: w.grep_content_score,
+                    score: w.grep_content_score * factor,
                     reason: format!("content match: {}", matched_line),
                 });
             }
@@ -304,7 +406,7 @@ impl KungfuService {
 
         // Strategy B3: semantic expansion — search with conceptually related terms
         // (same keyword-only sparse-pool gate as B2)
-        if scored_symbols.len() - vector_added < budget.top_k() {
+        if keyword_pool_size(&scored_symbols, &vector_ids, &config) < budget.top_k() {
             let expanded = kungfu_search::expand_query(&keywords);
             // Only use new terms (not original keywords)
             let new_terms: Vec<&str> = expanded
@@ -315,12 +417,20 @@ impl KungfuService {
 
             if !new_terms.is_empty() {
                 let expanded_query = new_terms.join(" ");
-                let sem_results = search.find_symbol(&expanded_query, Budget::Full)?;
-                for r in sem_results {
+                let sem_ranked = search.find_symbol_ranked(
+                    &expanded_query,
+                    Budget::Full,
+                    None,
+                    config_ranking,
+                )?;
+                config.ranked_by_search(&sem_ranked);
+                for r in sem_ranked.hits {
                     if seen_ids.contains(&r.item.id) {
                         continue;
                     }
-                    // Lower score for semantic matches — they're conceptual, not exact
+                    // Lower score for semantic matches — they're conceptual, not exact.
+                    // The threshold reads the penalised score (same order as
+                    // semantic_search): a demoted config hit needs a stronger match.
                     if r.score >= w.semantic_min_score {
                         seen_ids.insert(r.item.id.clone());
                         scored_symbols.push(ScoredSymbol {
@@ -346,6 +456,9 @@ impl KungfuService {
             {
                 let top_file_id = top.symbol.file_id.clone();
                 let top_score = top.score;
+                // Siblings derive their score from the top match, so they inherit
+                // its penalty (same file, same kind of symbols) — never twice.
+                let top_penalized = config.penalized.contains(&top.symbol.id);
 
                 // Add new siblings, scored by keyword relevance
                 let mut siblings: Vec<_> = all_symbols
@@ -371,6 +484,9 @@ impl KungfuService {
                         continue;
                     }
                     seen_ids.insert(sym.id.clone());
+                    if top_penalized {
+                        config.penalized.insert(sym.id.clone());
+                    }
                     let score = if *relevance > 0 {
                         top_score * w.sibling_relevant_score
                     } else {
@@ -397,6 +513,11 @@ impl KungfuService {
                         if is_relevant && s.score < top_score * w.sibling_relevant_score {
                             s.score = top_score * w.sibling_relevant_score;
                             s.reason = "same file as matched symbol".to_string();
+                            if top_penalized {
+                                config.penalized.insert(s.symbol.id.clone());
+                            } else {
+                                config.penalized.remove(&s.symbol.id);
+                            }
                         }
                     }
                 }
@@ -415,9 +536,10 @@ impl KungfuService {
                         .collect();
                     for sym in rel_syms {
                         seen_ids.insert(sym.id.clone());
+                        let factor = config.factor(sym);
                         scored_symbols.push(ScoredSymbol {
                             symbol: sym.clone(),
-                            score: r.score * w.related_score,
+                            score: r.score * w.related_score * factor,
                             reason: format!("related to {}", top_file.path),
                         });
                     }
@@ -440,9 +562,10 @@ impl KungfuService {
                         .collect();
                     for sym in importer_syms {
                         seen_ids.insert(sym.id.clone());
+                        let factor = config.factor(sym);
                         scored_symbols.push(ScoredSymbol {
                             symbol: sym.clone(),
-                            score: 0.35,
+                            score: 0.35 * factor,
                             reason: "imports affected file".to_string(),
                         });
                     }
@@ -457,14 +580,11 @@ impl KungfuService {
         let test_ids = crate::helpers::test_symbol_ids(&all_symbols);
         for s in &mut scored_symbols {
             if wants_tests && test_ids.contains(&s.symbol.id) {
-                s.score += w.test_bonus;
+                s.score += config.bonus(&s.symbol.id, w.test_bonus);
             }
-            if wants_config
-                && (s.symbol.path.ends_with(".toml")
-                    || s.symbol.path.ends_with(".json")
-                    || s.symbol.path.ends_with(".yaml")
-                    || s.symbol.path.contains("config"))
-            {
+            // Config symbols themselves, plus code under a `config` path: a config
+            // question in a code project usually means the code that loads it.
+            if wants_config && (s.symbol.kind.is_config() || s.symbol.path.contains("config")) {
                 s.score += w.config_bonus;
             }
             if intent == Intent::Debug {
@@ -474,7 +594,7 @@ impl KungfuService {
                     || name_lower.contains("handle")
                     || name_lower.contains("validate")
                 {
-                    s.score += w.debug_bonus;
+                    s.score += config.bonus(&s.symbol.id, w.debug_bonus);
                 }
             }
         }
@@ -496,7 +616,7 @@ impl KungfuService {
                     })
             });
             if path_match {
-                s.score += w.path_match_bonus;
+                s.score += config.bonus(&s.symbol.id, w.path_match_bonus);
                 if !s.reason.contains("path match") {
                     s.reason = format!("{}, path match", s.reason);
                 }
@@ -513,7 +633,7 @@ impl KungfuService {
             .map(|s| s.score)
             .fold(0.0f64, f64::max);
         if best_score < 0.6 {
-            for fr in &file_results {
+            for fr in file_results {
                 let path_lower = fr.item.path.to_lowercase();
                 let path_match = keywords
                     .iter()
@@ -526,9 +646,10 @@ impl KungfuService {
                         .max_by_key(|s| (s.exported as u8, s.span.end_line - s.span.start_line))
                     {
                         seen_ids.insert(rep.id.clone());
+                        let factor = config.factor(rep);
                         scored_symbols.push(ScoredSymbol {
                             symbol: rep.clone(),
-                            score: w.path_fallback_score,
+                            score: w.path_fallback_score * factor,
                             reason: format!("file path match: {}", fr.item.path),
                         });
                     }
@@ -584,7 +705,7 @@ impl KungfuService {
             let changed_set: HashSet<&str> = changed.iter().map(String::as_str).collect();
             for s in &mut scored_symbols {
                 if changed_set.contains(s.symbol.path.as_str()) {
-                    s.score += w.changed_file_bonus;
+                    s.score += config.bonus(&s.symbol.id, w.changed_file_bonus);
                     s.reason = format!("{}, recently changed", s.reason);
                 }
             }
@@ -600,6 +721,17 @@ impl KungfuService {
                 }
             }
         }
+
+        for s in &mut scored_symbols {
+            if config.penalized.contains(&s.symbol.id) {
+                s.reason = format!(
+                    "{}, config penalty x{}",
+                    s.reason,
+                    kungfu_search::CONFIG_PENALTY
+                );
+            }
+        }
+        retrieval.config_ranking = config_ranking.note(budget, config.acts);
 
         // 5. Build packet
         let mut packet = build_context_packet_full(task, scored_symbols, budget, Some(intent));
@@ -983,6 +1115,20 @@ impl KungfuService {
     }
 }
 
+/// How many keyword-sourced candidates the pool holds for the sparse-pool gates
+/// of Strategies B2/B3: vector additions and penalised config candidates do not
+/// count, so neither can switch the keyword backfill off.
+fn keyword_pool_size(
+    scored: &[ScoredSymbol],
+    vector_ids: &HashSet<String>,
+    config: &ConfigTally,
+) -> usize {
+    scored
+        .iter()
+        .filter(|s| !vector_ids.contains(&s.symbol.id) && !config.penalized.contains(&s.symbol.id))
+        .count()
+}
+
 /// Blend raw vector top-K hits into the candidate pool.
 ///
 /// - Hits below `vector_min_score` cosine are dropped (the model is guessing).
@@ -1007,6 +1153,7 @@ fn blend_vector_hits(
     best_name_score: f64,
     seen_ids: &mut HashSet<String>,
     scored_symbols: &mut Vec<ScoredSymbol>,
+    config: &mut ConfigTally,
     w: &StrategyWeights,
 ) -> (usize, usize) {
     let mut contributed = 0usize;
@@ -1022,7 +1169,13 @@ fn blend_vector_hits(
         }
         let span = (1.0 - w.vector_min_score).max(f64::EPSILON);
         let t = ((cos - w.vector_min_score) / span).clamp(0.0, 1.0);
-        let mut vector_score = w.vector_score + t * (w.vector_strong_score - w.vector_score);
+        let Some(sym) = symbols_by_id.get(id.as_str()) else {
+            continue;
+        };
+        // The config factor comes before the trust cap and the dedup comparison,
+        // which both read this score.
+        let mut vector_score = (w.vector_score + t * (w.vector_strong_score - w.vector_score))
+            * config.ranking.factor(sym.kind.is_config(), &sym.path);
         if cos < VECTOR_TRUSTED_COS && best_name_score > 0.0 {
             vector_score = vector_score.min(best_name_score - VECTOR_CAP_MARGIN);
         }
@@ -1037,18 +1190,17 @@ fn blend_vector_hits(
             {
                 existing.score = vector_score;
                 existing.reason = reason;
+                config.factor(sym);
                 contributed += 1;
             }
             continue;
         }
-        let Some(sym) = symbols_by_id.get(id.as_str()) else {
-            continue;
-        };
         let file_count = per_file.entry(sym.path.as_str()).or_insert(0);
         if *file_count >= VECTOR_PER_FILE_MAX {
             continue;
         }
         *file_count += 1;
+        config.factor(sym);
         seen_ids.insert(id.clone());
         scored_symbols.push(ScoredSymbol {
             symbol: (*sym).clone(),
@@ -1231,6 +1383,7 @@ mod tests {
             best,
             &mut seen,
             scored,
+            &mut ConfigTally::new(ConfigRanking::Raw),
             &StrategyWeights::default(),
         )
     }
@@ -1378,6 +1531,75 @@ mod tests {
         assert_eq!((contributed, added), (2, 2));
         let names: Vec<&str> = scored.iter().map(|s| s.symbol.name.as_str()).collect();
         assert_eq!(names, vec!["SearchConfig", "load_index"]);
+    }
+
+    #[test]
+    fn vector_window_ranks_by_penalised_cosine_and_keeps_code_order() {
+        let mut symbols: Vec<Symbol> = (0..VECTOR_FETCH_K + 5)
+            .map(|i| {
+                sym_at(
+                    &format!("s:c{i:02}"),
+                    &format!("code_{i}"),
+                    &format!("src/f{i}.rs"),
+                )
+            })
+            .collect();
+        let mut key = sym_at("s:k", "timeout", "package.json");
+        key.kind = SymbolKind::ConfigKey;
+        symbols.push(key);
+        let by_id: HashMap<&str, &Symbol> = symbols.iter().map(|s| (s.id.as_str(), s)).collect();
+        // The config vector has the best raw cosine; code follows.
+        let mut rows = vec![("s:k".to_string(), 0.99f32)];
+        rows.extend(
+            (0..VECTOR_FETCH_K + 5).map(|i| (format!("s:c{i:02}"), 0.9 - i as f32 * 0.001)),
+        );
+        let (tmp, store) = temp_store("ask_window", &rows);
+        let by_id = &by_id;
+        let weight = |ranking: ConfigRanking| {
+            move |id: &str| {
+                crate::helpers::config_vector_weight(ranking, by_id.get(id).copied(), None)
+            }
+        };
+
+        let window = store.top_k_weighted(
+            &[1.0, 0.0],
+            VECTOR_FETCH_K,
+            weight(ConfigRanking::Penalized),
+        );
+        let ids: Vec<&str> = window.iter().map(|h| h.0.as_str()).collect();
+        let code: Vec<&str> = rows[1..=VECTOR_FETCH_K]
+            .iter()
+            .map(|r| r.0.as_str())
+            .collect();
+        assert_eq!(ids, code, "0.99 x 0.6 ranks below every code hit");
+
+        // No penalty: the store's own order.
+        let window = store.top_k_weighted(
+            &[1.0, 0.0],
+            VECTOR_FETCH_K,
+            weight(ConfigRanking::QueryWantsConfig),
+        );
+        assert_eq!(window, store.top_k(&[1.0, 0.0], VECTOR_FETCH_K));
+        assert_eq!(window[0].0, "s:k");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// An on-disk store of unit vectors at the given cosine to the query [1, 0].
+    fn temp_store(
+        tag: &str,
+        rows: &[(String, f32)],
+    ) -> (std::path::PathBuf, kungfu_embed::EmbeddingStore) {
+        let tmp = std::env::temp_dir().join(format!("kungfu_core_{tag}_{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut m = kungfu_embed::EmbeddingManifest::new("test-model", 2);
+        for (id, cos) in rows {
+            let v = [*cos, (1.0 - cos * cos).sqrt()];
+            kungfu_embed::append_vector(&tmp, &mut m, id, id, &v).unwrap();
+        }
+        m.save(&tmp).unwrap();
+        let store = kungfu_embed::EmbeddingStore::load(&tmp).unwrap().unwrap();
+        (tmp, store)
     }
 
     #[test]

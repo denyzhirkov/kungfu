@@ -1,7 +1,12 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod config_rank;
 mod expand;
 
+pub use config_rank::{
+    apply_config_penalty, config_tie_break, query_wants_config, ConfigAct, ConfigActs,
+    ConfigRanking, ConfigShare, CONFIG_HEAVY_SHARE, CONFIG_PENALTY,
+};
 pub use expand::{
     split_identifier, stem_variants, ExpandedQuery, ExpandedToken, STRENGTH_EXACT, STRENGTH_STEM,
     STRENGTH_SYNONYM,
@@ -49,49 +54,219 @@ pub struct FileHit {
     pub matched: FileMatch,
 }
 
+/// A ranked page plus what the config ranking policy did to it.
+pub struct RankedHits<T> {
+    pub hits: Vec<T>,
+    /// Matches the policy penalised before the top-k trim: symbol ids for a
+    /// symbol search, ids of files matched through a config symbol for a file
+    /// search.
+    pub config_penalized: Vec<String>,
+    /// Matches a config-heavy project ranked on equal terms (same ids).
+    pub config_lifted: Vec<String>,
+}
+
+impl<T> RankedHits<T> {
+    /// What the policy did, for [`ConfigRanking::note`].
+    pub fn acts(&self) -> ConfigActs {
+        ConfigActs {
+            penalized: !self.config_penalized.is_empty(),
+            lifted: !self.config_lifted.is_empty(),
+        }
+    }
+}
+
+/// Split `(id, act)` pairs into penalised and lifted id lists.
+fn split_acts(acted: impl Iterator<Item = (String, ConfigAct)>) -> (Vec<String>, Vec<String>) {
+    let mut penalized = Vec::new();
+    let mut lifted = Vec::new();
+    for (id, act) in acted {
+        match act {
+            ConfigAct::Penalized => penalized.push(id),
+            ConfigAct::Lifted => lifted.push(id),
+        }
+    }
+    (penalized, lifted)
+}
+
+/// Score symbols against `query`, keep those under `scope` (a path prefix),
+/// apply the config penalty, keep the top `top_k`. Scope filters before the
+/// penalty and the cut, so a scoped search keeps its recall and its config
+/// note describes the scope; scoring statistics stay project-wide, as in
+/// [`rank_files`].
+fn rank_symbols(
+    symbols: &[Symbol],
+    query: &str,
+    scope: Option<&str>,
+    top_k: usize,
+    ranking: ConfigRanking,
+) -> RankedHits<SearchResult<Symbol>> {
+    let query_lower = query.to_lowercase();
+
+    // Split multi-word queries (and identifier-shaped words) for broader matching
+    let words: Vec<&str> = query_lower.split_whitespace().collect();
+    let eq = ExpandedQuery::new(&words);
+
+    let scores = score_all_symbols(symbols, &eq);
+    let mut results: Vec<SearchResult<Symbol>> = symbols
+        .iter()
+        .zip(scores)
+        .filter_map(|(s, mut score)| {
+            // A full-name match always wins, regardless of which path scored it
+            // (e.g. query "build_context_packet" takes the multi-token path).
+            if s.name.to_lowercase() == query_lower {
+                // Exact case bonus: "DataFrame" matches "DataFrame" better than "dataFrame"
+                score = if s.name == query { 1.01 } else { 1.0 };
+            }
+            if score > 0.0 && scope.is_none_or(|p| s.path.starts_with(p)) {
+                Some(SearchResult {
+                    item: s.clone(),
+                    score,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let acted = apply_config_penalty(ranking, &query_lower, &mut results, |r| {
+        (&r.item, &mut r.score)
+    });
+    let (config_penalized, config_lifted) = split_acts(
+        acted
+            .into_iter()
+            .map(|(i, act)| (results[i].item.id.clone(), act)),
+    );
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| config_tie_break(&a.item, &b.item))
+    });
+    results.truncate(top_k);
+    RankedHits {
+        hits: results,
+        config_penalized,
+        config_lifted,
+    }
+}
+
+/// File ranking behind [`SearchEngine::find_files_ranked`]. A file matched
+/// through a config symbol carries that symbol's penalty; a path match never
+/// does.
+fn rank_files(
+    files: &[FileEntry],
+    symbols: &[Symbol],
+    query: &str,
+    scope: Option<&str>,
+    top_k: usize,
+    ranking: ConfigRanking,
+) -> RankedHits<FileHit> {
+    let query_lower = query.to_lowercase();
+    let words: Vec<&str> = query_lower.split_whitespace().collect();
+    let eq = ExpandedQuery::new(&words);
+
+    // (symbol, score, what the config policy did to it)
+    let mut matched: Vec<(&Symbol, f64, Option<ConfigAct>)> = symbols
+        .iter()
+        .zip(score_all_symbols(symbols, &eq))
+        .filter(|(_, score)| *score > 0.0)
+        .map(|(s, score)| (s, score, None))
+        .collect();
+    let acted = apply_config_penalty(ranking, &query_lower, &mut matched, |m| (m.0, &mut m.1));
+    for (i, act) in acted {
+        matched[i].2 = Some(act);
+    }
+
+    // file_id -> (best symbol score, that symbol, act)
+    let mut best_symbol: std::collections::HashMap<&str, (f64, &Symbol, Option<ConfigAct>)> =
+        std::collections::HashMap::new();
+    for &(sym, sym_score, demoted) in &matched {
+        let entry = best_symbol
+            .entry(sym.file_id.as_str())
+            .or_insert((0.0, sym, demoted));
+        if sym_score > entry.0 {
+            *entry = (sym_score, sym, demoted);
+        }
+    }
+
+    let mut file_acts = Vec::new();
+    let mut results: Vec<FileHit> = files
+        .iter()
+        .filter(|f| scope.is_none_or(|s| f.path.starts_with(s)))
+        .filter_map(|f| {
+            let path_score = score_path_match(&f.path, &query_lower, &eq);
+            let (score, matched) = match best_symbol.get(f.id.as_str()) {
+                Some(&(s, sym, acted)) if s * 0.8 > path_score => {
+                    if let Some(act) = acted {
+                        file_acts.push((f.id.clone(), act));
+                    }
+                    (s * 0.8, FileMatch::Symbol(sym.name.clone()))
+                }
+                _ => (path_score, FileMatch::Path),
+            };
+            (score > 0.0).then(|| FileHit {
+                item: f.clone(),
+                score,
+                matched,
+            })
+        })
+        .collect();
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(top_k);
+    let (config_penalized, config_lifted) = split_acts(file_acts.into_iter());
+    RankedHits {
+        hits: results,
+        config_penalized,
+        config_lifted,
+    }
+}
+
 impl<'a> SearchEngine<'a> {
     pub fn new(store: &'a JsonStore) -> Self {
         Self { store }
     }
 
+    /// [`find_symbol_ranked`](Self::find_symbol_ranked) with the config
+    /// ranking decided from this query alone.
     pub fn find_symbol(&self, query: &str, budget: Budget) -> Result<Vec<SearchResult<Symbol>>> {
+        let ranking = self.config_ranking(query, None)?;
+        Ok(self.find_symbol_ranked(query, budget, None, ranking)?.hits)
+    }
+
+    /// `scope` (path prefix) filters before the config penalty and the cut.
+    pub fn find_symbol_ranked(
+        &self,
+        query: &str,
+        budget: Budget,
+        scope: Option<&str>,
+        ranking: ConfigRanking,
+    ) -> Result<RankedHits<SearchResult<Symbol>>> {
         let symbols = self.store.symbols_arc()?;
+        Ok(rank_symbols(
+            &symbols,
+            query,
+            scope,
+            budget.top_k(),
+            ranking,
+        ))
+    }
+
+    /// Decide once per request how config symbols rank for `query`: one pass
+    /// over the cached file list. `scope` narrows the config-heavy share.
+    pub fn config_ranking(&self, query: &str, scope: Option<&str>) -> Result<ConfigRanking> {
         let query_lower = query.to_lowercase();
-        let top_k = budget.top_k();
-
-        // Split multi-word queries (and identifier-shaped words) for broader matching
         let words: Vec<&str> = query_lower.split_whitespace().collect();
-        let eq = ExpandedQuery::new(&words);
-
-        let scores = score_all_symbols(&symbols, &eq);
-        let mut results: Vec<SearchResult<Symbol>> = symbols
-            .iter()
-            .zip(scores)
-            .filter_map(|(s, mut score)| {
-                // A full-name match always wins, regardless of which path scored it
-                // (e.g. query "build_context_packet" takes the multi-token path).
-                if s.name.to_lowercase() == query_lower {
-                    // Exact case bonus: "DataFrame" matches "DataFrame" better than "dataFrame"
-                    score = if s.name == query { 1.01 } else { 1.0 };
-                }
-                if score > 0.0 {
-                    Some(SearchResult {
-                        item: s.clone(),
-                        score,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.truncate(top_k);
-        Ok(results)
+        Ok(ConfigRanking::decide(
+            &words,
+            &self.store.files_arc()?,
+            scope,
+        ))
     }
 
     pub fn get_symbol(&self, name: &str) -> Result<Option<Symbol>> {
@@ -132,62 +307,39 @@ impl<'a> SearchEngine<'a> {
             .collect())
     }
 
-    /// Ranked file search: a file scores by the better of its path match and the
-    /// best-matching symbol it defines, so a keyword also finds files by contents.
-    /// `scope` (path prefix) filters before the top-k trim, so a scoped search keeps
-    /// its recall instead of filtering an already-trimmed global page.
+    /// [`find_files_ranked`](Self::find_files_ranked) with the config ranking
+    /// decided from this query and scope.
     pub fn find_files(
         &self,
         query: &str,
         budget: Budget,
         scope: Option<&str>,
     ) -> Result<Vec<FileHit>> {
+        let ranking = self.config_ranking(query, scope)?;
+        Ok(self.find_files_ranked(query, budget, scope, ranking)?.hits)
+    }
+
+    /// Ranked file search: a file scores by the better of its path match and the
+    /// best-matching symbol it defines, so a keyword also finds files by contents.
+    /// `scope` (path prefix) filters before the top-k trim, so a scoped search keeps
+    /// its recall instead of filtering an already-trimmed global page.
+    pub fn find_files_ranked(
+        &self,
+        query: &str,
+        budget: Budget,
+        scope: Option<&str>,
+        ranking: ConfigRanking,
+    ) -> Result<RankedHits<FileHit>> {
         let files = self.store.files_arc()?;
         let symbols = self.store.symbols_arc()?;
-        let query_lower = query.to_lowercase();
-        let top_k = budget.top_k();
-        let words: Vec<&str> = query_lower.split_whitespace().collect();
-        let eq = ExpandedQuery::new(&words);
-
-        // file_id -> (best symbol score, index of that symbol)
-        let mut best_symbol: std::collections::HashMap<&str, (f64, usize)> =
-            std::collections::HashMap::new();
-        let scores = score_all_symbols(&symbols, &eq);
-        for (i, (sym, sym_score)) in symbols.iter().zip(scores).enumerate() {
-            if sym_score > 0.0 {
-                let entry = best_symbol.entry(sym.file_id.as_str()).or_insert((0.0, i));
-                if sym_score > entry.0 {
-                    *entry = (sym_score, i);
-                }
-            }
-        }
-
-        let mut results: Vec<FileHit> = files
-            .iter()
-            .filter(|f| scope.is_none_or(|s| f.path.starts_with(s)))
-            .filter_map(|f| {
-                let path_score = score_path_match(&f.path, &query_lower, &eq);
-                let (score, matched) = match best_symbol.get(f.id.as_str()) {
-                    Some(&(s, i)) if s * 0.8 > path_score => {
-                        (s * 0.8, FileMatch::Symbol(symbols[i].name.clone()))
-                    }
-                    _ => (path_score, FileMatch::Path),
-                };
-                (score > 0.0).then(|| FileHit {
-                    item: f.clone(),
-                    score,
-                    matched,
-                })
-            })
-            .collect();
-
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.truncate(top_k);
-        Ok(results)
+        Ok(rank_files(
+            &files,
+            &symbols,
+            query,
+            scope,
+            budget.top_k(),
+            ranking,
+        ))
     }
 
     /// Shared snapshot of every indexed file — no per-call clone.
@@ -456,7 +608,22 @@ fn score_all_symbols(symbols: &[Symbol], eq: &ExpandedQuery) -> Vec<f64> {
             .iter()
             .map(|s| analyze_symbol_multi_word(s, eq))
             .collect();
-        let idf = token_idf_weights(&analyses, eq.tokens.len());
+        // Document frequencies come from code symbols whenever any code symbol
+        // matches — whatever the ranking decision — so config keys such as
+        // `call_graph.*` never reweigh the tokens code is scored by: code scores
+        // equal those of a config-free project, also for config queries. Only
+        // when no code symbol matches (a Terraform- or Helm-only repo) does
+        // config become the corpus. Config symbols are scored with whichever
+        // weights apply.
+        let n = eq.tokens.len();
+        let code = analyses
+            .iter()
+            .zip(symbols)
+            .filter(|(_, s)| !s.kind.is_config())
+            .map(|(a, _)| a);
+        let idf = token_idf_weights(code, n)
+            .or_else(|| token_idf_weights(analyses.iter(), n))
+            .unwrap_or_else(|| vec![1.0; n]);
         analyses
             .iter()
             .map(|a| a.as_ref().map_or(0.0, |m| combine_multi_word(m, &idf)))
@@ -514,11 +681,17 @@ fn analyze_symbol_multi_word(sym: &Symbol, eq: &ExpandedQuery) -> Option<SymbolT
         });
     }
 
+    // A config symbol's signature is `name = value`: its name half is the name
+    // itself, and the value (a description, a reference to another block) is
+    // not what the symbol is called. So a phrase found only in a config value
+    // gets no phrase score (0.95); its tokens still match as signature text
+    // below — the signature/path-only tier, at most 0.6.
+    let sig_phrase = !sym.kind.is_config()
+        && (sig_lower.contains(&phrase) || sig_lower.contains(&phrase_underscore));
     let has_exact_phrase = name_lower.contains(&phrase)
         || name_lower.contains(&phrase_underscore)
         || name_lower.contains(&phrase_camel_lower)
-        || sig_lower.contains(&phrase)
-        || sig_lower.contains(&phrase_underscore);
+        || sig_phrase;
 
     if has_exact_phrase {
         return Some(SymbolTokenMatch {
@@ -591,10 +764,14 @@ fn analyze_symbol_multi_word(sym: &Symbol, eq: &ExpandedQuery) -> Option<SymbolT
 /// Rare (discriminative) tokens weigh more than ubiquitous ones, so
 /// "ws middleware" ranks WebSocketMiddleware above the thousands of
 /// *ConnectionMiddleware symbols that merely share common vocabulary.
-fn token_idf_weights(analyses: &[Option<SymbolTokenMatch>], token_count: usize) -> Vec<f64> {
+/// `None` when no analysis matched at all.
+fn token_idf_weights<'a>(
+    analyses: impl Iterator<Item = &'a Option<SymbolTokenMatch>>,
+    token_count: usize,
+) -> Option<Vec<f64>> {
     let mut df = vec![0usize; token_count];
     let mut n = 0usize;
-    for a in analyses.iter().flatten() {
+    for a in analyses.flatten() {
         n += 1;
         for (j, s) in a.strengths.iter().enumerate() {
             if *s != 0.0 {
@@ -603,11 +780,13 @@ fn token_idf_weights(analyses: &[Option<SymbolTokenMatch>], token_count: usize) 
         }
     }
     if n == 0 {
-        return vec![1.0; token_count];
+        return None;
     }
-    df.iter()
-        .map(|d| (1.0 + n as f64 / (1 + d) as f64).ln())
-        .collect()
+    Some(
+        df.iter()
+            .map(|d| (1.0 + n as f64 / (1 + d) as f64).ln())
+            .collect(),
+    )
 }
 
 /// Combine a per-symbol analysis with token IDF weights into a final score.
@@ -943,25 +1122,6 @@ pub fn query_wants_tests(words: &[&str]) -> bool {
     })
 }
 
-/// Check if the query suggests interest in config files.
-pub fn query_wants_config(words: &[&str]) -> bool {
-    words.iter().any(|w| {
-        matches!(
-            *w,
-            "config"
-                | "configuration"
-                | "env"
-                | "settings"
-                | "setup"
-                | "cargo"
-                | "package"
-                | "toml"
-                | "yaml"
-                | "dockerfile"
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1277,6 +1437,325 @@ mod tests {
     fn path_contains_keyword() {
         let score = score_path_match("src/auth/service.ts", "auth", &eq(&["auth"]));
         assert!(score > 0.0, "path containing keyword should match");
+    }
+
+    // --- Config penalty in symbol and file ranking ---
+
+    fn config_key(name: &str, path: &str) -> Symbol {
+        Symbol {
+            kind: SymbolKind::ConfigKey,
+            language: "json".to_string(),
+            file_id: format!("f:{path}"),
+            ..make_symbol(name, path, None)
+        }
+    }
+
+    fn code_fn(name: &str, path: &str) -> Symbol {
+        Symbol {
+            file_id: format!("f:{path}"),
+            ..make_symbol(name, path, None)
+        }
+    }
+
+    fn names(hits: &RankedHits<SearchResult<Symbol>>) -> Vec<&str> {
+        hits.hits.iter().map(|r| r.item.path.as_str()).collect()
+    }
+
+    #[test]
+    fn code_outranks_equal_config_match_when_penalized() {
+        // Both names are the same prefix match for "timeout".
+        let symbols = vec![
+            config_key("timeout_ms", "package.json"),
+            code_fn("timeout_ms", "src/net.rs"),
+        ];
+        let ranked = rank_symbols(&symbols, "timeout", None, 10, ConfigRanking::Penalized);
+        assert_eq!(names(&ranked), ["src/net.rs", "package.json"]);
+        assert_eq!(
+            (ranked.config_penalized.len() + ranked.config_lifted.len()),
+            1
+        );
+        assert!(ranked.hits[0].score > ranked.hits[1].score);
+    }
+
+    #[test]
+    fn config_competes_equally_when_penalty_is_lifted() {
+        let symbols = vec![
+            config_key("timeout_ms", "package.json"),
+            code_fn("timeout_ms", "src/net.rs"),
+        ];
+        // A share lift is still recorded so the response can declare it.
+        for (lifted, acted) in [
+            (ConfigRanking::QueryWantsConfig, 0),
+            (ConfigRanking::ConfigHeavy, 1),
+        ] {
+            let ranked = rank_symbols(&symbols, "timeout", None, 10, lifted);
+            assert_eq!(
+                (ranked.config_penalized.len() + ranked.config_lifted.len()),
+                acted,
+                "{lifted:?}"
+            );
+            assert_eq!(ranked.hits[0].score, ranked.hits[1].score, "{lifted:?}");
+        }
+        // A config key matching better than the code symbol wins outright.
+        let symbols = vec![
+            code_fn("request_timeout_handler", "src/net.rs"),
+            config_key("timeout", "package.json"),
+        ];
+        let ranked = rank_symbols(&symbols, "timeout", None, 10, ConfigRanking::ConfigHeavy);
+        assert_eq!(names(&ranked)[0], "package.json");
+    }
+
+    #[test]
+    fn config_symbols_leave_code_scores_bit_for_bit_unchanged() {
+        let code = vec![
+            code_fn("call_graph_provenance", "src/a.rs"),
+            code_fn("report_empty_call_graph", "src/b.rs"),
+            code_fn("affected_provenance", "src/c.rs"),
+            code_fn("build_context_packet", "src/d.rs"),
+        ];
+        let mut with_config = code.clone();
+        with_config.extend([
+            config_key("call_graph.enabled", "kungfu.toml"),
+            config_key("call_graph.max_caller_files", "kungfu.toml"),
+            config_key("call_graph.cross_file_only", "kungfu.toml"),
+            config_key("context.packet", "settings.yaml"),
+        ]);
+        let code_rows = |hits: &RankedHits<SearchResult<Symbol>>| -> Vec<(String, f64)> {
+            hits.hits
+                .iter()
+                .filter(|r| !r.item.kind.is_config())
+                .map(|r| (r.item.id.clone(), r.score))
+                .collect()
+        };
+        for q in [
+            "callers call graph provenance",
+            "build context packet",
+            "call graph",
+            "call graph config toml",
+        ] {
+            // Also when config competes on equal terms (config query,
+            // config-heavy project): code scores never depend on config.
+            for ranking in [
+                ConfigRanking::Penalized,
+                ConfigRanking::QueryWantsConfig,
+                ConfigRanking::ConfigHeavy,
+            ] {
+                let without = rank_symbols(&code, q, None, 50, ranking);
+                let with = rank_symbols(&with_config, q, None, 50, ranking);
+                assert!(
+                    with.hits.iter().any(|r| r.item.kind.is_config()),
+                    "{q}: the query must match config too"
+                );
+                assert_eq!(code_rows(&without), code_rows(&with), "{q} {ranking:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn scope_filters_symbols_before_the_cut() {
+        // Six better matches outside the scope would fill a 5-slot page.
+        let mut symbols: Vec<Symbol> = (0..6)
+            .map(|i| code_fn(&format!("widget_{i}"), &format!("src/w{i}.rs")))
+            .collect();
+        symbols.push(code_fn("make_widget_thing", "other/misc.rs"));
+        symbols.push(config_key("widget_size", "other/app.yaml"));
+        let ranked = rank_symbols(
+            &symbols,
+            "widget",
+            Some("other/"),
+            5,
+            ConfigRanking::Penalized,
+        );
+        let mut paths: Vec<&str> = ranked.hits.iter().map(|r| r.item.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, ["other/app.yaml", "other/misc.rs"]);
+        assert_eq!(
+            (ranked.config_penalized.len() + ranked.config_lifted.len()),
+            1
+        );
+
+        let ranked = rank_symbols(
+            &symbols,
+            "widget",
+            Some("src/"),
+            5,
+            ConfigRanking::Penalized,
+        );
+        assert!(
+            ranked.acts() == ConfigActs::default(),
+            "no config match in scope"
+        );
+    }
+
+    fn config_sym(
+        name: &str,
+        kind: SymbolKind,
+        path: &str,
+        sig: &str,
+        line: usize,
+        nested: bool,
+    ) -> Symbol {
+        let mut s = make_symbol(name, path, Some(sig));
+        s.id = format!("s:{path}:{line}");
+        s.kind = kind;
+        s.file_id = format!("f:{path}");
+        s.span.start_line = line;
+        s.parent_symbol_id = nested.then(|| "parent".to_string());
+        s
+    }
+
+    #[test]
+    fn config_value_text_does_not_score_like_a_name() {
+        let q = eq(&["security", "group"]);
+        let block = config_sym(
+            "aws_security_group.web",
+            SymbolKind::ConfigBlock,
+            "main.tf",
+            "aws_security_group.web = {2 attributes}",
+            1,
+            false,
+        );
+        let described = config_sym(
+            "output.web_sg_id.description",
+            SymbolKind::ConfigKey,
+            "outputs.tf",
+            "output.web_sg_id.description = \"ID of Security Group web\"",
+            2,
+            true,
+        );
+        let referenced = config_sym(
+            "output.web_sg_id.value",
+            SymbolKind::ConfigKey,
+            "outputs.tf",
+            "output.web_sg_id.value = aws_security_group.web.id",
+            3,
+            true,
+        );
+        assert_eq!(score_symbol_multi_word(&block, &q), 0.95);
+        for value_only in [&described, &referenced] {
+            let score = score_symbol_multi_word(value_only, &q);
+            assert!(score > 0.0 && score <= 0.6, "{}: {score}", value_only.name);
+        }
+        // Code keeps its signature phrase score.
+        let code = make_symbol("check", "src/a.rs", Some("fn check(security_group: &Sg)"));
+        assert_eq!(score_symbol_multi_word(&code, &q), 0.95);
+    }
+
+    #[test]
+    fn equal_config_scores_break_ties_by_level_kind_path_line() {
+        let key = |path: &str, line: usize, nested: bool| {
+            config_sym("k", SymbolKind::ConfigKey, path, "k = 1", line, nested)
+        };
+        let block = config_sym("b", SymbolKind::ConfigBlock, "z.tf", "b = {}", 9, false);
+        let code = code_fn("c", "src/c.rs");
+        let mut v = vec![
+            key("a.tf", 5, true),
+            key("a.tf", 2, false),
+            key("b.tf", 1, false),
+            block.clone(),
+            code.clone(),
+            key("a.tf", 1, false),
+        ];
+        v.sort_by(config_tie_break);
+        let order: Vec<(&str, usize)> = v
+            .iter()
+            .map(|s| (s.path.as_str(), s.span.start_line))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("src/c.rs", 1),
+                ("z.tf", 9),
+                ("a.tf", 1),
+                ("a.tf", 2),
+                ("b.tf", 1),
+                ("a.tf", 5)
+            ]
+        );
+        // Code-vs-code: always equal, so a stable sort keeps the existing order.
+        assert_eq!(
+            config_tie_break(&code, &code_fn("d", "src/d.rs")),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn config_only_repo_weighs_tokens_by_config_frequencies() {
+        // HCL-only: `bucket` is everywhere, `policy` rare. Uniform weights
+        // would score a bucket-only name like a policy-only one.
+        let mut symbols: Vec<Symbol> = (0..6)
+            .map(|i| config_key(&format!("aws_s3_bucket.logs_{i}"), "main.tf"))
+            .collect();
+        // Same word count as the bucket names, so only the token weights differ.
+        symbols.push(config_key("aws_s3_policy.logs_p", "iam.tf"));
+        let score = |ranked: &RankedHits<SearchResult<Symbol>>, name: &str| {
+            ranked
+                .hits
+                .iter()
+                .find(|r| r.item.name == name)
+                .map(|r| r.score)
+                .unwrap()
+        };
+        for ranking in [ConfigRanking::ConfigHeavy, ConfigRanking::Penalized] {
+            let ranked = rank_symbols(&symbols, "bucket policy", None, 50, ranking);
+            assert!(
+                score(&ranked, "aws_s3_policy.logs_p") > score(&ranked, "aws_s3_bucket.logs_0"),
+                "{ranking:?}: the rare token must weigh more"
+            );
+        }
+    }
+
+    #[test]
+    fn file_matched_only_through_config_symbol_is_demoted() {
+        let file = |path: &str| FileEntry {
+            id: format!("f:{path}"),
+            path: path.to_string(),
+            extension: None,
+            language: None,
+            size: 1,
+            hash: "h".to_string(),
+            indexed_at: Default::default(),
+            tags: vec![],
+            purpose: None,
+            purpose_source: None,
+            config_symbols_total: None,
+            config_parse_errors: false,
+        };
+        let files = vec![file("package.json"), file("src/net.rs")];
+        let symbols = vec![
+            config_key("retries", "package.json"),
+            code_fn("retries", "src/net.rs"),
+        ];
+        let ranked = rank_files(
+            &files,
+            &symbols,
+            "retries",
+            None,
+            10,
+            ConfigRanking::Penalized,
+        );
+        let paths: Vec<&str> = ranked.hits.iter().map(|h| h.item.path.as_str()).collect();
+        assert_eq!(paths, ["src/net.rs", "package.json"]);
+        assert_eq!(
+            (ranked.config_penalized.len() + ranked.config_lifted.len()),
+            1
+        );
+
+        // A path match is never penalized.
+        let ranked = rank_files(
+            &files,
+            &symbols,
+            "package",
+            None,
+            10,
+            ConfigRanking::Penalized,
+        );
+        assert_eq!(ranked.hits[0].item.path, "package.json");
+        assert_eq!(ranked.hits[0].matched, FileMatch::Path);
+        assert_eq!(
+            (ranked.config_penalized.len() + ranked.config_lifted.len()),
+            0
+        );
     }
 
     #[test]

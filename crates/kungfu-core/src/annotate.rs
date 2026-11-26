@@ -1,7 +1,9 @@
 use crate::KungfuService;
 use anyhow::Result;
 use kungfu_types::annotation::FileAnnotation;
+use kungfu_types::file::Language;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 /// Outcome of `annotate_file`, explicit about what the annotation changed:
 /// the authored module doc keeps precedence, so an annotation on a documented
@@ -122,11 +124,10 @@ impl KungfuService {
         let mut candidates: Vec<(&kungfu_types::file::FileEntry, usize)> = files
             .iter()
             .filter(|f| {
+                let language = Language::from_path(Path::new(&f.path));
                 f.purpose.is_none()
-                    && f.language
-                        .as_deref()
-                        .map(|l| l != "unknown" && l != "json" && l != "yaml" && l != "toml")
-                        .unwrap_or(false)
+                    && language != Language::Unknown
+                    && !language.is_config()
                     && !f.tags.iter().any(|t| t == "tests")
             })
             .map(|f| {

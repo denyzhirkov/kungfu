@@ -75,8 +75,11 @@ impl KungfuService {
             *symbol_connections.entry(r.source_id.clone()).or_default() += 1;
             *symbol_connections.entry(r.target_id.clone()).or_default() += 1;
         }
-        let symbol_map: HashMap<&str, &Symbol> =
-            symbols.iter().map(|s| (s.id.as_str(), s)).collect();
+        let symbol_map: HashMap<&str, &Symbol> = symbols
+            .iter()
+            .filter(|s| !s.kind.is_config())
+            .map(|s| (s.id.as_str(), s))
+            .collect();
         let mut connected: Vec<(&str, usize)> = symbol_connections
             .iter()
             .map(|(k, v)| (k.as_str(), *v))
@@ -176,7 +179,8 @@ fn detect_naming_style(symbols: &[Symbol]) -> String {
     let mut camel = 0;
     let mut pascal = 0;
 
-    for s in symbols {
+    // Config keys follow the file format's conventions, not the code's.
+    for s in symbols.iter().filter(|s| !s.kind.is_config()) {
         let name = &s.name;
         if name.contains('_') && name == &name.to_lowercase() {
             snake += 1;
@@ -277,6 +281,8 @@ mod tests {
             tags: vec![],
             purpose: None,
             purpose_source: None,
+            config_symbols_total: None,
+            config_parse_errors: false,
         }];
         let result = detect_architecture(&files, &[]);
         assert!(result.contains("Workspace"), "got: {}", result);
@@ -296,6 +302,8 @@ mod tests {
                 tags: vec![],
                 purpose: None,
                 purpose_source: None,
+                config_symbols_total: None,
+                config_parse_errors: false,
             },
             FileEntry {
                 id: "2".into(),
@@ -308,6 +316,8 @@ mod tests {
                 tags: vec![],
                 purpose: None,
                 purpose_source: None,
+                config_symbols_total: None,
+                config_parse_errors: false,
             },
             FileEntry {
                 id: "3".into(),
@@ -320,6 +330,8 @@ mod tests {
                 tags: vec![],
                 purpose: None,
                 purpose_source: None,
+                config_symbols_total: None,
+                config_parse_errors: false,
             },
         ];
         let result = detect_architecture(&files, &[]);
@@ -438,6 +450,8 @@ mod tests {
                 tags: vec![],
                 purpose: None,
                 purpose_source: None,
+                config_symbols_total: None,
+                config_parse_errors: false,
             },
             FileEntry {
                 id: "2".into(),
@@ -450,6 +464,8 @@ mod tests {
                 tags: vec![],
                 purpose: None,
                 purpose_source: None,
+                config_symbols_total: None,
+                config_parse_errors: false,
             },
         ];
         let result = detect_test_pattern(&files);

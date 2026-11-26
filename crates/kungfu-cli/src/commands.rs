@@ -5,6 +5,7 @@ use kungfu_project::agent_health::{self, CheckStatus};
 use kungfu_project::{
     find_indexed_root, find_marker_root, find_project_root, init_project, KUNGFU_VERSION,
 };
+use kungfu_types::context::ConfigRankingNote;
 use kungfu_types::memory::ProjectMemoryKind;
 use kungfu_types::Budget;
 use std::env;
@@ -1565,13 +1566,22 @@ pub fn file_outline(path: &str, json: bool) -> Result<()> {
                 })
             })
             .collect();
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "path": outline.path,
             "language": outline.language,
             "purpose": outline.purpose,
             "tags": outline.tags,
             "symbols": symbols,
         });
+        if let Some(total) = outline.config_symbols_total {
+            out["config_symbols_total"] = serde_json::json!(total);
+        }
+        if outline.config_parse_errors {
+            out["config_parse_errors"] = serde_json::json!(true);
+        }
+        if let Some(ref note) = outline.note {
+            out["note"] = serde_json::json!(note);
+        }
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         println!(
@@ -1584,6 +1594,9 @@ pub fn file_outline(path: &str, json: bool) -> Result<()> {
         }
         if !outline.tags.is_empty() {
             println!("Tags: {}", outline.tags.join(", "));
+        }
+        if let Some(ref note) = outline.note {
+            println!("Note: {note}");
         }
         println!();
         for s in &outline.symbols {
@@ -1601,12 +1614,9 @@ pub fn file_outline(path: &str, json: bool) -> Result<()> {
 pub fn find_symbol(query: &str, budget: Budget, scope: Option<&str>, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let service = KungfuService::open(&cwd)?;
-    let mut results = service.find_symbol(query, budget)?;
-
-    // Apply scope filter
-    if let Some(scope) = scope {
-        results.retain(|r| r.item.path.starts_with(scope));
-    }
+    // Scope filters in core, before the budget cut.
+    let ranked = service.find_symbol_ranked(query, budget, scope)?;
+    let results = ranked.results;
 
     if json {
         let items: Vec<_> = results
@@ -1622,7 +1632,7 @@ pub fn find_symbol(query: &str, budget: Budget, scope: Option<&str>, json: bool)
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&items)?);
+        print_ranked_json(items, ranked.config_ranking.as_ref())?;
     } else if results.is_empty() {
         println!("No symbols found for '{}'", query);
     } else {
@@ -1633,8 +1643,29 @@ pub fn find_symbol(query: &str, budget: Budget, scope: Option<&str>, json: bool)
                 r.score, r.item.path, r.item.span.start_line, r.item.kind, sig
             );
         }
+        print_config_ranking(ranked.config_ranking.as_ref());
     }
     Ok(())
+}
+
+/// `--json` stays a bare array whatever matched; the ranking note goes to
+/// stderr so stdout parses the same in every run.
+fn print_ranked_json(
+    items: Vec<serde_json::Value>,
+    note: Option<&ConfigRankingNote>,
+) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&items)?);
+    if let Some(note) = note {
+        eprintln!("Ranking: {}", note.hint);
+    }
+    Ok(())
+}
+
+fn print_config_ranking(note: Option<&ConfigRankingNote>) {
+    if let Some(note) = note {
+        println!();
+        println!("Ranking: {}", note.hint);
+    }
 }
 
 pub fn get_symbol(name: &str, budget: Budget, json: bool) -> Result<()> {
@@ -1713,7 +1744,8 @@ pub fn get_symbol(name: &str, budget: Budget, json: bool) -> Result<()> {
 pub fn search_text(query: &str, budget: Budget, json: bool) -> Result<()> {
     let cwd = env::current_dir()?;
     let service = KungfuService::open(&cwd)?;
-    let results = service.search_text(query, budget)?;
+    let ranked = service.find_files(query, budget, None)?;
+    let results = ranked.results;
 
     if json {
         let items: Vec<_> = results
@@ -1726,7 +1758,7 @@ pub fn search_text(query: &str, budget: Budget, json: bool) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&items)?);
+        print_ranked_json(items, ranked.config_ranking.as_ref())?;
     } else if results.is_empty() {
         println!("No results for '{}'", query);
     } else {
@@ -1738,6 +1770,7 @@ pub fn search_text(query: &str, budget: Budget, json: bool) -> Result<()> {
                 r.item.language.as_deref().unwrap_or("?")
             );
         }
+        print_config_ranking(ranked.config_ranking.as_ref());
     }
     Ok(())
 }
@@ -1766,6 +1799,13 @@ pub fn ask_context(task: &str, budget: Budget, json: bool) -> Result<()> {
                     r.mode, r.vector_candidates
                 ),
             }
+        }
+        if let Some(note) = packet
+            .retrieval
+            .as_ref()
+            .and_then(|r| r.config_ranking.as_ref())
+        {
+            println!("Ranking: {}", note.hint);
         }
         println!();
         for item in &packet.items {
@@ -1865,6 +1905,9 @@ pub fn semantic_search(query: &str, budget: Budget, json: bool) -> Result<()> {
         }
         if !expanded.is_empty() {
             println!("Expanded: {}", expanded);
+        }
+        if let Some(hint) = result["config_ranking"]["hint"].as_str() {
+            println!("Ranking:  {}", hint);
         }
         println!();
 

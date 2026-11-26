@@ -86,6 +86,25 @@ pub(crate) fn is_stop_word(word: &str) -> bool {
 
 pub(crate) use kungfu_types::test_paths::is_test_path;
 
+/// Weight of a vector hit for `EmbeddingStore::top_k_weighted`, applied
+/// before the store's cut: the config factor for a config symbol or a config
+/// file's vector, 1.0 for everything else (and for unknown ids).
+pub(crate) fn config_vector_weight(
+    ranking: kungfu_search::ConfigRanking,
+    symbol: Option<&Symbol>,
+    file_path: Option<&str>,
+) -> f32 {
+    let (is_config, path) = match (symbol, file_path) {
+        (Some(s), _) => (s.kind.is_config(), s.path.as_str()),
+        (None, Some(path)) => (
+            kungfu_types::file::Language::from_path(std::path::Path::new(path)).is_config(),
+            path,
+        ),
+        (None, None) => (false, ""),
+    };
+    ranking.factor(is_config, path) as f32
+}
+
 /// Per-symbol test check. The only signal available without the symbol table
 /// is the file path; a function named `test_*` or `Test*` in a production file
 /// is deliberately NOT a test (it is usually production code about tests, e.g.
@@ -208,6 +227,8 @@ mod tests {
                 tags: vec![],
                 purpose: None,
                 purpose_source: None,
+                config_symbols_total: None,
+                config_parse_errors: false,
             },
             FileEntry {
                 id: "2".into(),
@@ -220,6 +241,8 @@ mod tests {
                 tags: vec![],
                 purpose: None,
                 purpose_source: None,
+                config_symbols_total: None,
+                config_parse_errors: false,
             },
             FileEntry {
                 id: "3".into(),
@@ -232,6 +255,8 @@ mod tests {
                 tags: vec![],
                 purpose: None,
                 purpose_source: None,
+                config_symbols_total: None,
+                config_parse_errors: false,
             },
         ];
         assert_eq!(detect_primary_language(&files), Some("rust".to_string()));

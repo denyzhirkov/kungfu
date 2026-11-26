@@ -406,10 +406,12 @@ pub fn build_glossary(
     // Test symbols poison the glossary twice over: fixture vocabulary inflates
     // the counts and fixture types hijack definition sites. Mine production
     // symbols only (same detector semantic_search uses for its demotion).
+    // Config keys (`dependencies.react`, `scripts.build`) are not the
+    // project's vocabulary either.
     let test_ids = crate::helpers::test_symbol_ids(symbols);
     let production: Vec<&Symbol> = symbols
         .iter()
-        .filter(|s| !test_ids.contains(&s.id))
+        .filter(|s| !test_ids.contains(&s.id) && !s.kind.is_config())
         .collect();
 
     // Identifier footprint per candidate word.
@@ -615,6 +617,32 @@ mod tests {
         assert_eq!(packet.source, "usage");
         assert!(packet.meaning.is_none());
         assert!(packet.hint.as_deref().unwrap().contains("annotate_file"));
+    }
+
+    #[test]
+    fn config_keys_are_not_vocabulary() {
+        let symbols = vec![
+            sym(
+                "dependencies.webpack",
+                SymbolKind::ConfigKey,
+                "a/package.json",
+                None,
+            ),
+            sym(
+                "devDependencies.webpack",
+                SymbolKind::ConfigKey,
+                "b/package.json",
+                None,
+            ),
+            sym(
+                "scripts.webpack",
+                SymbolKind::ConfigKey,
+                "c/package.json",
+                None,
+            ),
+        ];
+        let glossary = build_glossary(&symbols, &BTreeMap::new(), &[], 10);
+        assert!(glossary.iter().all(|e| e.term != "webpack"), "{glossary:?}");
     }
 
     #[test]

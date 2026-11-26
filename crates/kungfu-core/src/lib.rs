@@ -185,8 +185,27 @@ impl KungfuService {
     }
 
     pub fn find_symbol(&self, query: &str, budget: Budget) -> Result<Vec<SearchResult<Symbol>>> {
+        Ok(self.find_symbol_ranked(query, budget, None)?.results)
+    }
+
+    /// Symbol search that declares how config symbols were ranked. `scope` (a
+    /// path prefix) filters before the penalty and the budget cut, and the
+    /// config-heavy share and the note are computed for that scope.
+    pub fn find_symbol_ranked(
+        &self,
+        query: &str,
+        budget: Budget,
+        scope: Option<&str>,
+    ) -> Result<Ranked<SearchResult<Symbol>>> {
         let budget = self.resolve_budget(budget);
-        self.search().find_symbol(query, budget)
+        let search = self.search();
+        let ranking = search.config_ranking(query, scope)?;
+        let ranked = search.find_symbol_ranked(query, budget, scope, ranking)?;
+        let config_ranking = ranking.note(budget, ranked.acts());
+        Ok(Ranked {
+            results: ranked.hits,
+            config_ranking,
+        })
     }
 
     pub fn get_symbol(&self, name: &str) -> Result<Option<Symbol>> {
@@ -205,9 +224,16 @@ impl KungfuService {
         query: &str,
         budget: Budget,
         scope: Option<&str>,
-    ) -> Result<Vec<FileHit>> {
+    ) -> Result<Ranked<FileHit>> {
         let budget = self.resolve_budget(budget);
-        self.search().find_files(query, budget, scope)
+        let search = self.search();
+        let ranking = search.config_ranking(query, scope)?;
+        let ranked = search.find_files_ranked(query, budget, scope, ranking)?;
+        let config_ranking = ranking.note(budget, ranked.acts());
+        Ok(Ranked {
+            results: ranked.hits,
+            config_ranking,
+        })
     }
 
     pub fn find_related(
