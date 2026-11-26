@@ -72,3 +72,26 @@ pub(crate) fn apply_scope(json_str: &str, scope: Option<&str>) -> String {
 
     json_str.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The config-ranking note is computed in core (for find_files and
+    /// find_symbol, for the scope itself); a demoted in-scope config match is
+    /// typically below the cut, so the note must survive even when no config
+    /// item is left on the page.
+    #[test]
+    fn scope_filter_keeps_the_config_ranking_note() {
+        let note = serde_json::json!({ "status": "penalized", "factor": 0.6, "hint": "h" });
+        let results = serde_json::json!({
+            "results": [{ "path": "src/a.rs" }, { "path": "other/b.rs" }],
+            "config_ranking": note,
+        })
+        .to_string();
+        let scoped: serde_json::Value =
+            serde_json::from_str(&apply_scope(&results, Some("src/"))).unwrap();
+        assert_eq!(scoped["results"].as_array().unwrap().len(), 1);
+        assert_eq!(scoped["config_ranking"], note);
+    }
+}

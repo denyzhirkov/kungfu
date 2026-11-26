@@ -172,7 +172,7 @@ Add to your agent config (Claude Code, Cursor, etc.):
 
 **Retrieval** — `ask_context` (intent + multi-strategy search + rationale + memory + uncommitted changes), `edit_context` (full verbatim body + contracts, edit-ready), `explore_symbol`, `debug_trace`.
 
-**Search** — `find_symbol`, `find_files` (ranked by path and contained symbols, with a `match` reason), `semantic_search`.
+**Search** — `find_symbol`, `find_files` (ranked by path and contained symbols, with a `match` reason), `semantic_search`. Over MCP, `find_symbol` and `find_files` always return an object `{results, config_ranking?}` (an empty result is `{results: [], hint}`); CLI `--json` stays a bare array with the ranking note on stderr.
 
 **Structure** — `project_status` (index, git and embeddings readiness), `repo_outline` (`include_onboard: true` adds architecture, naming, test layout and the project glossary), `file_outline` (budget above `tiny` adds related files and key symbols).
 
@@ -319,6 +319,13 @@ kungfu vs. naive grep + read, tokens to answer the same query:
 
 **Indexing** — scans files respecting `.gitignore`; parses with [tree-sitter](https://tree-sitter.github.io/) (Rust, TypeScript, JavaScript, Python, Go, Java, C#, Kotlin, C, C++); extracts symbols, imports (resolved to real files), a function call graph, structured comments (TODO/FIXME/NOTE/doc), and a one-line file purpose from module-level doc comments (Rust `//!`, Python module docstrings, Go package comments, `/** */` file headers) — surfaced in `file_outline` and entrypoint lists. Heuristic file tags (`tests`, `entrypoint`, `config`, `database`, `http`, `cli`, `auth`, `types`) are derived from path conventions, import targets, and symbol composition — high-precision rules only; the authored purpose is the trusted layer. Incremental via blake3 fingerprints; oversized and binary files are recorded by name only.
 
+**Config files** — JSON, YAML, TOML, Terraform/HCL, XML, INI/`.properties`/`.cfg`, `.env`, CSV/TSV, Dockerfile and Makefile are indexed as symbols too (`config_block` / `config_key`), two levels deep: `services.web` in a compose file, `jobs.build` in a workflow, `workspace.dependencies` in `Cargo.toml`, Terraform blocks by address (`aws_s3_bucket.logs`, `var.region`, `module.vpc`, `data.aws_ami.x`), Dockerfile stages, Makefile targets, CSV header columns. Values are never symbols; a signature shows a short scalar or a size (`{3 keys}`, `[12 items]`). Lock and state files (`package-lock.json`, `Cargo.lock`, `*.tfstate`, …) are recorded by name only.
+
+- *Cap* — at most `max_config_symbols_per_file` symbols per config file (default 50), top-level nodes first, so a long `main.tf` keeps every resource before any attribute; `file_outline` declares a trimmed file (`showing 50 of 312`) and a file that parsed with syntax errors or was cut short by a parser guard.
+- *Secrets* — scalar values that look like secrets are replaced by `<redacted>` before they reach the index: by key name (`password`, `token`, `secrets.*`, `*_key`, …) and by value shape (known token prefixes, long base64/hex runs, `user:pass@` URLs, `password=`/`--token` parameters, `Authorization: Bearer …`). `.env` values and Dockerfile `ENV`/`ARG` values are never indexed. This is a best-effort denylist, not a guarantee — a secret under an unremarkable key with a short value still reaches the index.
+- *Ranking* — config symbols rank ×0.6 below code, so they do not crowd code out of an application repo. The penalty is lifted when the query names a format or file (`terraform`, `yaml`, `package.json`, `config`, …) or when the project is config-heavy: infrastructure formats (YAML, HCL, `.env`, Dockerfile) are more than half of those plus code files. One exact-name config match with no code symbol of that name is spared. Responses declare which applied in `config_ranking` (`status: "penalized" | "config_heavy"`).
+- *Known limits* — Terraform is read by a line scanner, not a full HCL parser (a block whose `{` is on the next line is skipped); `.tf.json` is read as plain JSON; relations between Terraform blocks (`var.x`, `module.x`) are not built; YAML lines indented past 60 columns are ignored (only the top two levels are indexed anyway).
+
 **Search & ranking** — exact (1.0) → prefix (0.9) → contains (0.7) → stem (0.6) → fuzzy (0.4), plus `snake_case`/`camelCase` phrase matching and light English stemming.
 
 **Context assembly** — multi-strategy search (symbols, text, related files, import chains, semantic), dedup by (path, name), git changed-file bonus, test/config proximity, language weighting, all trimmed to the budget.
@@ -352,7 +359,7 @@ project_name = "my-project"
 paths = ["node_modules", "dist", "build", ".git", "target"]
 
 [languages]
-enabled = ["typescript", "javascript", "rust", "go", "python", "java", "csharp", "kotlin", "c", "cpp", "json", "markdown", "yaml", "toml"]
+enabled = ["typescript", "javascript", "rust", "go", "python", "java", "csharp", "kotlin", "c", "cpp", "json", "markdown", "yaml", "toml", "hcl", "csv", "env", "ini", "xml", "dockerfile", "makefile"]
 
 [search]
 default_budget = "small"
@@ -361,6 +368,7 @@ default_top_k = 5
 [index]
 incremental = true
 max_file_bytes = 2097152   # skip files larger than this (2 MiB)
+max_config_symbols_per_file = 50   # cap for config files; file_outline declares a trimmed file
 
 [git]
 enabled = true

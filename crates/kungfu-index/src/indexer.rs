@@ -46,6 +46,12 @@ const PROBE_MAX_WORKERS: usize = 8;
 /// way they are still recorded by name.
 fn read_for_index(path: &Path, max_file_bytes: u64) -> std::io::Result<ReadOutcome> {
     let size = std::fs::metadata(path)?.len();
+    if is_lock_or_state_file(path) {
+        return Ok(ReadOutcome::Skipped {
+            size,
+            reason: "lock-file",
+        });
+    }
     if is_binary_extension(path) {
         return Ok(ReadOutcome::Skipped {
             size,
@@ -66,6 +72,27 @@ fn read_for_index(path: &Path, max_file_bytes: u64) -> std::io::Result<ReadOutco
         });
     }
     Ok(ReadOutcome::Full(content))
+}
+
+/// Generated lock and state files: large, machine-written and keyed by package
+/// or resource names that would drown real config symbols. Recorded by name.
+fn is_lock_or_state_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    matches!(
+        name,
+        "package-lock.json"
+            | "npm-shrinkwrap.json"
+            | "packages.lock.json"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+            | "Cargo.lock"
+            | "composer.lock"
+            | "poetry.lock"
+            | "Gemfile.lock"
+            | "go.sum"
+            | ".terraform.lock.hcl"
+    ) || name.ends_with(".tfstate")
+        || name.ends_with(".tfstate.backup")
 }
 
 /// Heuristic: a NUL byte in the first 8 KiB means binary content.
@@ -875,7 +902,7 @@ impl<'a> Indexer<'a> {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_string();
-        let language = Language::from_extension(&ext);
+        let language = Language::from_path(path);
         let id = format!("f:{}", &blake3::hash(rel_path.as_bytes()).to_hex()[..12]);
         let tags = crate::file_tags::derive_tags(&rel_path, &[], &[]);
         FileEntry {
@@ -889,6 +916,8 @@ impl<'a> Indexer<'a> {
             tags,
             purpose: None,
             purpose_source: None,
+            config_symbols_total: None,
+            config_parse_errors: false,
         }
     }
 
@@ -907,7 +936,7 @@ impl<'a> Indexer<'a> {
             .unwrap_or("")
             .to_string();
 
-        let language = Language::from_extension(&ext);
+        let language = Language::from_path(path);
         let size = content.len() as u64;
         let file_id = format!("f:{}", &hash[..12]);
 
@@ -922,6 +951,8 @@ impl<'a> Indexer<'a> {
             tags: Vec::new(),
             purpose: None,
             purpose_source: None,
+            config_symbols_total: None,
+            config_parse_errors: false,
         };
 
         let (mut symbols, imports, comments, calls) = if language.is_code() {
@@ -952,6 +983,45 @@ impl<'a> Indexer<'a> {
                 }
                 Err(e) => {
                     debug!("parsing failed for {}: {}", rel_path, e);
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                }
+            }
+        } else if language.is_config() {
+            let content_str = String::from_utf8_lossy(&content);
+            // Never above the general cap: that one would trim afterwards
+            // without recording the total.
+            let limit = self
+                .config
+                .index
+                .max_config_symbols_per_file
+                .min(self.config.index.max_symbols_per_file);
+            match self
+                .parser
+                .parse_config(&content_str, language, &file_id, &rel_path, limit)
+            {
+                Ok(result) => {
+                    if result.has_errors {
+                        debug!(
+                            "{}: config parsed with syntax errors; symbols may be incomplete",
+                            rel_path
+                        );
+                        entry.config_parse_errors = true;
+                    }
+                    if result.total > result.symbols.len() {
+                        debug!(
+                            "{}: kept {} of {} config symbols (max_config_symbols_per_file)",
+                            rel_path,
+                            result.symbols.len(),
+                            result.total
+                        );
+                        entry.config_symbols_total = Some(result.total);
+                    }
+                    // Config yields no imports, comments or calls: it never
+                    // feeds the import/call graphs or the memory layer.
+                    (result.symbols, Vec::new(), Vec::new(), Vec::new())
+                }
+                Err(e) => {
+                    debug!("config parsing failed for {}: {}", rel_path, e);
                     (Vec::new(), Vec::new(), Vec::new(), Vec::new())
                 }
             }
@@ -1541,11 +1611,7 @@ impl<'a> Indexer<'a> {
             if is_config_file(&f.path) {
                 continue;
             }
-            let ext = Path::new(&f.path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            if Language::from_extension(ext).is_code() {
+            if Language::from_path(Path::new(&f.path)).is_code() {
                 code_by_dir.entry(parent_dir(&f.path)).or_default().push(f);
             }
         }
@@ -1970,6 +2036,8 @@ mod tests {
             tags: Vec::new(),
             purpose: None,
             purpose_source: None,
+            config_symbols_total: None,
+            config_parse_errors: false,
         };
         let files = vec![
             entry("t", "tests/parser.rs"),
@@ -2026,6 +2094,26 @@ mod tests {
         assert!(!is_binary_extension(Path::new("src/main.rs")));
         assert!(!is_binary_extension(Path::new("README.md")));
         assert!(!is_binary_extension(Path::new("noext")));
+    }
+
+    #[test]
+    fn lock_and_state_files_are_recognised_by_name() {
+        for name in [
+            "Cargo.lock",
+            "web/package-lock.json",
+            "npm-shrinkwrap.json",
+            "src/App/packages.lock.json",
+            "pnpm-lock.yaml",
+            "go.sum",
+            "infra/.terraform.lock.hcl",
+            "terraform.tfstate",
+            "terraform.tfstate.backup",
+        ] {
+            assert!(is_lock_or_state_file(Path::new(name)), "{name}");
+        }
+        for name in ["package.json", "Cargo.toml", "main.tf", "lock.rs"] {
+            assert!(!is_lock_or_state_file(Path::new(name)), "{name}");
+        }
     }
 
     #[test]

@@ -245,6 +245,45 @@ fn targeted_reindex_matches_full_index_with_same_file_calls() {
     assert_equivalent(config);
 }
 
+fn package_json(deps: usize) -> String {
+    let deps: Vec<String> = (0..deps)
+        .map(|i| format!("    \"dep-{i}\": \"^1.{i}.0\""))
+        .collect();
+    format!(
+        "{{\n  \"name\": \"app\",\n  \"dependencies\": {{\n{}\n  }}\n}}\n",
+        deps.join(",\n")
+    )
+}
+
+/// Config symbols and the cap's recorded total survive targeted reindexes:
+/// a package.json over `max_config_symbols_per_file`, edited to a new total.
+#[test]
+fn targeted_reindex_matches_full_index_for_config_symbols() {
+    let before_json = package_json(60);
+    let after_json = package_json(70);
+    let mut before: Vec<(&str, &str)> = TREE.to_vec();
+    before.push(("app/package.json", &before_json));
+    let edits: &[Edit] = &[("app/package.json", Some(&after_json))];
+
+    let (only, incremental, full) = reindex_three_ways(&KungfuConfig::default(), &before, edits);
+    assert_same(&only, &full, "index_only");
+    assert_same(&incremental, &full, "index_incremental");
+
+    // Not vacuous: the cap trimmed and recorded the edited total (name +
+    // dependencies + 70 entries).
+    assert_eq!(
+        full.symbols
+            .iter()
+            .filter(|s| s.contains("\"path\":\"app/package.json\""))
+            .count(),
+        50
+    );
+    assert!(full
+        .files
+        .iter()
+        .any(|f| f.contains("app/package.json") && f.contains("\"config_symbols_total\":72")));
+}
+
 /// Known gap (see `delta` module docs): an untouched caller gains no edge to
 /// a name that the edit made resolvable. A full index links it.
 #[test]

@@ -511,18 +511,121 @@ mod tests {
         };
 
         let by_symbol = query("compute_widget_total");
-        let top = &by_symbol[0];
+        let top = &by_symbol["results"][0];
         assert_eq!(top["path"], "src/engine.rs");
         assert_eq!(top["match"], "symbol: compute_widget_total");
 
         let by_path = query("widget");
-        let top = &by_path[0];
+        let top = &by_path["results"][0];
         assert_eq!(top["path"], "src/widget.rs");
         assert_eq!(top["match"], "path");
 
         let none = query("zzqx");
         assert_eq!(none["results"], serde_json::json!([]));
         assert!(none["hint"].is_string());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn search_shapes_are_stable_and_config_ranking_is_declared() {
+        let tmp = temp_project("config_ranking");
+        std::fs::write(tmp.join("package.json"), "{\n  \"widget_total\": 3\n}\n").unwrap();
+        kungfu_core::KungfuService::open(&tmp)
+            .unwrap()
+            .index_full()
+            .unwrap();
+        let mcp = KungfuMcp::new(tmp.clone());
+        let param = |q: &str| QueryParam {
+            query: q.into(),
+            budget: None,
+            scope: None,
+        };
+
+        // Demoting query: object with results + the ranking note.
+        for v in [
+            json(tools::search::find_symbol(&mcp, param("widget total"))),
+            json(tools::search::find_files(&mcp, param("widget total"))),
+        ] {
+            assert_eq!(v["results"][0]["path"], "src/engine.rs", "{v}");
+            assert_eq!(v["config_ranking"]["status"], "penalized", "{v}");
+            assert!(v["config_ranking"]["hint"].is_string());
+        }
+
+        // No config symbol involved: the same object shape, no note.
+        for v in [
+            json(tools::search::find_symbol(&mcp, param("bare"))),
+            json(tools::search::find_files(&mcp, param("bare"))),
+        ] {
+            assert!(v["results"].is_array(), "{v}");
+            assert!(v.get("config_ranking").is_none(), "{v}");
+        }
+
+        let packet = json(tools::context::ask_context(
+            &mcp,
+            AskContextParam {
+                query: "widget total".into(),
+                budget: None,
+                scope: None,
+                include: None,
+            },
+        ));
+        assert_eq!(
+            packet["retrieval"]["config_ranking"]["status"], "penalized",
+            "{}",
+            packet["retrieval"]
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn scoped_searches_compute_the_config_note_for_the_scope() {
+        let tmp = temp_project("config_scope");
+        for i in 0..6 {
+            std::fs::write(
+                tmp.join(format!("src/net{i}.rs")),
+                format!("pub fn retry_backoff_{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(tmp.join("src/settings.yaml"), "retry_count: 3\n").unwrap();
+        std::fs::create_dir_all(tmp.join("cfg")).unwrap();
+        std::fs::write(tmp.join("cfg/app.yaml"), "widget_count: 2\n").unwrap();
+        kungfu_core::KungfuService::open(&tmp)
+            .unwrap()
+            .index_full()
+            .unwrap();
+        let mcp = KungfuMcp::new(tmp.clone());
+        let param = |q: &str, scope: &str| QueryParam {
+            query: q.into(),
+            budget: None,
+            scope: Some(scope.into()),
+        };
+
+        // find_files: the penalised in-scope settings.yaml falls below the
+        // 5-file cut; the note stays because it is true.
+        let files = json(tools::search::find_files(&mcp, param("retry", "src/")));
+        let paths: Vec<&str> = files["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].as_str().unwrap())
+            .collect();
+        assert!(!paths.contains(&"src/settings.yaml"), "{paths:?}");
+        assert_eq!(files["config_ranking"]["status"], "penalized", "{files}");
+
+        // find_symbol: scoped in core, so the note describes the scope —
+        // none for src/ (no config matches there), and cfg/ alone is all
+        // infrastructure config, so it ranks config equally and says so.
+        let src = json(tools::search::find_symbol(&mcp, param("widget", "src/")));
+        assert!(src.get("config_ranking").is_none(), "{src}");
+        assert!(src["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["path"].as_str().unwrap().starts_with("src/")));
+        let cfg = json(tools::search::find_symbol(&mcp, param("widget", "cfg/")));
+        assert_eq!(cfg["results"][0]["path"], "cfg/app.yaml", "{cfg}");
+        assert_eq!(cfg["config_ranking"]["status"], "config_heavy", "{cfg}");
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -553,8 +656,8 @@ mod tests {
         };
 
         let scoped = query("other/");
-        assert_eq!(scoped[0]["path"], "other/misc.rs");
-        assert_eq!(scoped[0]["match"], "symbol: widget_thing");
+        assert_eq!(scoped["results"][0]["path"], "other/misc.rs");
+        assert_eq!(scoped["results"][0]["match"], "symbol: widget_thing");
 
         let empty = query("nowhere/");
         assert_eq!(empty["results"], serde_json::json!([]));

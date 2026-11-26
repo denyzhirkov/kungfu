@@ -81,6 +81,86 @@ pub struct RetrievalInfo {
     /// enable it (e.g. `kungfu embeddings build`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub vector_skipped: Option<String>,
+    /// Present iff config-file symbols matched and the config ranking policy
+    /// acted on them (penalised below code, or put on equal terms by a
+    /// config-heavy project).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub config_ranking: Option<ConfigRankingNote>,
+}
+
+/// How config-file symbols (`config_key` / `config_block`) were ranked
+/// against code in one response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigRankingNote {
+    pub status: ConfigRankingStatus,
+    /// Multiplier applied to config-symbol scores; 1.0 when not penalised.
+    pub factor: f64,
+    /// One sentence: what happened and how to change it. Shorter at `tiny`.
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigRankingStatus {
+    /// Config symbols scored below code by `factor`.
+    Penalized,
+    /// Config-heavy project: config symbols compete with code on equal terms.
+    ConfigHeavy,
+}
+
+impl ConfigRankingNote {
+    pub fn penalized(factor: f64, budget: Budget) -> Self {
+        let hint = if budget == Budget::Tiny {
+            format!("config ranked x{factor} below code; name the format or file to lift")
+        } else {
+            format!(
+                "config symbols ranked x{factor} below code; name the format or file \
+                 (yaml, terraform, package.json) to rank them equally"
+            )
+        };
+        Self {
+            status: ConfigRankingStatus::Penalized,
+            factor,
+            hint,
+        }
+    }
+
+    /// `fixtures_penalized`: config under test paths was still ranked below code.
+    pub fn config_heavy(budget: Budget, fixtures_penalized: bool) -> Self {
+        let hint = match (budget == Budget::Tiny, fixtures_penalized) {
+            (true, false) => "config-heavy project: config ranks equal to code",
+            (true, true) => "config-heavy project: config ranks equal to code, test fixtures below",
+            (false, false) => "config-heavy project — config symbols rank on equal terms with code",
+            (false, true) => {
+                "config-heavy project — config symbols rank on equal terms with code; \
+                 config under test paths still ranks below it"
+            }
+        };
+        Self {
+            status: ConfigRankingStatus::ConfigHeavy,
+            factor: 1.0,
+            hint: hint.to_string(),
+        }
+    }
+
+    /// The ranking was lifted (config query or config-heavy project) and only
+    /// config under test paths was penalised: fixtures are not the project's
+    /// configuration.
+    pub fn test_config_penalized(factor: f64, budget: Budget) -> Self {
+        let hint = if budget == Budget::Tiny {
+            format!("test-fixture config ranked x{factor} below code")
+        } else {
+            format!(
+                "config under test paths ranked x{factor} below code (fixtures, not project \
+                 config); other config ranks equally"
+            )
+        };
+        Self {
+            status: ConfigRankingStatus::Penalized,
+            factor,
+            hint,
+        }
+    }
 }
 
 /// A surfaced conflict between active memory entries — projected to the packet level.

@@ -95,6 +95,13 @@ fn default_languages() -> Vec<String> {
         "markdown".into(),
         "yaml".into(),
         "toml".into(),
+        "hcl".into(),
+        "csv".into(),
+        "env".into(),
+        "ini".into(),
+        "xml".into(),
+        "dockerfile".into(),
+        "makefile".into(),
     ]
 }
 
@@ -158,6 +165,14 @@ pub struct IndexConfig {
     /// because the file itself is small. Backstop against index blow-ups.
     #[serde(default = "default_max_symbols_per_file")]
     pub max_symbols_per_file: usize,
+
+    /// Cap on symbols kept from a single config file (JSON, YAML, TOML, …).
+    /// Over the cap, top-level nodes are kept first and the rest of the budget
+    /// goes to their direct children in document order; the file's total is
+    /// recorded so retrieval can say "showing N of M". 0 keeps none (the total
+    /// is still recorded).
+    #[serde(default = "default_max_config_symbols_per_file")]
+    pub max_config_symbols_per_file: usize,
 }
 
 fn default_store_backend() -> String {
@@ -172,6 +187,9 @@ fn default_max_file_bytes() -> u64 {
 fn default_max_symbols_per_file() -> usize {
     10_000
 }
+fn default_max_config_symbols_per_file() -> usize {
+    50
+}
 
 impl Default for IndexConfig {
     fn default() -> Self {
@@ -180,6 +198,7 @@ impl Default for IndexConfig {
             incremental: true,
             max_file_bytes: default_max_file_bytes(),
             max_symbols_per_file: default_max_symbols_per_file(),
+            max_config_symbols_per_file: default_max_config_symbols_per_file(),
         }
     }
 }

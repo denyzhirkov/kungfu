@@ -34,7 +34,10 @@ pub use project_memory::{AbsorbReport, MemoryMeta, ProjectMemoryStore};
 ///   annotations merged from `.kungfu/annotations.json` at index time.
 /// - 6: one shared test-path predicate (`kungfu_types::test_paths`) drives
 ///   TestFor relations and the `tests` file tag; stale indexes rebuild once.
-pub const INDEX_SCHEMA_VERSION: u32 = 6;
+/// - 7: config files (JSON, YAML, TOML, …) indexed as `config_key` /
+///   `config_block` symbols + FileEntry.config_symbols_total; lock/state files
+///   recorded by name only.
+pub const INDEX_SCHEMA_VERSION: u32 = 7;
 
 /// Atomically replace `path` with `contents`: write a sibling temp file, then
 /// rename it over the target. Rename is atomic on the same filesystem, so a

@@ -1,0 +1,31 @@
+[workspace]
+members = ["crates/a", "crates/b"]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+
+[package]
+name = "demo"
+version.workspace = true
+
+[dependencies]
+serde = "1"
+tokio = { version = "1", features = ["full"] }
+
+[dependencies.regex]
+version = "1"
+
+[[bin]]
+name = "one"
+
+[[bin]]
+name = "two"
+
+[profile.release.package.foo]
+opt-level = 3

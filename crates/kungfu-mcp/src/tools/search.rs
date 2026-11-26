@@ -8,10 +8,11 @@ pub(crate) fn find_symbol(mcp: &KungfuMcp, params: QueryParam) -> Result<String,
     mcp.cached_scoped("find_symbol", &query, &budget_str, scope.as_deref(), || {
         let budget = parse_budget(Some(&budget_str));
         let service = mcp.service()?;
-        let results = service
-            .find_symbol(&query, budget)
+        let ranked = service
+            .find_symbol_ranked(&query, budget, scope.as_deref())
             .map_err(|e| e.to_string())?;
-        let items: Vec<_> = results
+        let items: Vec<_> = ranked
+            .results
             .iter()
             .map(|r| {
                 serde_json::json!({
@@ -31,7 +32,7 @@ pub(crate) fn find_symbol(mcp: &KungfuMcp, params: QueryParam) -> Result<String,
             }))
             .map_err(|e| e.to_string());
         }
-        serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
+        ranked_object(items, ranked.config_ranking)
     })
 }
 
@@ -42,10 +43,11 @@ pub(crate) fn find_files(mcp: &KungfuMcp, params: QueryParam) -> Result<String, 
     mcp.cached_scoped("find_files", &query, &budget_str, scope.as_deref(), || {
         let budget = parse_budget(Some(&budget_str));
         let service = mcp.service()?;
-        let results = service
+        let ranked = service
             .find_files(&query, budget, scope.as_deref())
             .map_err(|e| e.to_string())?;
-        let items: Vec<_> = results
+        let items: Vec<_> = ranked
+            .results
             .iter()
             .map(|r| {
                 serde_json::json!({
@@ -67,7 +69,7 @@ pub(crate) fn find_files(mcp: &KungfuMcp, params: QueryParam) -> Result<String, 
             }))
             .map_err(|e| e.to_string());
         }
-        serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
+        ranked_object(items, ranked.config_ranking)
     })
 }
 
@@ -89,4 +91,17 @@ pub(crate) fn semantic_search(mcp: &KungfuMcp, params: QueryParam) -> Result<Str
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         },
     )
+}
+
+/// Always `{results, config_ranking?}` — the same object shape as the empty
+/// result, so the shape never depends on whether a config symbol matched.
+fn ranked_object(
+    items: Vec<serde_json::Value>,
+    note: Option<kungfu_types::context::ConfigRankingNote>,
+) -> Result<String, String> {
+    let mut value = serde_json::json!({ "results": items });
+    if let Some(note) = note {
+        value["config_ranking"] = serde_json::json!(note);
+    }
+    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
 }

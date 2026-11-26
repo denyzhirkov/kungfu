@@ -45,8 +45,11 @@ impl KungfuService {
                 .collect()
         } else {
             let symbols = self.store().load_symbols()?;
+            // A large config object (`dependencies`, a translations table) is
+            // long but not complex — it would crowd out real code hotspots.
             symbols
                 .into_iter()
+                .filter(|s| !s.kind.is_config())
                 .map(|s| {
                     let lines = s.span.end_line.saturating_sub(s.span.start_line) + 1;
                     let file_churn = churn_counts.get(&s.path).copied();
@@ -218,7 +221,9 @@ impl KungfuService {
                 .push(sym);
         }
 
-        // Collect unique changed symbol names overlapping diff hunks.
+        // Collect unique changed symbol names overlapping diff hunks. Config
+        // keys are skipped: the walk is by name, so a changed `version` key
+        // would seed every code symbol called `version`.
         let mut changed_names: Vec<&str> = Vec::new();
         let mut seen_names: HashSet<&str> = HashSet::new();
         for (file_path, ranges) in changed_lines {
@@ -226,6 +231,7 @@ impl KungfuService {
                 .get(file_path.as_str())
                 .into_iter()
                 .flatten()
+                .filter(|s| !s.kind.is_config())
             {
                 let overlaps = ranges
                     .iter()
@@ -889,7 +895,9 @@ impl<'a> DepGraph<'a> {
         }
         let mut symbol_map: HashMap<&str, &Symbol> = HashMap::with_capacity(symbols.len());
         let mut ids_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
-        for s in symbols {
+        // Config keys have no dependents; seeding a walk from every
+        // `package.json` that has a `version` key would only add noise.
+        for s in symbols.iter().filter(|s| !s.kind.is_config()) {
             id_to_path.insert(&s.id, &s.path);
             symbol_map.insert(&s.id, s);
             ids_by_name.entry(s.name.as_str()).or_default().push(&s.id);
@@ -1005,5 +1013,47 @@ impl<'a> DepGraph<'a> {
             entries,
             test_files,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kungfu_types::symbol::Span;
+
+    fn sym(id: &str, name: &str, kind: SymbolKind, path: &str) -> Symbol {
+        Symbol {
+            id: id.to_string(),
+            file_id: format!("f:{path}"),
+            name: name.to_string(),
+            kind,
+            language: String::new(),
+            path: path.to_string(),
+            signature: None,
+            span: Span {
+                start_line: 1,
+                end_line: 1,
+                start_col: 0,
+                end_col: 0,
+            },
+            parent_symbol_id: None,
+            exported: false,
+            visibility: None,
+            doc_summary: None,
+        }
+    }
+
+    #[test]
+    fn dep_graph_ignores_config_keys() {
+        let symbols = vec![
+            sym("s:1", "version", SymbolKind::ConfigKey, "package.json"),
+            sym("s:2", "name", SymbolKind::ConfigKey, "package.json"),
+            sym("s:3", "name", SymbolKind::Function, "src/lib.rs"),
+        ];
+        let graph = DepGraph::build(&[], &symbols, &[]);
+        // A name that exists only as a config key is not found, as before.
+        assert!(graph.walk("version", 3).is_none());
+        // A shared name walks from the code symbol only.
+        assert_eq!(graph.ids_by_name.get("name"), Some(&vec!["s:3"]));
     }
 }

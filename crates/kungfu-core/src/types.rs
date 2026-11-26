@@ -34,6 +34,14 @@ pub struct FileOutline {
     /// Heuristic tags from path/import/symbol signals — structural provenance.
     pub tags: Vec<String>,
     pub symbols: Vec<SymbolOutline>,
+    /// Config file trimmed by `[index] max_config_symbols_per_file`: how many
+    /// config symbols it has in total (`symbols` holds the first ones).
+    pub config_symbols_total: Option<usize>,
+    /// The config parser recovered from syntax errors; symbols may be incomplete.
+    pub config_parse_errors: bool,
+    /// Declared limits of this outline (the two above, in words, with the next
+    /// action); absent when the outline is complete.
+    pub note: Option<String>,
 }
 
 pub struct SymbolOutline {
@@ -138,4 +146,12 @@ pub struct HotspotEntry {
     pub kind: Option<String>,
     pub churn: Option<usize>,
     pub score: f64,
+}
+
+/// A ranked page plus how config-file symbols were ranked in it.
+pub struct Ranked<T> {
+    pub results: Vec<T>,
+    /// Present when config symbols matched and the ranking policy acted on
+    /// them (penalised, or put on equal terms by a config-heavy project).
+    pub config_ranking: Option<kungfu_types::context::ConfigRankingNote>,
 }

@@ -23,7 +23,10 @@ impl KungfuService {
     pub fn edit_context(&self, name: &str, scope: Option<&str>) -> Result<serde_json::Value> {
         let search = self.search();
 
-        let mut candidates = search.find_symbol(name, Budget::Full)?;
+        // A name lookup resolves the symbol the user named: no config penalty.
+        let mut candidates = search
+            .find_symbol_ranked(name, Budget::Full, None, kungfu_search::ConfigRanking::Raw)?
+            .hits;
         if let Some(prefix) = scope {
             candidates.retain(|c| c.item.path.starts_with(prefix));
         }

@@ -12,8 +12,20 @@ pub mod typescript_parser;
 
 use anyhow::{bail, Result};
 use kungfu_types::file::Language;
+use std::borrow::Cow;
 
 mod calls;
+pub mod config_symbols;
+mod csv_config;
+mod dockerfile_config;
+mod env_config;
+mod hcl_config;
+mod ini_config;
+mod json_config;
+mod makefile_config;
+mod toml_config;
+mod xml_config;
+mod yaml_config;
 use kungfu_types::symbol::Symbol;
 
 /// Raw import extracted from source code.
@@ -69,6 +81,188 @@ pub struct ParseResult {
     pub calls: Vec<RawCall>,
     /// One-line file purpose from the module-level doc comment, if the file has one.
     pub module_doc: Option<String>,
+}
+
+/// Last-resort parse-time budget, per config file. The deterministic guards
+/// below (YAML indentation, XML nesting depth) run first and catch the known
+/// pathological inputs; this backstop only stops an unknown one from stalling
+/// an index run. Generous on purpose: a legitimate 2 MiB file parses in well
+/// under a second, and a file that times out loses all its symbols — a
+/// result that depends on machine load, so it must stay out of reach of real
+/// files even on a slow, busy machine.
+const CONFIG_PARSE_TIMEOUT_MICROS: u64 = 5_000_000;
+
+/// Longest leading run of indentation and block indicators (`- `, `? `,
+/// `: `) kept on a YAML line; longer lines are blanked before parsing (see
+/// [`blank_deep_yaml_lines`]). tree-sitter-yaml aborts the process
+/// (`length <= 1024` assertion when serialising its scanner state) once its
+/// indentation stack holds 254 entries. A stack entry needs a new column —
+/// except that a block sequence may sit at its parent mapping's column
+/// (`MAY_PUSH_SPC_SEQ_IND` in its scanner.c), so `k:` / `-` pairs one column
+/// apart push two entries per column. Measured with that shape: a 126-column
+/// run (253 entries) parses, 127 columns aborts. 60 columns allows at most
+/// 2 × 61 + 1 (an indented block scalar) = 123 entries, under half of 254 —
+/// and is still 30 levels of 2-space indentation.
+const MAX_YAML_BLOCK_INDENT: usize = 60;
+
+/// Deepest XML element nesting parsed. tree-sitter-xml keeps open tag names
+/// in a scanner state capped at 1024 bytes; past ~508 levels (fewer with
+/// longer names) it loses track, recovers from errors with no symbols, and
+/// gets superlinear: measured (debug build) 400 levels 12 ms with correct
+/// output, 800 levels 72 ms, 1600 levels 188 ms, 3200 levels 532 ms, 100k
+/// levels minutes — all past ~508 with no symbols. 400 keeps the guard below
+/// that cliff while real XML stays far below it.
+const MAX_XML_DEPTH: usize = 400;
+
+/// Whether XML element nesting goes deeper than `limit`, in one linear scan:
+/// `<name …>` opens, `</…>` closes, `<…/>` is self-contained; comments,
+/// CDATA, processing instructions and `<!…>` declarations are skipped.
+fn xml_nesting_exceeds(source: &str, limit: usize) -> bool {
+    /// Bytes up to and including the first `pat`, or all of `rest`.
+    fn through(rest: &[u8], pat: &[u8]) -> usize {
+        rest.windows(pat.len())
+            .position(|w| w == pat)
+            .map_or(rest.len(), |at| at + pat.len())
+    }
+    let bytes = source.as_bytes();
+    let (mut i, mut depth) = (0, 0usize);
+    while let Some(offset) = bytes[i..].iter().position(|&b| b == b'<') {
+        i += offset;
+        let rest = &bytes[i..];
+        if rest.starts_with(b"<!--") {
+            i += through(rest, b"-->");
+        } else if rest.starts_with(b"<![CDATA[") {
+            i += through(rest, b"]]>");
+        } else if rest.starts_with(b"<?") {
+            i += through(rest, b"?>");
+        } else if rest.starts_with(b"<!") {
+            // `<!DOCTYPE x [ <!ENTITY …> ]>`: the internal subset nests.
+            let mut brackets = 0usize;
+            let end = rest.iter().position(|&b| match b {
+                b'[' => {
+                    brackets += 1;
+                    false
+                }
+                b']' => {
+                    brackets = brackets.saturating_sub(1);
+                    false
+                }
+                b'>' => brackets == 0,
+                _ => false,
+            });
+            i += end.map_or(rest.len(), |at| at + 1);
+        } else if rest.starts_with(b"</") {
+            depth = depth.saturating_sub(1);
+            i += through(rest, b">");
+        } else if rest
+            .get(1)
+            .is_some_and(|&b| b.is_ascii_alphabetic() || b == b'_' || b == b':' || b >= 0x80)
+        {
+            // Find the tag's `>`, skipping quoted attribute values.
+            let mut quote = None;
+            let mut previous = 0u8;
+            let mut end = rest.len();
+            for (at, &b) in rest.iter().enumerate().skip(1) {
+                match quote {
+                    Some(q) if b == q => quote = None,
+                    Some(_) => {}
+                    None if b == b'"' || b == b'\'' => quote = Some(b),
+                    None if b == b'>' => {
+                        end = at + 1;
+                        break;
+                    }
+                    None => {}
+                }
+                previous = b;
+            }
+            if previous != b'/' {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            i += end;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// `source` with the content of every line whose [`yaml_block_indent`]
+/// exceeds [`MAX_YAML_BLOCK_INDENT`] removed — the line terminator stays, so
+/// every kept line keeps its row and its byte columns, which is all a symbol
+/// span records. Lines end at `\n`, `\r` or `\r\n`, as tree-sitter-yaml sees
+/// them. Borrowed when no line is that deep. Also returns how many lines were
+/// blanked. Only levels 1–2 are indexed, so the dropped lines (deeper than
+/// 30 levels of 2-space indentation) never reach the output.
+fn blank_deep_yaml_lines(source: &str) -> (Cow<'_, str>, usize) {
+    let bytes = source.as_bytes();
+    let mut copy: Option<String> = None;
+    let mut blanked = 0;
+    let mut start = 0;
+    loop {
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| b == b'\n' || b == b'\r')
+            .map_or(bytes.len(), |at| start + at);
+        let line = &source[start..end];
+        if yaml_block_indent(line) > MAX_YAML_BLOCK_INDENT {
+            copy.get_or_insert_with(|| source[..start].to_string());
+            blanked += 1;
+        } else if let Some(copy) = copy.as_mut() {
+            copy.push_str(line);
+        }
+        if end == bytes.len() {
+            break;
+        }
+        let next = if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
+            end + 2
+        } else {
+            end + 1
+        };
+        if let Some(copy) = copy.as_mut() {
+            copy.push_str(&source[end..next]);
+        }
+        start = next;
+    }
+    (copy.map_or(Cow::Borrowed(source), Cow::Owned), blanked)
+}
+
+/// Columns of indentation and block indicators before a YAML line's
+/// content. An indicator counts only when followed by whitespace or the end
+/// of the line, as in YAML itself, so `------` in a scalar does not.
+fn yaml_block_indent(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' => i += 1,
+            b'-' | b'?' | b':'
+                if bytes
+                    .get(i + 1)
+                    .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\r')) =>
+            {
+                i += 1
+            }
+            _ => break,
+        }
+    }
+    i
+}
+
+/// Symbols extracted from a config file by [`Parser::parse_config`].
+pub struct ConfigParseResult {
+    /// At most `limit` config symbols in document order (a parent precedes
+    /// its children). Over the limit, level-1 nodes are kept first, then
+    /// level-2 nodes fill what is left.
+    pub symbols: Vec<Symbol>,
+    /// How many config symbols the file has before the cap — equal to
+    /// `symbols.len()` when nothing was trimmed.
+    pub total: usize,
+    /// The grammar hit syntax errors and recovered (JSON5 in a `.json`, a
+    /// missing comma), so `symbols` may be incomplete.
+    pub has_errors: bool,
 }
 
 /// Classify a comment's text into a CommentKind.
@@ -463,6 +657,9 @@ fn first_sentence(text: &str, max_len: usize) -> String {
 
 pub struct Parser {
     ts_parser: tree_sitter::Parser,
+    /// [`CONFIG_PARSE_TIMEOUT_MICROS`]; a field so tests can reach the
+    /// timeout path without waiting seconds.
+    config_timeout_micros: u64,
 }
 
 impl Default for Parser {
@@ -475,6 +672,7 @@ impl Parser {
     pub fn new() -> Self {
         Self {
             ts_parser: tree_sitter::Parser::new(),
+            config_timeout_micros: CONFIG_PARSE_TIMEOUT_MICROS,
         }
     }
 
@@ -586,12 +784,345 @@ impl Parser {
             module_doc: extract_module_doc(source, language),
         })
     }
+
+    /// Extract config symbols (keys two levels deep, see [`config_symbols`])
+    /// from a file whose `language.is_config()`, keeping the first `limit` and
+    /// counting the rest. Config files yield no imports, comments or calls.
+    pub fn parse_config(
+        &mut self,
+        source: &str,
+        language: Language,
+        file_id: &str,
+        file_path: &str,
+        limit: usize,
+    ) -> Result<ConfigParseResult> {
+        let mut out = config_symbols::ConfigSymbols::new(language, file_id, file_path, limit);
+        let grammar: tree_sitter::Language = match language {
+            Language::Json => tree_sitter_json::LANGUAGE.into(),
+            Language::Yaml => tree_sitter_yaml::LANGUAGE.into(),
+            Language::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
+            Language::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
+            Language::Hcl => {
+                hcl_config::extract(source, &mut out);
+                return Ok(out.finish(false));
+            }
+            Language::Csv => {
+                csv_config::extract(source, &mut out);
+                return Ok(out.finish(false));
+            }
+            Language::Env => {
+                env_config::extract(source, &mut out);
+                return Ok(out.finish(false));
+            }
+            Language::Ini => {
+                ini_config::extract(source, &mut out);
+                return Ok(out.finish(false));
+            }
+            Language::Dockerfile => {
+                dockerfile_config::extract(source, &mut out);
+                return Ok(out.finish(false));
+            }
+            Language::Makefile => {
+                makefile_config::extract(source, &mut out);
+                return Ok(out.finish(false));
+            }
+            _ => bail!("not a config language: {}", language),
+        };
+
+        // Parse and extract from the same text: for YAML, lines nested deep
+        // enough to crash tree-sitter-yaml are blanked first.
+        let source: Cow<'_, str> = if language == Language::Yaml {
+            let (text, blanked) = blank_deep_yaml_lines(source);
+            if blanked > 0 {
+                tracing::debug!(
+                    "{file_path}: blanked {blanked} YAML lines nested deeper than \
+                     {MAX_YAML_BLOCK_INDENT} columns before parsing (only levels 1-2 are indexed)"
+                );
+            }
+            text
+        } else {
+            Cow::Borrowed(source)
+        };
+        let source = source.as_ref();
+        if language == Language::Xml && xml_nesting_exceeds(source, MAX_XML_DEPTH) {
+            tracing::debug!(
+                "{file_path}: skipped — XML elements nested deeper than \
+                 {MAX_XML_DEPTH} levels, which tree-sitter-xml cannot parse"
+            );
+            return Ok(out.finish(true));
+        }
+
+        self.ts_parser.set_language(&grammar)?;
+        self.ts_parser
+            .set_timeout_micros(self.config_timeout_micros);
+        let tree = self.ts_parser.parse(source, None);
+        // The timeout is for config files only; code parsing stays unbounded.
+        self.ts_parser.set_timeout_micros(0);
+        let Some(tree) = tree else {
+            // A timed-out parser would resume this document on the next call.
+            self.ts_parser.reset();
+            tracing::debug!(
+                "{file_path}: skipped — config parse timed out after {} ms (backstop)",
+                self.config_timeout_micros / 1000
+            );
+            return Ok(out.finish(true));
+        };
+        let root = tree.root_node();
+        if root.has_error() {
+            tracing::debug!("{file_path}: config has syntax errors — symbols may be incomplete");
+        }
+        match language {
+            Language::Json => json_config::extract(root, source, &mut out),
+            Language::Yaml => yaml_config::extract(root, source, &mut out),
+            Language::Toml => toml_config::extract(root, source, &mut out),
+            Language::Xml => xml_config::extract(root, source, &mut out),
+            _ => {}
+        }
+        Ok(out.finish(root.has_error()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use kungfu_types::symbol::SymbolKind;
+
+    fn nested_yaml(levels: usize) -> String {
+        (0..levels)
+            .map(|i| format!("{}k{i}:\n", "  ".repeat(i)))
+            .collect::<String>()
+            + &"  ".repeat(levels)
+            + "leaf: 1\n"
+    }
+
+    fn names(r: &ConfigParseResult) -> Vec<&str> {
+        r.symbols.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn yaml_nested_past_the_scanner_limit_keeps_its_shallow_symbols() {
+        // 1000 levels would abort tree-sitter-yaml; deep lines are blanked.
+        let mut parser = Parser::new();
+        let r = parser
+            .parse_config(&nested_yaml(1000), Language::Yaml, "f:1", "deep.yaml", 50)
+            .unwrap();
+        assert_eq!(names(&r), ["k0", "k0.k1"]);
+        assert!(!r.has_errors);
+        // Same shape on one line: `- - - …` is one blanked line.
+        let inline = "- ".repeat(1000) + "x\n";
+        let r = parser
+            .parse_config(&inline, Language::Yaml, "f:1", "deep.yaml", 50)
+            .unwrap();
+        assert!(r.symbols.is_empty());
+    }
+
+    #[test]
+    fn moderately_nested_yaml_still_parses() {
+        let mut parser = Parser::new();
+        let r = parser
+            .parse_config(&nested_yaml(40), Language::Yaml, "f:1", "ok.yaml", 50)
+            .unwrap();
+        assert!(!r.has_errors);
+        assert_eq!(names(&r), ["k0", "k0.k1"]);
+        // Long dashes inside a scalar are not block indicators.
+        let src = format!("a: |\n  {}\nb: 1\n", "-".repeat(500));
+        let r = parser
+            .parse_config(&src, Language::Yaml, "f:1", "ok.yaml", 50)
+            .unwrap();
+        assert!(!r.has_errors);
+    }
+
+    #[test]
+    fn crd_with_a_deep_schema_keeps_top_symbols_and_true_lines() {
+        let mut src = String::from(
+            "apiVersion: apiextensions.k8s.io/v1\n\
+             kind: CustomResourceDefinition\n\
+             metadata:\n  name: widgets.example.com\n\
+             spec:\n  group: example.com\n  versions:\n\
+             \x20   openAPIV3Schema:\n",
+        );
+        // 40 levels of 2-space indentation under the schema (columns 6..84).
+        for i in 0..40 {
+            src.push_str(&format!("{}p{i}:\n", "  ".repeat(i + 3)));
+        }
+        src.push_str(&format!("{}type: string\n", "  ".repeat(43)));
+        let scope_line = src.lines().count() + 1;
+        src.push_str("  scope: Namespaced\nstatus:\n  acceptedNames: {}\n");
+
+        let (blanked_text, blanked) = blank_deep_yaml_lines(&src);
+        assert!(blanked > 0);
+        assert_eq!(blanked_text.lines().count(), src.lines().count());
+
+        let r = Parser::new()
+            .parse_config(&src, Language::Yaml, "f:1", "crd.yaml", 50)
+            .unwrap();
+        assert!(!r.has_errors);
+        let names = names(&r);
+        for expected in [
+            "apiVersion",
+            "kind",
+            "metadata.name",
+            "spec.group",
+            "spec.scope",
+            "status",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+        let line = |name: &str| {
+            r.symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap()
+                .span
+                .start_line
+        };
+        assert_eq!(line("kind"), 2);
+        assert_eq!(line("spec.scope"), scope_line);
+        assert_eq!(line("status"), scope_line + 1);
+    }
+
+    #[test]
+    fn yaml_block_indent_counts_only_indicators_followed_by_space() {
+        assert_eq!(yaml_block_indent("  - ? key: v"), 6);
+        assert_eq!(yaml_block_indent("    -\r"), 5);
+        assert_eq!(yaml_block_indent("  ------"), 2);
+        assert_eq!(yaml_block_indent("  -x"), 2);
+        assert_eq!(yaml_block_indent(""), 0);
+    }
+
+    #[test]
+    fn yaml_with_lone_cr_line_breaks_is_guarded() {
+        // tree-sitter-yaml treats `\r` as a newline; 300 levels would abort.
+        let src: String = (0..300)
+            .map(|i| format!("{}k{i}:\r", " ".repeat(i)))
+            .collect();
+        let (text, blanked) = blank_deep_yaml_lines(&src);
+        assert_eq!(blanked, 300 - (MAX_YAML_BLOCK_INDENT + 1));
+        assert_eq!(text.matches('\r').count(), 300);
+        let r = Parser::new()
+            .parse_config(&src, Language::Yaml, "f:1", "cr.yaml", 50)
+            .unwrap();
+        assert_eq!(names(&r), ["k0", "k0.k1"]);
+        // tree-sitter numbers rows by `\n` only, so a CR-only file is one
+        // row to it, as it is to `str::lines`.
+        assert_eq!(r.symbols[1].span.start_line, 1);
+    }
+
+    #[test]
+    fn yaml_guard_limit_on_the_two_entries_per_column_shape() {
+        // `k:` / `-` pairs one column apart: map and sequence per column.
+        let shape = |levels: usize| -> String {
+            (0..levels)
+                .map(|i| format!("{0}k:\n{0}-\n", " ".repeat(i)))
+                .collect::<String>()
+                + &" ".repeat(levels)
+                + "x\n"
+        };
+        let mut parser = Parser::new();
+        let at_limit = parser
+            .parse_config(
+                &shape(MAX_YAML_BLOCK_INDENT),
+                Language::Yaml,
+                "f:1",
+                "a.yaml",
+                50,
+            )
+            .unwrap();
+        assert!(!at_limit.has_errors);
+        assert!(!at_limit.symbols.is_empty());
+        // 127 levels aborts tree-sitter-yaml unguarded; blanked, it parses.
+        let over = parser
+            .parse_config(&shape(127), Language::Yaml, "f:1", "a.yaml", 50)
+            .unwrap();
+        assert!(!over.symbols.is_empty());
+        assert_eq!(over.symbols[0].name, "k");
+    }
+
+    #[test]
+    fn xml_nesting_scan() {
+        let nested = |depth: usize| "<a>".repeat(depth) + &"</a>".repeat(depth);
+        assert!(!xml_nesting_exceeds(&nested(MAX_XML_DEPTH), MAX_XML_DEPTH));
+        assert!(xml_nesting_exceeds(
+            &nested(MAX_XML_DEPTH + 1),
+            MAX_XML_DEPTH
+        ));
+        // Siblings, self-closing tags, comments, CDATA, PIs and DOCTYPE
+        // do not nest.
+        let wide = "<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY e \"x\">]><r>".to_string()
+            + &"<a/><b x=\"1>2\"></b><!-- <c> --><![CDATA[<d>]]>".repeat(1000)
+            + "</r>";
+        assert!(!xml_nesting_exceeds(&wide, 2));
+        assert!(xml_nesting_exceeds("<a><b><c/></b></a>", 1));
+    }
+
+    #[test]
+    fn deep_xml_is_guarded_quickly_and_the_parser_stays_usable() {
+        let depth = 100_000;
+        let xml = "<a>".repeat(depth) + &"</a>".repeat(depth);
+        let mut parser = Parser::new();
+        let started = std::time::Instant::now();
+        let r = parser
+            .parse_config(&xml, Language::Xml, "f:1", "deep.xml", 50)
+            .unwrap();
+        assert!(r.has_errors && r.symbols.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // A normal XML file still parses.
+        let ok = parser
+            .parse_config("<root><child/></root>", Language::Xml, "f:3", "ok.xml", 50)
+            .unwrap();
+        assert!(!ok.has_errors);
+        assert!(!ok.symbols.is_empty());
+    }
+
+    #[test]
+    fn timeout_flags_the_file_and_does_not_leak_into_code_parsing() {
+        let mut parser = Parser::new();
+        parser.config_timeout_micros = 1_000;
+        let big: String = (0..50_000).map(|i| format!("\"k{i}\": {i},")).collect();
+        let json = format!("{{{big}\"end\": 0}}");
+        let r = parser
+            .parse_config(&json, Language::Json, "f:1", "big.json", 50)
+            .unwrap();
+        assert!(r.has_errors && r.symbols.is_empty());
+        assert_eq!(parser.ts_parser.timeout_micros(), 0);
+        // The halted parse is not resumed by the next call.
+        let code = parser
+            .parse("pub fn after() {}\n", Language::Rust, "f:2", "a.rs")
+            .unwrap();
+        assert!(code.symbols.iter().any(|s| s.name == "after"));
+        let small = parser
+            .parse_config("{\"a\": 1}", Language::Json, "f:3", "a.json", 50)
+            .unwrap();
+        assert!(!small.has_errors);
+        assert_eq!(small.symbols.len(), 1);
+    }
+
+    #[test]
+    fn every_config_language_dispatches() {
+        // Each grammar must load into the workspace tree-sitter (ABI check
+        // happens at set_language), and each format must be wired.
+        let mut parser = Parser::new();
+        for lang in [
+            Language::Json,
+            Language::Yaml,
+            Language::Toml,
+            Language::Xml,
+            Language::Hcl,
+            Language::Csv,
+            Language::Env,
+            Language::Ini,
+            Language::Dockerfile,
+            Language::Makefile,
+        ] {
+            assert!(lang.is_config());
+            parser
+                .parse_config("", lang, "f:1", "x", 50)
+                .unwrap_or_else(|e| panic!("{lang}: {e}"));
+        }
+        assert!(parser
+            .parse_config("", Language::Rust, "f:1", "x", 50)
+            .is_err());
+    }
 
     #[test]
     fn first_sentence_truncates_on_char_boundary() {

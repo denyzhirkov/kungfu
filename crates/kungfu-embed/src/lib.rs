@@ -339,18 +339,38 @@ impl EmbeddingStore {
     /// Top-K symbol IDs by cosine similarity to `query`. Both query and stored vectors
     /// are expected to be L2-normalised — cosine reduces to dot product.
     pub fn top_k(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
+        self.top_k_weighted(query, k, |_| 1.0)
+    }
+
+    /// Top-K ids ranked by `weight(id) * cosine`: the weight applies before the
+    /// sort and the cut, so a down-weighted id cannot take a slot from one that
+    /// outranks it after weighting. Returns the raw cosine, in weighted order
+    /// (callers build their own scores from it). The sort is stable; with every
+    /// weight 1.0 this is exactly [`top_k`](Self::top_k).
+    pub fn top_k_weighted(
+        &self,
+        query: &[f32],
+        k: usize,
+        weight: impl Fn(&str) -> f32,
+    ) -> Vec<(String, f32)> {
         debug_assert_eq!(query.len(), self.manifest.dim);
-        let mut scored: Vec<(&String, f32)> = self
+        // (id, weighted cosine, raw cosine)
+        let mut scored: Vec<(&String, f32, f32)> = self
             .manifest
             .offsets
             .iter()
-            .filter_map(|(id, row)| self.vector(*row).map(|v| (id, cosine(query, v))))
+            .filter_map(|(id, row)| {
+                self.vector(*row).map(|v| {
+                    let cos = cosine(query, v);
+                    (id, cos * weight(id), cos)
+                })
+            })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored
             .into_iter()
             .take(k)
-            .map(|(id, s)| (id.clone(), s))
+            .map(|(id, _, cos)| (id.clone(), cos))
             .collect()
     }
 }
@@ -525,6 +545,88 @@ mod tests {
         let top = store.top_k(&[0.6, 0.8], 1);
         assert_eq!(top[0].0, "c");
 
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    fn temp_store(tag: &str, rows: &[(&str, f32)]) -> (PathBuf, EmbeddingStore) {
+        let tmp = std::env::temp_dir().join(format!("kungfu_embed_{tag}_{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut m = EmbeddingManifest::new("test-model", 2);
+        // Unit vectors at the given cosine to the query [1, 0].
+        for (id, cos) in rows {
+            let v = [*cos, (1.0 - cos * cos).sqrt()];
+            append_vector(&tmp, &mut m, id, id, &v).unwrap();
+        }
+        m.save(&tmp).unwrap();
+        let store = EmbeddingStore::load(&tmp).unwrap().unwrap();
+        (tmp, store)
+    }
+
+    #[test]
+    fn weighted_top_k_applies_weights_before_the_cut() {
+        let (tmp, store) = temp_store(
+            "weighted",
+            &[
+                ("cfg:a", 0.95),
+                ("cfg:b", 0.9),
+                ("code:a", 0.8),
+                ("code:b", 0.7),
+            ],
+        );
+        // Unweighted, the two config rows fill a window of 2.
+        let plain: Vec<String> = store
+            .top_k(&[1.0, 0.0], 2)
+            .into_iter()
+            .map(|h| h.0)
+            .collect();
+        assert_eq!(plain, ["cfg:a", "cfg:b"]);
+
+        let weighted = store.top_k_weighted(&[1.0, 0.0], 2, |id| {
+            if id.starts_with("cfg:") {
+                0.6
+            } else {
+                1.0
+            }
+        });
+        let ids: Vec<&str> = weighted.iter().map(|h| h.0.as_str()).collect();
+        assert_eq!(ids, ["code:a", "code:b"]);
+        // The raw cosine is returned, not the weighted one.
+        assert!((weighted[0].1 - 0.8).abs() < 1e-6);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn unit_weights_equal_plain_top_k_bit_for_bit() {
+        let (tmp, store) = temp_store(
+            "unit",
+            &[("a", 0.5), ("b", 0.9), ("c", 0.9), ("d", 0.1), ("e", 0.7)],
+        );
+        // The pre-weighting `top_k`, verbatim: the reference for bit-identity.
+        let reference = |k: usize| -> Vec<(String, f32)> {
+            let mut scored: Vec<(&String, f32)> = store
+                .manifest
+                .offsets
+                .iter()
+                .filter_map(|(id, row)| store.vector(*row).map(|v| (id, cosine(&[1.0, 0.0], v))))
+                .collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored
+                .into_iter()
+                .take(k)
+                .map(|(id, s)| (id.clone(), s))
+                .collect()
+        };
+        for k in [0, 1, 3, 5, 9] {
+            let plain = reference(k);
+            assert_eq!(plain, store.top_k(&[1.0, 0.0], k));
+            let weighted = store.top_k_weighted(&[1.0, 0.0], k, |_| 1.0);
+            assert_eq!(plain.len(), weighted.len());
+            for (p, w) in plain.iter().zip(&weighted) {
+                assert_eq!(p.0, w.0, "same order, ties included");
+                assert_eq!(p.1.to_bits(), w.1.to_bits(), "same value");
+            }
+        }
         std::fs::remove_dir_all(&tmp).ok();
     }
 
